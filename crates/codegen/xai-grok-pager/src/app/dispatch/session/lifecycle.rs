@@ -147,6 +147,15 @@ pub(in crate::app::dispatch) fn dispatch_new_session(app: &mut AppView) -> Vec<E
             return effects;
         }
     }
+    if xai_grok_shell::polycode::enabled() && matches!(app.active_view, ActiveView::Welcome) {
+        // Welcome forwards the first typed character via NewSession. It must
+        // create only the composer here, otherwise even typing /login starts
+        // an unauthenticated default Grok session before the slash can run.
+        let (id, effects) = create_local_session_view(app);
+        app.provider.local_target = Some(id);
+        app.provider.creating = false;
+        return effects;
+    }
     if app.external_acp {
         return dispatch_new_session_inner(app, None);
     }

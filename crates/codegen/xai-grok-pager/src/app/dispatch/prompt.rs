@@ -463,6 +463,15 @@ pub(super) fn dispatch_send_prompt_inner(
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    if app.provider.local_target == Some(id)
+        && !app.provider.creating
+        && (literal || !text.trim_start().starts_with('/'))
+    {
+        // Keep the draft (including images) local until an explicit provider/model
+        // choice establishes the native session. Management slashes still run below.
+        app.show_toast("Choose and sign in to a provider before sending this draft");
+        return super::provider::dispatch(app, crate::app::provider::Command::Menu { login: false });
+    }
     // Capture app-level fields before the mut-borrow on `agent`.
     let coding_data_sharing_opt_out_from_app = app.coding_data_retention_opt_out;
     let coding_data_sharing_lock_from_app = app.coding_data_sharing_lock();
