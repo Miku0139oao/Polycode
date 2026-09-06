@@ -134,6 +134,7 @@ class Terminal:
         self.data = bytearray()
         self.query_tail = b''
         self.frames = []
+        self.steps = []
         self.proc = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave,
                                      cwd=cwd, env=env, start_new_session=True)
         os.close(slave)
@@ -182,6 +183,8 @@ class Terminal:
         while time.monotonic() < end:
             self.alive()
             self.pump()
+            if 'Session creation failed:' in self.screen.text():
+                raise AssertionError('Native session creation failed; inspect screen and key trace')
             if predicate():
                 return
         raise AssertionError('Timed out: ' + description)
@@ -192,8 +195,10 @@ class Terminal:
     def send(self, keys):
         self.alive()
         self.frames.clear()
+        before = self.screen.text()
         os.write(self.master, keys)
         self.pump(.15)
+        self.steps.append({'keys_hex': keys.hex(), 'before': before, 'after': self.screen.text()})
 
     def command(self, text):
         self.send(text.encode() + b'\r')
@@ -378,6 +383,7 @@ def run_scenario(t, bridge, root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binary', type=Path, help='absolute path to a newly built native Rust binary')
+    parser.add_argument('--with-leader', action='store_true', help='exercise the default private native leader instead of the in-process path')
     parser.add_argument('--artifacts', type=Path, help='new directory for redacted transcript/report; defaults to /tmp/native-e2e-*')
     args = parser.parse_args()
     require_network_isolation()
@@ -387,7 +393,7 @@ def main():
     if any(artifacts.iterdir()):
         raise SystemExit('Artifact directory must be empty')
     terminal = None
-    report = {'passed': False, 'binary': str(binary)}
+    report = {'passed': False, 'binary': str(binary), 'with_leader': args.with_leader}
     with tempfile.TemporaryDirectory(prefix='native-fixture-') as temp:
         root = Path(temp)
         workspace = root / 'workspace'
@@ -401,9 +407,11 @@ def main():
                 native_preflight(binary, env)
                 with binary.open('rb') as executable:
                     report['binary_sha256'] = hashlib.file_digest(executable, 'sha256').hexdigest()
-                command = [str(binary), '--polycode-native', '--no-external-acp', '--no-leader',
+                command = [str(binary), '--polycode-native', '--no-external-acp',
                            '--fullscreen', '--no-auto-update', '--trust', '--always-approve',
                            '--disable-web-search', '--no-memory', '--cwd', str(workspace)]
+                if not args.with_leader:
+                    command.append('--no-leader')
                 terminal = Terminal(command, env, workspace)
                 report.update(run_scenario(terminal, bridge, root))
                 report['passed'] = True
@@ -415,6 +423,7 @@ def main():
                     terminal.close()
                     (artifacts / 'terminal.bin').write_bytes(bytes(terminal.data).replace(bridge.token.encode(), b'[REDACTED]'))
                     (artifacts / 'screen.txt').write_text(terminal.screen.text().replace(bridge.token, '[REDACTED]'))
+                    (artifacts / 'keys.json').write_text(json.dumps(terminal.steps, indent=2).replace(bridge.token, '[REDACTED]'))
                 report['mock'] = bridge.snapshot()
                 if report['mock']['errors'] or report['mock']['trap_requests']:
                     report['passed'] = False
