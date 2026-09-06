@@ -1,5 +1,6 @@
 //! No network or real credentials: exercise the production routing seam with sentinel auth.
 use super::*;
+use crate::agent::auth_method::{XAI_API_KEY_ENV_VAR, LEGACY_XAI_API_KEY_ENV_VAR};
 
 fn selected(provider: &str) -> SamplerConfig {
     SamplerConfig {
