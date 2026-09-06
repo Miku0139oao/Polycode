@@ -1,0 +1,15 @@
+{
+  "name": "@polycode/cursor-native-transport",
+  "version": "0.0.1-experimental",
+  "private": true,
+  "type": "module",
+  "exports": "./index.mjs",
+  "engines": { "node": ">=22" },
+  "packageManager": "bun@1.3.14",
+  "scripts": {
+    "test": "node --test provider.test.mjs",
+    "test:bun": "bun test provider.test.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
