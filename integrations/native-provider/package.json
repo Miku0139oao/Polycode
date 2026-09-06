@@ -1,0 +1,8 @@
+{
+  "name": "polycode-native-provider",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test test/*.test.mjs" },
+  "dependencies": { "proper-lockfile": "4.1.2" }
+}
