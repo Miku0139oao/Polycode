@@ -226,8 +226,10 @@ export function createCursorProvider({
     let session;
     if (last.role === 'tool') {
       const prefix = json(body.messages.slice(0, -2));
-      const matches = [...sessions].filter(s => s.account === account && s.config === config && s.base === prefix && s.expected && assistantMatches(body.messages.at(-2), s.expected) && last.tool_call_id === s.pending.toolCallId);
-      if (matches.length !== 1) throw fail('continuation_mismatch', 'No matching live Cursor tool call for this credential and transcript. Do not replay; restart explicitly.', 409);
+      // Establish unique ownership before configuration: a changed choice/model must not select
+      // another parked connection whose backend happened to reuse the exact assistant call.
+      const matches = [...sessions].filter(s => s.account === account && s.base === prefix && s.expected && assistantMatches(body.messages.at(-2), s.expected) && last.tool_call_id === s.pending.toolCallId);
+      if (matches.length !== 1 || matches[0].config !== config) throw fail('continuation_mismatch', 'No unique matching live Cursor tool call for this credential, transcript and configuration. Do not replay; restart explicitly.', 409);
       session = matches[0];
       if (session.busy) throw fail('session_busy', 'Cursor continuation is already in progress.', 409);
       session.busy = true; // Reserve before the first await; duplicate results can never be submitted twice.
@@ -286,13 +288,18 @@ export function createCursorProvider({
           session.pending = exec;
           session.expected = { role: 'assistant', content: content || null, tool_calls: [call] };
           if (mustCall && content) yield { delta: { content } };
+          // Each yield can suspend behind HTTP backpressure while cancellation/TTL drops the session.
+          checkSignal(session.controller.signal);
           yield { delta: { tool_calls: [{ index: 0, ...call }] } };
+          checkSignal(session.controller.signal);
           yield { finish_reason: 'tool_calls' };
+          checkSignal(session.controller.signal);
           return; // Do not close/return the remote iterator. It remains parked on this exact exec.
         } else if (event.type === 'done') {
           if (mustCall) throw fail('tool_choice_unfulfilled', 'Cursor completed without the required native tool intent; denied.');
-          drop(session);
+          // Normal cleanup waits for response release, so abort remains distinguishable from success.
           yield { finish_reason: 'stop', usage: event.usage };
+          checkSignal(session.controller.signal);
           return;
         }
       }
@@ -311,7 +318,10 @@ export function createCursorProvider({
         session.busy = false;
         // A completed HTTP response no longer owns cancellation of a parked remote turn.
         session.off?.(); session.off = undefined;
-        if (sessions.has(session)) touch(session);
+        if (sessions.has(session)) {
+          if (session.pending) touch(session);
+          else drop(session); // A remote text completion no longer needs its connection.
+        }
       }
       if (!body.stream) {
         let content = '', calls, finishReason, usage;
@@ -321,6 +331,7 @@ export function createCursorProvider({
           if (part.finish_reason) finishReason = part.finish_reason;
           if (part.usage !== undefined) usage = part.usage;
         }
+        checkSignal(session.controller.signal);
         release();
         return responseJSON({ id, object: 'chat.completion', created, model: body.model, choices: [{ index: 0, message: { role: 'assistant', content: content || null, ...(calls ? { tool_calls: calls } : {}) }, finish_reason: finishReason }], ...(usage === undefined ? {} : { usage }) });
       }
@@ -333,16 +344,18 @@ export function createCursorProvider({
           if (terminal) return;
           const emit = value => controller.enqueue(encoder.encode(`data: ${typeof value === 'string' ? value : JSON.stringify(value)}\n\n`));
           try {
+            checkSignal(session.controller.signal);
             // Even the initial role chunk waits for a permitted intent when a tool is mandatory.
             if (!started && !requiresTool(body)) { started = true; emit(chunk({ role: 'assistant' })); return; }
             const { value, done } = await iterator.next();
+            checkSignal(session.controller.signal); // Also guards successful usage/DONE after generator completion.
             if (!started) { started = true; emit(chunk({ role: 'assistant' })); }
             if (done) {
               terminal = true;
-              release();
               if (includeUsage) emit({ ...chunk({}), choices: [], usage: usage ?? null });
               emit('[DONE]');
               controller.close();
+              release();
             } else {
               if (value.usage !== undefined) usage = value.usage;
               emit(chunk(value.delta ?? {}, value.finish_reason ?? null));

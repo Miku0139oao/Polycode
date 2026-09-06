@@ -170,13 +170,23 @@ history and ordinary instruction rules; native session/history remain parent-own
 Session keys are hashes of the **actual access token**, exact transcript and
 configuration, not unverified JWT claims or mutable account labels. Identical
 concurrent requests/results are refused rather than double-submitted. Different
-factory instances share no state. Missing/expired/ambiguous continuations return
-409: **do not automatically replay tools or start a replacement remote run**.
+factory instances share no state. Continuation ownership is matched across live
+pending calls by account, base transcript and exact assistant call/ID **before**
+checking configuration. If multiple owners match, even a configuration matching
+one of them cannot resolve ownership; neither receives a result. A unique owner
+must then match the exact configuration. Missing/expired/ambiguous continuations
+return 409: **do not automatically replay tools or start a replacement remote run**.
 Token rotation deliberately does not migrate pending sessions to a new token.
 Finish the pending round with its original valid credential or explicitly close
 and restart after informing the user; account equality is never guessed.
 
 Active AbortSignals and SSE reader cancellation close remote connections.
+Generator resumptions and SSE success emission recheck session cancellation,
+including expiry during backpressure. Invalidation suppresses further success
+chunks and emits an error plus `[DONE]` if the reader remains open. Already
+queued/delivered chunks cannot be retracted: consumers must handle the error,
+not treat `[DONE]` alone as success. Normal remote-completion cleanup waits for
+response release so it cannot mask an abort before the final success emission.
 Once an HTTP response successfully completes, its AbortSignal is detached; use
 `close()` or TTL to abandon parked calls. Defaults: 2-minute idle TTL, 15-minute
 absolute session lifetime, 16 sessions, 1024 calls/session, 16 MiB opaque KV
@@ -260,6 +270,9 @@ names/JSON, subset registration in both MCP locations, ordinary USER guidance,
 invalid choices before network, wrong/builtin/duplicate exec denial, buffered
 text-only/empty/usage/progress failure, unchanged typed history, exact multi-round
 continuations, cancellation, prior-session isolation and auto/none regression.
+Review regressions cover indistinguishable pending calls across choices/models
+(no result submission to either owner) and abort/idle expiry with mandatory text,
+tool intent or finish backpressured (no subsequent successful chunks).
 
 See [PROVENANCE.md](./PROVENANCE.md) for MIT notices, source anchors, excluded
 unsafe reference-handler paths and the evidence behind the remaining gaps.

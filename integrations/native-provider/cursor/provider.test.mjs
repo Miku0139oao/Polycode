@@ -225,6 +225,34 @@ test('account, complete transcript, definitions and model isolation; no rewritte
   assert.equal((await instance.complete(follow, A)).status, 409, 'No replay after completion');
 });
 
+for (const [label, otherConfig] of [
+  ['choice', { tool_choice: 'auto' }],
+  ['model', { tool_choice: 'required', model: 'different-model' }],
+]) test(`same-ID parked ownership collision across ${label} configurations rejects every continuation before submit`, async t => {
+  let submits = 0;
+  const mock = mockProtocol(c => c.send(execFrame()), (c, r) => {
+    if (r.message[0].id === 2) submits++;
+    if (r.message[0].id === 5) c.send(execFrame({ callId: 'would-have-resumed-wrong-session' }));
+  });
+  const instance = provider(t, mock), first = body({ tool_choice: 'required' }), second = body(otherConfig);
+  const firstMessage = (await (await instance.complete(first, A)).json()).choices[0].message;
+  const secondMessage = (await (await instance.complete(second, A)).json()).choices[0].message;
+  assert.deepEqual(firstMessage, secondMessage, 'Backend reused exact native call ID/name/JSON');
+  assert.equal(mock.connections.size, 2);
+  for (const next of [
+    { ...continuation(first, firstMessage), ...otherConfig }, // Must not route the first result to the second connection.
+    continuation(first, firstMessage), continuation(second, secondMessage),
+    { ...continuation(second, secondMessage), tool_choice: first.tool_choice, model: first.model },
+  ]) {
+    const response = await instance.complete(next, A);
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).error.code, 'continuation_mismatch');
+    assert.equal(submits, 0);
+    assert.deepEqual(mock.appends.map(r => r.seq), [0, 0], 'Neither parked connection received a result or close');
+    assert.ok([...mock.connections.values()].every(c => !c.cancelled), 'Ambiguity does not select/drop an arbitrary owner');
+  }
+});
+
 test('sequential remote MCP requests across multiple native continuations retain one stream', async t => {
   let results = 0;
   const mock = mockProtocol(c => c.send(execFrame({ callId: 'first' }), execFrame({ id: 8, callId: 'second' })), (c, record) => {
@@ -561,6 +589,78 @@ test('mandatory buffered streams cancel without invalidating a previous independ
     assert.equal(resumed.choices[0].message.content, 'Previous session retained.');
     assert.equal(resumed.choices[0].finish_reason, 'stop');
     assert.equal(mock.connections.size, 2);
+  }
+});
+
+async function readSseEvent(reader) {
+  const { value, done } = await reader.read();
+  if (done) return undefined;
+  const wire = new TextDecoder().decode(value).trim();
+  assert.ok(wire.startsWith('data: '));
+  return wire === 'data: [DONE]' ? '[DONE]' : JSON.parse(wire.slice(6));
+}
+
+for (const mode of ['abort', 'idle expiry']) {
+  for (const [queued, consumedCount] of [['text', 1], ['tool', 2], ['finish', 3]]) {
+    test(`${mode} after backpressured mandatory ${queued} suppresses all subsequent successful output`, async t => {
+      const mock = mockProtocol(c => c.send(textFrame('Buffered native text.'), execFrame()));
+      const instance = provider(t, mock, { sessionTtlMs: mode === 'idle expiry' ? 100 : 10000 });
+      const abort = new AbortController();
+      const request = body({ stream: true, tool_choice: 'required', stream_options: { include_usage: true } });
+      const response = await instance.complete(request, A, { signal: abort.signal });
+      const reader = response.body.getReader(), consumed = [];
+      for (let i = 0; i < consumedCount; i++) consumed.push(await readSseEvent(reader));
+      assert.equal(consumed[0].choices[0].delta.role, 'assistant');
+      // One queued chunk fills the stream: the generator is suspended at this yield.
+      await sleep(0);
+      const connection = [...mock.connections.values()][0];
+      assert.equal(connection.cancelled, false);
+      if (mode === 'abort') abort.abort('OFFLINE_SECRET_REASON');
+      else await sleep(150);
+      await sleep(0);
+      assert.equal(connection.cancelled, true);
+      const remaining = [];
+      for (let event; (event = await readSseEvent(reader)) !== undefined;) remaining.push(event);
+      // Already-enqueued output cannot be retracted; nothing successful may be newly emitted.
+      assert.equal(remaining.length, 3, 'Only the prior queued chunk, explicit cancellation error and DONE');
+      const prior = remaining[0].choices[0];
+      if (queued === 'text') assert.equal(prior.delta.content, 'Buffered native text.');
+      else if (queued === 'tool') assert.equal(prior.delta.tool_calls[0].id, 'call_Original-:/123');
+      else assert.equal(prior.finish_reason, 'tool_calls');
+      assert.equal(remaining[1].error.code, 'cancelled');
+      assert.equal(remaining[2], '[DONE]', 'DONE follows an error, not successful usage/finish');
+      assert.ok(!remaining.slice(1).some(e => e.choices), 'No newly emitted executable intent, finish or usage');
+      const message = { role: 'assistant', content: 'Buffered native text.', tool_calls: [
+        { id: 'call_Original-:/123', type: 'function', function: { name: toolName, arguments: JSON.stringify(args) } },
+      ] };
+      assert.equal((await instance.complete(continuation(request, message), A)).status, 409);
+      assert.equal(mock.appends.length, 1);
+      assert.equal(mock.connections.size, 1);
+    });
+  }
+}
+
+test('auto/none remote completion remains cancellable until successful SSE terminal release', async t => {
+  for (const tool_choice of ['auto', 'none']) {
+    for (const mode of ['abort', 'idle expiry']) {
+      const mock = mockProtocol(c => c.send(textFrame('Ordinary text.'), usageFrame()));
+      const instance = provider(t, mock, { sessionTtlMs: mode === 'idle expiry' ? 100 : 10000 });
+      const abort = new AbortController();
+      const response = await instance.complete(body({ stream: true, tool_choice, stream_options: { include_usage: true } }), A, { signal: abort.signal });
+      const reader = response.body.getReader();
+      assert.equal((await readSseEvent(reader)).choices[0].delta.role, 'assistant');
+      assert.equal((await readSseEvent(reader)).choices[0].delta.content, 'Ordinary text.');
+      await sleep(0); // The stop chunk is queued, but usage/DONE have not been emitted.
+      const connection = [...mock.connections.values()][0];
+      assert.equal(connection.cancelled, false, 'Normal remote completion does not prematurely detach the response signal');
+      if (mode === 'abort') abort.abort();
+      else await sleep(150);
+      assert.equal((await readSseEvent(reader)).choices[0].finish_reason, 'stop', 'Previously queued stop cannot be retracted');
+      assert.equal((await readSseEvent(reader)).error.code, 'cancelled', 'No successful usage chunk after invalidation');
+      assert.equal(await readSseEvent(reader), '[DONE]');
+      assert.equal(await readSseEvent(reader), undefined);
+      assert.equal(connection.cancelled, true);
+    }
   }
 });
 
