@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createCursorProvider } from './index.mjs';
 import * as p from './protocol.mjs';
+import { gifBase64, gifHex, historyHex, userImageHex, usageFrameHex, userRuleHex } from './wire-fixtures.mjs';
 
 const A = { accessToken: 'OFFLINE_ACCOUNT_A', refreshToken: 'OFFLINE_REFRESH_A' };
 const B = { accessToken: 'OFFLINE_ACCOUNT_B' };
@@ -110,7 +111,13 @@ test('MCP definition, arbitrary names/JSON and exact model roundtrip; no local e
   const userAction = p.fields(p.one(action, 1));
   const user = p.fields(p.one(userAction, 1));
   const prompt = p.text(p.one(user, 1));
-  assert.deepEqual(JSON.parse(prompt.slice(prompt.indexOf('\n') + 1)), request);
+  assert.equal(prompt, JSON.stringify(request.messages[1].content[0])); // Annotation is retained as typed text.
+  const context = p.fields(p.one(userAction, 2));
+  const rule = p.fields(p.one(context, 2));
+  assert.equal(p.text(p.one(rule, 2)), 'Native permissions stay here.\n' + JSON.stringify({ polycode_message_metadata: { name: 'native' } }));
+  assert.equal(p.one(rule, 4, 0), 2n, 'Ordinary USER rule, not TEAM');
+  assert.equal(p.one(run, 8, 2, false), undefined, 'No restricted custom system prompt');
+  assert.equal(p.one(userAction, 7, 2, false), undefined, 'System text is a rule, not fake user history');
 });
 
 test('native result resumes same connection and monotonically shared append seq with KV', async t => {
@@ -297,10 +304,10 @@ test('malformed/truncated/oversized/compressed streams never become successful c
   }
 });
 
-test('no model defaults or ignored sampling/forced/strict/multimodal options', async t => {
+test('no model defaults or ignored sampling/forced/strict/external-image options', async t => {
   const mock = { fetchImpl: async () => { assert.fail('network must not be reached'); } };
   const instance = provider(t, mock);
-  for (const input of [body({ model: '' }), body({ model: null }), body({ temperature: 0.1 }), body({ max_tokens: 10 }), body({ stream_options: { include_usage: true } }), body({ tool_choice: 'required' }), body({ tools: [{ type: 'function', function: { name: 'strict', strict: true } }] }), body({ messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'file:///never' } }] }] })]) {
+  for (const input of [body({ model: '' }), body({ model: null }), body({ temperature: 0.1 }), body({ max_tokens: 10 }), body({ max_completion_tokens: 10 }), body({ top_p: 0.9 }), body({ tool_choice: 'required' }), body({ tools: [{ type: 'function', function: { name: 'strict', strict: true } }] }), body({ messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'file:///never' } }] }] })]) {
     assert.equal((await instance.complete(input, A)).status, 400);
   }
 });
@@ -483,4 +490,241 @@ test('protobuf Value preserves empty/null/false/numbers/maps, rejects malformed 
   assert.throws(() => p.fields(Uint8Array.of(0x0a, 9, 1)));
   assert.throws(() => p.decodeValue(p.empty));
   assert.throws(() => p.fields(Uint8Array.of(0x08, ...Array(10).fill(255))));
+});
+
+const image = (url = `data:image/gif;base64,${gifBase64}`, extra = {}) => ({ type: 'image_url', image_url: { url, ...extra } });
+const historical = () => [
+  { role: 'user', content: 'Hi' },
+  { role: 'assistant', content: 'OK', tool_calls: [{ id: 'c:1', type: 'function', function: { name: 'read', arguments: '{ "p":1 }' } }] },
+  { role: 'tool', tool_call_id: 'c:1', content: 'yes', is_error: true },
+];
+const hex = bytes => Buffer.from(bytes).toString('hex');
+function runAction(record) {
+  const run = p.fields(p.one(record.message, 1));
+  return { run, action: p.fields(p.one(p.fields(p.one(run, 2)), 1)) };
+}
+
+test('exact typed history wire fixture preserves native roles, call IDs, raw argument JSON and tool errors', async t => {
+  const mock = mockProtocol(c => c.send(doneFrame()));
+  const instance = provider(t, mock);
+  const messages = [{ role: 'system', content: 'Policy' }, ...historical(), { role: 'developer', content: 'Instruction' }, { role: 'user', content: 'Next' }];
+  assert.equal((await instance.complete(body({ messages }), A)).status, 200);
+  const { run, action } = runAction(mock.appends[0]);
+  assert.equal(hex(p.one(action, 7)), historyHex);
+  assert.equal(p.text(p.one(p.fields(p.one(action, 1)), 1)), 'Next', 'Current user is not duplicated into history');
+  const context = p.fields(p.one(action, 2)), rules = context.filter(f => f.id === 2);
+  assert.equal(rules.length, 2);
+  assert.equal(hex(rules[0].value), userRuleHex);
+  assert.equal(p.text(p.one(p.fields(rules[1].value), 2)), 'Instruction');
+  assert.equal(p.one(run, 8, 2, false), undefined);
+  assert.deepEqual(run.map(f => f.id), [1, 2, 3, 4, 5], 'No internal harness/access fields');
+  for (const { options } of mock.requests) {
+    assert.ok(!Object.keys(options.headers).some(k => /allowed-tools|exclude-tools|team|harness/i.test(k)));
+  }
+});
+
+test('fresh typed history supports multiple call IDs/results and keeps Unicode/raw JSON', async t => {
+  const mock = mockProtocol(c => c.send(doneFrame()));
+  const instance = provider(t, mock);
+  const messages = historical();
+  messages[1].tool_calls.push({ id: 'second:/中文', type: 'function', function: { name: toolName, arguments: JSON.stringify(args, null, 2) } });
+  messages.push({ role: 'tool', tool_call_id: 'second:/中文', content: { result: '中文', zero: 0, nil: null } }, { role: 'user', content: 'Continue' });
+  assert.equal((await instance.complete(body({ messages }), A)).status, 200);
+  const history = p.fields(p.one(runAction(mock.appends[0]).action, 7));
+  const assistant = p.fields(p.one(p.fields(history[1].value), 2));
+  const call = p.fields(p.one(p.fields(assistant[2].value), 4));
+  assert.equal(p.text(p.one(call, 1)), 'second:/中文');
+  assert.equal(p.text(p.one(call, 3)), JSON.stringify(args, null, 2));
+  const result = p.fields(p.one(p.fields(history[3].value), 3));
+  assert.equal(p.text(p.one(result, 1)), 'second:/中文');
+  assert.equal(p.text(p.one(result, 2)), toolName);
+  assert.equal(p.text(p.one(p.fields(p.one(p.fields(p.one(result, 3)), 1)), 1)), JSON.stringify(messages[3].content));
+});
+
+test('malformed or ambiguous historical tool correlation fails before network', async t => {
+  const instance = provider(t, { fetchImpl: () => assert.fail('No network') });
+  const cases = [
+    m => { m[1].tool_calls[0].function.arguments = '{invalid'; },
+    m => { m[1].tool_calls.push(structuredClone(m[1].tool_calls[0])); },
+    m => { m[2].tool_call_id = 'missing'; },
+    m => { m[2].name = 'different'; },
+    m => { m.splice(2, 1); },
+    m => { m.splice(3, 0, structuredClone(m[2])); },
+  ];
+  for (const mutate of cases) {
+    const messages = [...historical(), { role: 'user', content: 'Next' }];
+    mutate(messages);
+    assert.ok([400, 409].includes((await instance.complete(body({ messages }), A)).status));
+  }
+});
+
+test('current inline image is exact SelectedContext/SelectedImage wire bytes, never fetched', async t => {
+  const mock = mockProtocol(c => c.send(doneFrame()));
+  const instance = provider(t, mock, { uuid: () => 'u' });
+  const messages = [{ role: 'user', content: [{ type: 'text', text: 'Look' }, image()] }];
+  assert.equal((await instance.complete(body({ messages }), A)).status, 200);
+  const { action } = runAction(mock.appends[0]);
+  assert.equal(hex(p.one(action, 1)), userImageHex);
+  assert.equal(mock.requests.length, 2, 'Only RunSSE and BidiAppend');
+});
+
+test('historical user and tool images use typed base64 STRING and MIME, not URLs or blob references', async t => {
+  const mock = mockProtocol(c => c.send(doneFrame()));
+  const instance = provider(t, mock);
+  const messages = historical();
+  messages[0].content = [image()];
+  messages[2].content = [image()];
+  messages.push({ role: 'user', content: 'Next' });
+  assert.equal((await instance.complete(body({ messages }), A)).status, 200);
+  const history = p.fields(p.one(runAction(mock.appends[0]).action, 7));
+  for (const [index, role, contentId] of [[0, 1, 1], [2, 3, 3]]) {
+    const contents = p.fields(p.one(p.fields(history[index].value), role)).filter(f => f.id === contentId);
+    const data = p.fields(p.one(p.fields(contents[0].value), 2));
+    assert.equal(p.text(p.one(data, 1)), gifBase64);
+    assert.equal(p.text(p.one(data, 2)), 'image/gif');
+  }
+});
+
+test('inline image native result resumes original MCP exec with BYTES image data', async t => {
+  const mock = mockProtocol(c => c.send(execFrame()), (c, r) => { if (r.message[0].id === 5) c.send(doneFrame()); });
+  const instance = provider(t, mock);
+  const request = body(), first = await (await instance.complete(request, A)).json();
+  assert.equal((await instance.complete(continuation(request, first.choices[0].message, [image()]), A)).status, 200);
+  const exec = p.fields(p.one(mock.appends[1].message, 2));
+  assert.equal(p.text(p.one(exec, 15)), 'original-exec-id');
+  const success = p.fields(p.one(p.fields(p.one(exec, 11)), 1));
+  const data = p.fields(p.one(p.fields(p.one(success, 1)), 2));
+  assert.equal(hex(p.one(data, 1)), gifHex);
+  assert.equal(p.text(p.one(data, 2)), 'image/gif');
+  assert.equal(mock.connections.size, 1);
+});
+
+test('invalid image URLs/base64/signatures/unsupported detail and roles fail before network', async t => {
+  const instance = provider(t, { fetchImpl: () => assert.fail('No fetch, including image fetch') });
+  const bad = [image('https://example.invalid/image.png'), image('file:///never'), image('data:image/svg+xml;base64,PHN2Zz4='),
+    image('data:image/gif;base64,%%%%'), image(`data:image/gif;base64,${gifBase64.slice(0, -1)}`),
+    image('data:image/gif;base64,SGVsbG8='), image(`data:image/png;base64,${gifBase64}`),
+    image(undefined, { detail: 'high' }), image(undefined, { detail: 'low' }), image(undefined, { crop: true }),
+    { type: 'input_audio', input_audio: { data: 'AA==' } }];
+  for (const part of bad) assert.equal((await instance.complete(body({ messages: [{ role: 'user', content: [part] }] }), A)).status, 400);
+  for (const role of ['system', 'developer', 'assistant']) {
+    assert.equal((await instance.complete(body({ messages: [{ role, content: [image()] }, { role: 'user', content: 'Next' }] }), A)).status, 400);
+  }
+  assert.equal((await instance.complete(body({ messages: [{ role: 'user', content: Array.from({ length: 33 }, () => image()) }] }), A)).status, 413);
+  assert.equal((await instance.complete(body({ messages: [{ role: 'user', content: [image('data:image/gif;base64,' + 'A'.repeat(3 * 1024 * 1024))] }] }), A)).status, 413);
+});
+
+test('changing inline bytes cannot resume another transcript/account pending call', async t => {
+  const mock = mockProtocol(c => c.send(execFrame()));
+  const instance = provider(t, mock), request = body({ messages: [{ role: 'user', content: [image()] }] });
+  const first = await (await instance.complete(request, A)).json(), next = continuation(request, first.choices[0].message);
+  assert.equal((await instance.complete(next, B)).status, 409);
+  const altered = structuredClone(next), data = Buffer.from(gifBase64, 'base64');
+  data[13] = 17; // Another valid color table, same dimensions/MIME.
+  altered.messages[0].content[0] = image('data:image/gif;base64,' + data.toString('base64'));
+  assert.equal((await instance.complete(altered, A)).status, 409);
+  assert.equal(mock.appends.length, 1);
+});
+
+const actualUsage = { prompt_tokens: 150, completion_tokens: 20, total_tokens: 170,
+  prompt_tokens_details: { cached_tokens: 30, cache_write_tokens: 4 }, completion_tokens_details: { reasoning_tokens: 5 } };
+const usageFrame = () => Buffer.from(usageFrameHex, 'hex');
+test('literal TurnEndedUpdate int64 usage fixture maps actual input/output/cache/reasoning once', async t => {
+  const mock = mockProtocol(c => c.send(textFrame('ok'), usageFrame()));
+  const result = await (await provider(t, mock).complete(body(), A)).json();
+  assert.deepEqual(result.usage, actualUsage, 'Cache/reasoning counters are subsets, not added to totals');
+});
+
+test('include_usage SSE adds a choices-empty usage chunk before DONE; ordinary chunks are null', async t => {
+  const wire = usageFrame(), mock = mockProtocol(c => c.send(textFrame('ok'), wire.slice(0, 8), wire.slice(8)));
+  const events = await sse(await provider(t, mock).complete(body({ stream: true, stream_options: { include_usage: true } }), A));
+  assert.deepEqual(events.at(-2).choices, []);
+  assert.deepEqual(events.at(-2).usage, actualUsage);
+  assert.equal(events.at(-3).choices[0].finish_reason, 'stop');
+  assert.ok(events.slice(0, -2).every(e => e.usage === null));
+});
+
+test('usage is not sent on SSE unless include_usage is true', async t => {
+  for (const stream_options of [undefined, { include_usage: false }]) {
+    const mock = mockProtocol(c => c.send(usageFrame()));
+    const events = await sse(await provider(t, mock).complete(body({ stream: true, ...(stream_options ? { stream_options } : {}) }), A));
+    assert.ok(events.slice(0, -1).every(e => !Object.hasOwn(e, 'usage')));
+  }
+});
+
+test('absent usage is unknown, including trailer completion and parked MCP intents', async t => {
+  for (const frame of [doneFrame(), trailerFrame(0), execFrame()]) {
+    const mock = mockProtocol(c => c.send(frame)), instance = provider(t, mock);
+    const result = await (await instance.complete(body(), A)).json();
+    assert.ok(!Object.hasOwn(result, 'usage'));
+    const events = await sse(await instance.complete(body({ stream: true, model: 'another', stream_options: { include_usage: true } }), A));
+    assert.deepEqual(events.at(-2).choices, []);
+    assert.equal(events.at(-2).usage, null, 'Never fabricate zero counters');
+  }
+});
+
+test('usage appears only when remote turn ends, not on tool pause, and may change include_usage on continuation', async t => {
+  const mock = mockProtocol(c => c.send(execFrame()), (c, r) => { if (r.message[0].id === 5) c.send(usageFrame()); });
+  const instance = provider(t, mock), request = body();
+  const first = await (await instance.complete(request, A)).json();
+  assert.equal(first.usage, undefined);
+  const next = { ...continuation(request, first.choices[0].message), stream: true, stream_options: { include_usage: true } };
+  const events = await sse(await instance.complete(next, A));
+  assert.deepEqual(events.at(-2).usage, actualUsage);
+  assert.equal(mock.connections.size, 1);
+});
+
+test('partial usage preserves field presence and explicit zero without invented totals/details', () => {
+  assert.equal(p.turnUsage(p.empty), undefined);
+  assert.deepEqual(p.turnUsage(Buffer.from('0800', 'hex')), { prompt_tokens: 0 });
+  assert.deepEqual(p.turnUsage(Buffer.from('18002800', 'hex')), { prompt_tokens_details: { cached_tokens: 0 }, completion_tokens_details: { reasoning_tokens: 0 } });
+  assert.deepEqual(p.turnUsage(Buffer.from('08001000', 'hex')), { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+});
+
+test('malformed, negative, duplicate, unsafe or unknown usage never becomes success', async t => {
+  const bad = ['08010802', '0a00', '08ffffffffffffffffff01', '088080808080808010', '08ffffffffffffff0f1001', '08', '3001'];
+  for (const data of bad) {
+    const mock = mockProtocol(c => c.send(p.envelope(p.bytes(1, p.bytes(14, Buffer.from(data, 'hex'))))));
+    const response = await provider(t, mock).complete(body(), A);
+    assert.equal(response.status, 502, data);
+  }
+});
+
+test('include_usage does not convert an RPC failure into successful usage or finish', async t => {
+  const mock = mockProtocol(c => c.send(textFrame('partial'), trailerFrame(8)));
+  const events = await sse(await provider(t, mock).complete(body({ stream: true, stream_options: { include_usage: true } }), A));
+  assert.equal(events.at(-2).error.code, 'quota_exceeded');
+  assert.ok(!events.some(e => e.choices?.length === 0));
+});
+
+test('remote call cannot reuse a historical call ID', async t => {
+  const mock = mockProtocol(c => c.send(execFrame({ callId: 'c:1' })));
+  const response = await provider(t, mock).complete(body({ messages: [...historical(), { role: 'user', content: 'Next' }] }), A);
+  assert.equal(response.status, 502);
+  assert.equal((await response.json()).error.code, 'duplicate_tool_call');
+  assert.equal(mock.appends.length, 1, 'No historical tool is replayed');
+});
+
+test('arbitrary native structured tool arrays retain the prior JSON envelope in typed history', async t => {
+  const mock = mockProtocol(c => c.send(doneFrame())), messages = historical();
+  messages[2].content = [null, false, 0, 'text', { result: [1, 2] }];
+  messages.push({ role: 'user', content: 'Next' });
+  assert.equal((await provider(t, mock).complete(body({ messages }), A)).status, 200);
+  const history = p.fields(p.one(runAction(mock.appends[0]).action, 7));
+  const result = p.fields(p.one(p.fields(history[2].value), 3));
+  const contents = p.fields(p.one(result, 3));
+  assert.equal(p.text(p.one(p.fields(p.one(contents, 1)), 1)), JSON.stringify(messages[2].content));
+});
+
+test('multiple current PNG/GIF selections retain ordered raw bytes and distinct UUIDs', async t => {
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=';
+  const mock = mockProtocol(c => c.send(doneFrame())), messages = [{ role: 'user', content: [image(`data:image/png;base64,${png}`, { detail: 'auto' }), image()] }];
+  assert.equal((await provider(t, mock).complete(body({ messages }), A)).status, 200);
+  const user = p.fields(p.one(runAction(mock.appends[0]).action, 1));
+  const selections = p.fields(p.one(user, 3)).map(f => p.fields(f.value));
+  assert.equal(selections.length, 2);
+  assert.equal(p.text(p.one(selections[0], 7)), 'image/png');
+  assert.equal(Buffer.from(p.one(selections[0], 8)).toString('base64'), png);
+  assert.equal(hex(p.one(selections[1], 8)), gifHex);
+  assert.notEqual(p.text(p.one(selections[0], 2)), p.text(p.one(selections[1], 2)));
 });

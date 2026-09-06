@@ -174,7 +174,7 @@ export class Connection {
             if ([1, 8].includes(update.id)) {
               const delta = p.one(p.fields(update.value), 1, 2, false);
               if (delta) yield { type: 'text', text: p.text(delta) };
-            } else if (update.id === 14) { yield { type: 'done' }; return; }
+            } else if (update.id === 14) { yield { type: 'done', usage: p.turnUsage(update.value) }; return; }
             // Notifications only: never turn progress/partial calls into executable intents.
             else if (![2, 3, 4, 7, 13].includes(update.id)) throw fail('unsupported_protocol', 'Unsupported Cursor interaction update.');
           }

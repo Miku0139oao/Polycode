@@ -47,13 +47,63 @@ cursor.close(); // Idempotent; aborts login/HTTP operations and all remote sessi
 
 Supported request controls: `model`, `messages`, function `tools`, `stream`,
 `tool_choice: "auto" | "none"`, `parallel_tool_calls` (calls may be serialized),
-`stream_options.include_usage: false`. Text/JSON messages retain their JSON
-fields. Tool schemas use protobuf Value, including nested arrays, null, empty
-strings, booleans, schema extensions and property names such as `__proto__`.
-Names are not sanitized, renamed or guessed. Unknown completion controls,
-sampling/length limits, forced tool selection, `strict:true`, usage requests,
-and multimodal message parts return explicit unsupported errors, not ignored
-settings. No usage counts, reasoning deltas or token limits are fabricated.
+`stream_options.include_usage: true | false`. Tool schemas use protobuf Value,
+including nested arrays, null, empty strings, booleans, schema extensions and
+property names such as `__proto__`. Names are not sanitized, renamed or guessed.
+Unknown completion controls, sampling/length limits (`temperature`, `top_p`,
+`max_tokens`, `max_completion_tokens`, etc.), forced tool selection, and
+`strict:true` return explicit unsupported errors, not ignored settings.
+
+### Typed messages and inline images
+
+New user turns send `UserMessageAction.conversation_history` (field 7) with typed
+user/assistant/tool messages, plus the current user message separately. Assistant
+text and tool calls retain their order; original call IDs, tool names, **raw**
+argument JSON strings and result/error correlations are preserved. Invalid JSON,
+duplicate call IDs, orphan/duplicate results, and unresolved calls before a new
+user message fail before network. History itself never executes any tool.
+
+System/developer text uses ordinary always-apply `RequestContext.rules`, source
+`USER`, with virtual path labels. **These are user rules, not equivalent OpenAI
+system/developer privileges.** `AgentRunRequest.custom_system_prompt` is never
+set: the installed CLI labels it Anysphere/OpenAI-team-only. No team identity,
+internal harness override or allowed/excluded-tools header is sent.
+
+User and tool content can contain `image_url` parts with canonical base64 inline
+`data:image/{png,jpeg,gif,webp};base64,...` URLs. MIME/container signature, nonempty
+canonical base64 and request limits are checked. No URL/path fetching, blob
+lookup or image codec is used; signature validation does not prove full image
+decodability. Only omitted/`auto` detail is supported; `low`/`high`, arbitrary
+URLs, unsupported MIME/content types and system/developer/assistant images fail
+explicitly. Maximum 32 images within the existing 2 MiB total JSON request cap.
+Current images use `SelectedContext.selected_images` with raw `SelectedImage.data`
+bytes and MIME type. Historical images use typed base64 **string** data; live
+native tool image results use MCP image **bytes**. No image bytes are logged.
+
+Plain text remains text. Nonstandard message metadata (including `name`) is
+retained as JSON text metadata, and annotated text parts as JSON text; these do
+not acquire native metadata semantics. Text-only structured tool results retain
+the prior lossless JSON envelope. Current user text parts join with newlines;
+images are separate selections, so exact text/image interleaving is not proven.
+
+### Actual usage, without estimates
+
+`InteractionUpdate.turn_ended` optional int64 fields supply input/output/cache
+read/cache write/reasoning counts. Present counters map to `prompt_tokens`,
+`completion_tokens`, `prompt_tokens_details.cached_tokens`, the explicit
+nonstandard detail `prompt_tokens_details.cache_write_tokens`, and
+`completion_tokens_details.reasoning_tokens`. Input already includes cache;
+reasoning is not added to output. `total_tokens` is calculated only when both
+input and output exist. Missing counters are omitted, never fabricated as zero;
+negative, duplicate or unsafe integers fail explicitly.
+
+Nonstream JSON includes usage only when actual counters arrive. With
+`stream_options.include_usage:true`, normal SSE chunks have `usage:null`, then
+one choices-empty usage chunk precedes `[DONE]`. Its usage is null if unavailable
+(including parked tool calls); partial upstream counters remain partial. Without
+that option, SSE includes no usage fields. Errors never emit successful usage.
+Turn-ended counts describe the remote turn, potentially spanning native tool
+rounds; they are not guessed or apportioned among earlier tool-pause responses.
 
 ## Native tool continuation
 
@@ -79,8 +129,8 @@ Additional tool-message fields are retained by serializing the entire native
 tool message as the result text; an optional `name` must match the pending tool.
 One intent per response is intentional; already-buffered additional remote
 execs are returned in subsequent native rounds. This does not add a local agent
-loop. Normal later user turns start a new remote stream with the full transcript
-serialized as JSON; native session/history remain parent-owned.
+loop. Normal later user turns start a new remote stream with typed conversation
+history and ordinary instruction rules; native session/history remain parent-owned.
 
 Session keys are hashes of the **actual access token**, exact transcript and
 configuration, not unverified JWT claims or mutable account labels. Identical
@@ -117,22 +167,24 @@ headers, OAuth polling URLs, credentials or raw model/tool payloads either.
 ## Integration gates / correctness gaps
 
 - **Not proven to be semantically identical to changing only the model backend.**
-  The reference AgentService exposes a text user message, not demonstrated
-  OpenAI system/developer/history fields. JSON preserves data but does not prove
-  system-role hierarchy. Cursor may add its own remote agent instructions. Grok
-  remains the only local tool/permission engine, but backend prompt equivalence
-  requires further protocol evidence. Do not advertise full role fidelity.
+  Typed history improves user/assistant/tool fidelity, but ordinary rules cannot
+  establish system/developer precedence or preserve the temporal scope of rules
+  interspersed with history. Cursor may add its own remote agent instructions.
+  Nonstandard metadata is text, not native fields; current image interleaving
+  remains a gap. Grok remains the only local tool/permission engine. Do not
+  advertise full role/prompt fidelity or invoke restricted fields to obtain it.
 - Current live OAuth, refresh, dynamic catalog, client-version header, BidiSse
   endpoints, MCP registration without filesystem mode and paused-stream behavior
   are unverified. Remote builtins may occur; they fail closed and can make the
   turn unusable. No bypass is attempted.
 - This is **not** a generic accept-and-ignore OpenAI shim. If native Grok sends
-  unsupported options (`temperature`, `max_tokens`, usage, strict schemas, etc.),
+  unsupported options (`temperature`, `max_tokens`, strict schemas, etc.),
   integration must surface the limitation; it must not silently strip user
-  controls. Multimodal and blob-only assistant output are unsupported. KV data
-  is opaque, never heuristically treated as assistant text.
+  controls. Inline input images and actual usage are mapped, not live-verified.
+  Audio/video and image/blob-only assistant output are unsupported. KV data is
+  opaque, never heuristically treated as assistant text.
 - Only uncompressed grpc-web binary frames are supported, not arbitrary SSE
-  encodings or unknown future messages. Fresh user turns serialize history;
+  encodings or unknown future messages. Fresh user turns encode typed history;
   only tool-result continuations reuse the exact remote stream. Remote lifetime
   limits and token-refresh migration are not solved.
 - Offline mocks prove local correlation/cancellation/denial, not backend
@@ -164,6 +216,10 @@ results, same-stream multi-round continuation, fragmented Unicode text and SSE
 errors, quota propagation, builtin/unknown denial, account/factory/transcript
 isolation, duplicate submission, KV in-memory isolation, TTL/cancellation,
 PKCE start/poll/validation/cancel, refresh/catalog validation and no fallbacks.
+`wire-fixtures.mjs` supplies independent literal history, ordinary rule,
+SelectedImage and turn-ended usage wire fixtures. Additional tests cover malformed
+history, image validation/size/no-fetch/isolation, live MCP image-result
+correlation, usage presence/zero/partial/overflow/error behavior and SSE ordering.
 
 See [PROVENANCE.md](./PROVENANCE.md) for MIT notices, source anchors, excluded
 unsafe reference-handler paths and the evidence behind the remaining gaps.

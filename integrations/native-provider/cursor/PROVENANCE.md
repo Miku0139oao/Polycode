@@ -58,14 +58,83 @@ found `Bun.file` at lines 351/625/794/840 and `Bun.spawn` shell execution at lin
 No fallback executor, tool-name guessing, or automatic builtin-to-native
 mapping exists in this provider.
 
+## Delta: installed generated schema inspection (read-only)
+
+Inspected source text only, **without loading/executing the CLI**, reading any
+credentials/config/account files, opening a browser or calling an API:
+
+`C:/Users/miku0139/AppData/Local/cursor-agent/versions/2026.08.11-e8db854/`
+
+- `index.js` SHA-256: `fca169d7955d80a6e725f2beee2ffbbfe9642b288dcf0a877d6cb7a87d208706`
+- `6201.index.js` SHA-256: `d65b56a0a993049415693c79301d11b809258f0ca878833efe971bbd327112c0`
+
+The following are schema facts, independently encoded here, not copied CLI
+implementations/handlers. Anchors are generated `agent.v1` type names (searchable
+in the minified bundle), not a public or stability-guaranteed SDK contract.
+
+| Message | Fields used (all nested messages unless type stated) |
+| --- | --- |
+| `UserMessageAction` | 1 user_message, 2 request_context, **7 conversation_history (optional)** |
+| `ConversationHistory` | 1 messages (repeated); replace_user_info field 2 is **not used** |
+| `ConversationHistoryMessage` | oneof: 1 user, 2 assistant, 3 tool |
+| `ConversationHistoryUserMessage`, `ConversationHistoryAssistantMessage` | 1 content (repeated) |
+| `ConversationHistoryUserContent`, `ConversationHistoryToolResultContent` | oneof: 1 text, 2 image |
+| `ConversationHistoryTextContent` | 1 text (string) |
+| `ConversationHistoryImageContent` | 1 data (**string**, base64 payload), 2 mime_type (optional string) |
+| `ConversationHistoryAssistantContent` | 1 text, 4 tool_call; reasoning/signature alternatives 2/3 are not invented |
+| `ConversationHistoryToolCall` | 1 tool_call_id, 2 tool_name, 3 args_json (all strings) |
+| `ConversationHistoryToolMessage` | 1 tool_call_id, 2 tool_name (strings), 3 content (repeated), 4 is_error (optional bool); no hook contexts |
+| `UserMessage` | 1 text, 2 message_id (strings), **3 selected_context**, 4 mode (enum) |
+| `SelectedContext` | **1 selected_images (repeated)** |
+| `SelectedImage` | 2 uuid (string), **7 mime_type (string), 8 data (bytes oneof)**; no path/blob/reference resolution |
+| `RequestContext` | **2 rules (repeated CursorRule)**; existing environment/MCP fields unchanged |
+| `CursorRule` | 1 full_path, 2 content (strings), 3 type, 4 source (enum) |
+| `CursorRuleType` | 1 global (empty message, oneof) |
+| `CursorRuleSource` | UNSPECIFIED=0, TEAM=1 (**never sent**), USER=2 |
+| `InteractionUpdate` | **14 turn_ended** |
+| `TurnEndedUpdate` | **1 input_tokens, 2 output_tokens, 3 cache_read_tokens, 4 cache_write_tokens, 5 reasoning_tokens**, all optional **int64**, not int32/doubles |
+| `McpToolResultContentItem` | oneof: 1 text, 2 image |
+| `McpImageContent` | 1 data (**bytes**), 2 mime_type (string) |
+
+Useful `index.js` JavaScript string-offset anchors for this exact build:
+ConversationHistory ~5092964, UserMessageAction ~5100043, UserMessage ~5116793,
+AgentRunRequest custom_system_prompt ~5148092, TurnEndedUpdate ~5156703,
+CursorRule ~5276518, McpImageContent ~5348385, RequestContext ~5436581,
+SelectedImage ~5451620, SelectedContext ~5478912.
+
+Ordinary-rule evidence: local `.cursorrules`/`AGENTS.md` handlers construct
+`CursorRule` with `type.global` (around 4309738 in `index.js`); the generated source
+enum includes USER=2. We submit caller instructions as these ordinary user rules,
+with clearly virtual labels; no real rule file is read. This proves a legitimate
+ordinary-rule wire mapping, **not** system/developer hierarchy or temporal scope.
+
+Restrictions: CLI option help around 411959 in `index.js` explicitly describes
+`--system-prompt` as **Anysphere/OpenAI team only**, and allowed/excluded-tools as
+**internal only**. `AgentRunRequest.custom_system_prompt` field 8, internal harness
+and access-spoofing overrides are never sent. Non-MCP requests still fail closed
+locally, independently of remote instructions; no internal header is trusted.
+
+Consumer evidence: `6201.index.js` around 13953 imports typed ConversationHistory
+and validates `argsJson` with JSON.parse. Around 565521 its turnEnded consumer
+subtracts cache read/write from input to produce uncached input, showing that
+wire input already includes caches. This provider retains input as OpenAI
+prompt_tokens and never double-adds cache/reasoning. Unlike that CLI consumer,
+missing counters remain missing, not zero. Optional int64 values and derived
+totals must fit JavaScript safe nonnegative integers.
+
+`wire-fixtures.mjs` contains hand-authored literal encodings independent of the
+runtime codecs: typed history with raw JSON args/call correlation, ordinary
+USER rule, current inline GIF image, and optional-int64 turn-ended usage. Tests
+also distinguish history image string data from current/MCP image bytes.
+
 ## Evidence limits
 
-These are undocumented, third-party reverse-engineered layouts, not an official
-Cursor SDK contract. Offline wire mocks establish local passthrough and
-isolation; they do not establish that the current Cursor backend accepts the
-handshake, honors the MCP-only instruction, or preserves native system-prompt
-semantics. Specifically, `encodeUserMessage(text, messageId, mode)` has one text
-field, and `AgentServiceClient.buildChatMessage` uses it. The reference provides
-no demonstrated OpenAI-role-preserving AgentService request. This wrapper sends
-the intact JSON transcript in that text field and does **not** claim equivalent
-system/developer role enforcement. See README's integration gates.
+These remain undocumented compatibility layouts, not an official Cursor SDK
+contract. Offline fixtures establish local wire mapping, passthrough and
+isolation, not current backend acceptance. Typed history replaces the previous
+JSON-only transcript prompt; system/developer text is now ordinary user rules,
+not privileged role-equivalent instructions. Exact current-image interleaving,
+metadata semantics, remote prompt injection, live image/history acceptance,
+usage availability and paused MCP behavior remain unverified. The provider does
+not attempt account/terms/access bypass or trust the remote MCP-only instruction
+as its execution boundary. See README's integration gates.

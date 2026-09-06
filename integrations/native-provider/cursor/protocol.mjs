@@ -2,6 +2,7 @@
 // See PROVENANCE.md and LICENSE.reference. No upstream executable/tool handler code.
 import { createHash } from 'node:crypto';
 import { fail } from './errors.mjs';
+import { messageParts, toolParts } from './content.mjs';
 
 export const MAX_FRAME = 8 * 1024 * 1024;
 export const MCP_PROVIDER = 'polycode-native';
@@ -147,21 +148,75 @@ export function mcpDefinition(tool) {
     bytes(3, encodeValue(f.parameters ?? { type: 'object', properties: {} })),
     string(4, MCP_PROVIDER), string(5, f.name));
 }
+// Generated agent.v1 schemas in installed CLI 2026.08.11-e8db854; see PROVENANCE.md.
+// History image data is a base64 STRING, unlike SelectedImage/MCP image BYTES.
+const historyContent = part => part.type === 'text' ? bytes(1, string(1, part.text))
+  : bytes(2, concat(string(1, part.data.toString('base64')), string(2, part.mimeType)));
+export function conversationHistory(messages) {
+  const calls = new Map(), history = [];
+  for (const message of messages) {
+    if (['system', 'developer'].includes(message.role)) continue; // Ordinary rules below, NOT privileged roles.
+    let data;
+    if (message.role === 'tool') {
+      data = bytes(3, concat(string(1, message.tool_call_id), string(2, calls.get(message.tool_call_id)),
+        ...toolParts(message).map(part => bytes(3, historyContent(part))),
+        ...(message.is_error === undefined ? [] : [uint(4, message.is_error ? 1 : 0)])));
+    } else {
+      const content = messageParts(message).map(part => bytes(1, historyContent(part)));
+      for (const call of message.tool_calls ?? []) {
+        calls.set(call.id, call.function.name);
+        content.push(bytes(1, bytes(4, concat(string(1, call.id), string(2, call.function.name), string(3, call.function.arguments)))));
+      }
+      data = bytes(message.role === 'user' ? 1 : 2, concat(...content));
+    }
+    history.push(bytes(1, data));
+  }
+  return concat(...history);
+}
+export function userRule(message, index) {
+  // RequestContext.rules -> CursorRule: source USER=2, global always-apply type.
+  // Virtual label only: never read a rule file; never use TEAM=1 or custom_system_prompt.
+  return concat(string(1, `/polycode-virtual/${message.role}-${index}.mdc`),
+    string(2, messageParts(message).map(p => p.text).join('\n')), bytes(3, bytes(1, empty)), uint(4, 2));
+}
 export function runMessage(body, conversationId, messageId) {
   const tools = (body.tools ?? []).map(mcpDefinition);
   const instructions = 'Only request the explicitly supplied MCP tools. Polycode owns all execution and permissions. '
-    + 'No built-in tools, filesystem, shell, web, subagents, or mode switches are available. '
-    + 'The user message contains a JSON Chat Completions transcript; preserve its roles, content and tool history.';
-  // Virtual context only: no cwd/env/host filesystem discovery. MCP filesystem mode is not enabled.
-  const context = concat(bytes(4, concat(string(1, 'Polycode model transport'), string(2, '/polycode-virtual'),
+    + 'No built-in tools, filesystem, shell, web, subagents, or mode switches are available.';
+  const rules = body.messages.flatMap((m, i) => ['system', 'developer'].includes(m.role) ? [bytes(2, userRule(m, i))] : []);
+  // Virtual context only: no cwd/env/host discovery, MCP filesystem mode or internal tool headers.
+  const context = concat(...rules, bytes(4, concat(string(1, 'Polycode model transport'), string(2, '/polycode-virtual'),
     string(10, 'UTC'), string(11, '/polycode-virtual'))), ...tools.map(t => bytes(7, t)),
     bytes(14, concat(string(1, MCP_PROVIDER), string(2, instructions))));
-  // Upstream exposes UserMessage.text, not native OpenAI roles. Keep JSON intact, never flatten content.
-  const prompt = 'Polycode Chat Completions request (JSON):\n' + JSON.stringify(body);
-  const user = concat(string(1, prompt), string(2, messageId), uint(4, 1));
-  const action = bytes(1, concat(bytes(1, user), bytes(2, context)));
+  const parts = messageParts(body.messages.at(-1));
+  const images = parts.filter(p => p.type === 'image').map((p, i) => bytes(1,
+    concat(string(2, `${messageId}-image-${i}`), string(7, p.mimeType), bytes(8, p.data))));
+  const user = concat(string(1, parts.filter(p => p.type === 'text').map(p => p.text).join('\n')), string(2, messageId),
+    ...(images.length ? [bytes(3, concat(...images))] : []), uint(4, 1));
+  const history = conversationHistory(body.messages.slice(0, -1));
+  const action = bytes(1, concat(bytes(1, user), bytes(2, context), ...(history.length ? [bytes(7, history)] : [])));
   return bytes(1, concat(bytes(1, empty), bytes(2, action), bytes(3, string(1, body.model)),
     bytes(4, concat(...tools.map(t => bytes(1, t)))), string(5, conversationId)));
+}
+export function turnUsage(data) {
+  const fs = fields(data);
+  only(fs, [1, 2, 3, 4, 5]);
+  // All five counters are optional int64. Missing is unknown, not zero; negative/unsafe is invalid.
+  const counts = [1, 2, 3, 4, 5].map(id => {
+    const value = one(fs, id, 0, false);
+    return value === undefined ? undefined : number(value);
+  });
+  if (counts.every(n => n === undefined)) return undefined;
+  const [input, output, read, write, reasoning] = counts, usage = {};
+  if (input !== undefined) usage.prompt_tokens = input; // Includes cache read/write, per CLI consumer.
+  if (output !== undefined) usage.completion_tokens = output;
+  if (input !== undefined && output !== undefined) usage.total_tokens = number(BigInt(input) + BigInt(output));
+  if (read !== undefined || write !== undefined) usage.prompt_tokens_details = {
+    ...(read === undefined ? {} : { cached_tokens: read }),
+    ...(write === undefined ? {} : { cache_write_tokens: write }), // Explicit nonstandard detail.
+  };
+  if (reasoning !== undefined) usage.completion_tokens_details = { reasoning_tokens: reasoning };
+  return usage;
 }
 export const bidiRequest = id => string(1, id);
 export const appendRequest = (id, seq, data) => concat(string(1, Buffer.from(data).toString('hex')), bytes(2, bidiRequest(id)), uint(3, seq));
@@ -183,10 +238,9 @@ export function parseExec(data) {
   return { id, execId: execId ? text(execId) : undefined, name, toolCallId, providerIdentifier, toolName, args: decodeMap(argData) };
 }
 export function toolResult(exec, message) {
-  // MCP text results have no metadata slots. Preserve extra JSON fields as a whole-message JSON envelope.
-  const hasExtraFields = Object.keys(message).some(key => !['role', 'tool_call_id', 'content', 'is_error'].includes(key));
-  const content = hasExtraFields ? JSON.stringify(message) : typeof message.content === 'string' ? message.content : JSON.stringify(message.content);
-  const success = concat(bytes(1, bytes(1, string(1, content))), uint(2, message.is_error === true ? 1 : 0));
+  const content = toolParts(message).map(part => bytes(1, part.type === 'text' ? bytes(1, string(1, part.text))
+    : bytes(2, concat(bytes(1, part.data), string(2, part.mimeType)))));
+  const success = concat(...content, uint(2, message.is_error === true ? 1 : 0));
   return bytes(2, concat(uint(1, exec.id), ...(exec.execId === undefined ? [] : [string(15, exec.execId)]), bytes(11, bytes(1, success))));
 }
 export const toolClose = exec => bytes(5, bytes(1, uint(1, exec.id)));

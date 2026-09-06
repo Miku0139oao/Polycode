@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { CursorProviderError, fail, safeError, checkSignal, onAbort, delay, errorBody } from './errors.mjs';
 import { API, WEBSITE, Connection, headers, request, httpError, readJson } from './transport.mjs';
+import { validateMessages } from './content.mjs';
 
 export { CursorProviderError };
 const invalid = () => fail('invalid_request', 'Invalid or unsupported Chat Completions request.', 400);
@@ -48,23 +49,10 @@ function validateBody(input) {
   if (Object.keys(body).some(k => !allowed.includes(k))) throw fail('unsupported_option', 'This experimental Cursor transport does not support that completion option.', 400);
   if (body.stream !== undefined && typeof body.stream !== 'boolean') throw invalid();
   if (body.stream_options !== undefined && (!object(body.stream_options) || Object.keys(body.stream_options).some(k => k !== 'include_usage') || ![true, false, undefined].includes(body.stream_options.include_usage))) throw invalid();
-  if (body.stream_options?.include_usage === true) throw fail('unsupported_option', 'Cursor usage accounting is not available in this transport.', 400);
   if (body.tool_choice !== undefined && !['auto', 'none'].includes(body.tool_choice)) throw fail('unsupported_option', 'Forced tool choice is not supported by Cursor MCP transport.', 400);
   if (body.parallel_tool_calls !== undefined && typeof body.parallel_tool_calls !== 'boolean') throw invalid();
   if (!Array.isArray(body.messages) || !body.messages.length || body.messages.length > 10000) throw invalid();
-  for (const message of body.messages) {
-    if (!object(message) || !['system', 'developer', 'user', 'assistant', 'tool'].includes(message.role)) throw invalid();
-    if (!Object.hasOwn(message, 'content') && !(message.role === 'assistant' && message.tool_calls)) throw invalid();
-    if (Array.isArray(message.content) && message.content.some(part => object(part) && part.type !== undefined && part.type !== 'text')) {
-      throw fail('unsupported_content', 'Multimodal message parts are not supported by this Cursor transport.', 400);
-    }
-    if (message.role === 'tool' && (typeof message.tool_call_id !== 'string' || !message.tool_call_id)) throw invalid();
-    if (message.is_error !== undefined && typeof message.is_error !== 'boolean') throw invalid();
-    if (message.tool_calls !== undefined) {
-      if (message.role !== 'assistant' || !Array.isArray(message.tool_calls)) throw invalid();
-      for (const call of message.tool_calls) if (!object(call) || call.type !== 'function' || typeof call.id !== 'string' || !call.id || !object(call.function) || typeof call.function.name !== 'string' || typeof call.function.arguments !== 'string') throw invalid();
-    }
-  }
+  validateMessages(body.messages);
   if (body.tools !== undefined && (!Array.isArray(body.tools) || body.tools.length > 512)) throw invalid();
   const names = new Set();
   for (const tool of body.tools ?? []) {
@@ -219,7 +207,8 @@ export function createCursorProvider({
       if (last.role !== 'user') throw invalid();
       if ([...sessions].some(s => s.account === account && s.config === config && s.base === base)) throw fail('session_busy', 'This Cursor transcript already has an active or pending turn.', 409);
       if (sessions.size >= maxSessions) throw fail('session_limit', 'Cursor session limit reached; finish or close existing sessions.', 429);
-      session = { account, config, base, busy: true, controller: new AbortController(), seen: new Set() };
+      session = { account, config, base, busy: true, controller: new AbortController(),
+        seen: new Set(body.messages.flatMap(m => (m.tool_calls ?? []).map(c => c.id))) };
       sessions.add(session);
       session.maxTimer = setTimeout(() => drop(session), maxSessionMs);
       session.maxTimer.unref?.();
@@ -272,7 +261,7 @@ export function createCursorProvider({
           return; // Do not close/return the remote iterator. It remains parked on this exact exec.
         } else if (event.type === 'done') {
           drop(session);
-          yield { finish_reason: 'stop' };
+          yield { finish_reason: 'stop', usage: event.usage };
           return;
         }
       }
@@ -294,18 +283,20 @@ export function createCursorProvider({
         if (sessions.has(session)) touch(session);
       }
       if (!body.stream) {
-        let content = '', calls, finishReason;
+        let content = '', calls, finishReason, usage;
         for await (const part of iterator) {
           if (part.delta?.content) content += part.delta.content;
           if (part.delta?.tool_calls) calls = part.delta.tool_calls.map(({ index, ...call }) => call);
           if (part.finish_reason) finishReason = part.finish_reason;
+          if (part.usage !== undefined) usage = part.usage;
         }
         release();
-        return responseJSON({ id, object: 'chat.completion', created, model: body.model, choices: [{ index: 0, message: { role: 'assistant', content: content || null, ...(calls ? { tool_calls: calls } : {}) }, finish_reason: finishReason }] });
+        return responseJSON({ id, object: 'chat.completion', created, model: body.model, choices: [{ index: 0, message: { role: 'assistant', content: content || null, ...(calls ? { tool_calls: calls } : {}) }, finish_reason: finishReason }], ...(usage === undefined ? {} : { usage }) });
       }
       const encoder = new TextEncoder();
-      const chunk = (delta, finish_reason = null) => ({ id, object: 'chat.completion.chunk', created, model: body.model, choices: [{ index: 0, delta, finish_reason }] });
-      let started = false, terminal = false;
+      const includeUsage = body.stream_options?.include_usage === true;
+      const chunk = (delta, finish_reason = null) => ({ id, object: 'chat.completion.chunk', created, model: body.model, choices: [{ index: 0, delta, finish_reason }], ...(includeUsage ? { usage: null } : {}) });
+      let started = false, terminal = false, usage;
       const stream = new ReadableStream({
         async pull(controller) {
           if (terminal) return;
@@ -316,9 +307,13 @@ export function createCursorProvider({
             if (done) {
               terminal = true;
               release();
+              if (includeUsage) emit({ ...chunk({}), choices: [], usage: usage ?? null });
               emit('[DONE]');
               controller.close();
-            } else emit(chunk(value.delta ?? {}, value.finish_reason ?? null));
+            } else {
+              if (value.usage !== undefined) usage = value.usage;
+              emit(chunk(value.delta ?? {}, value.finish_reason ?? null));
+            }
           } catch (e) {
             terminal = true;
             drop(session);
