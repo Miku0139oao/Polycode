@@ -137,17 +137,17 @@ impl SessionActor {
     /// Recap-style side-calls preserve reasoning so their conversation prefix stays byte-identical to the parent turn.
     /// Messages strips reasoning only when the matching effort cannot emit a top-level thinking configuration.
     pub(crate) async fn prepare_side_call(&self) -> Result<SideCallSetup, acp::Error> {
-        let client = self.prepare_chat_completion(false).await?;
-        // One config read serves the window, model, and reasoning effort.
-        let sampling_config = self.chat_state_handle.get_sampling_config().await;
-        let context_window = sampling_config
-            .as_ref()
-            .map(|c| c.context_window.get())
-            .unwrap_or(DEFAULT_CONTEXT_WINDOW);
-        let reasoning_effort = sampling_config.as_ref().and_then(|c| c.reasoning_effort);
+        self.refresh_token_if_expired().await;
+        // Client and request model must come from one complete route snapshot, not
+        // separate reads separated by an await (a provider switch can intervene).
+        let sampling_config = self.reconstruct_full_config().await;
+        let context_window = sampling_config.context_window;
+        let reasoning_effort = sampling_config.reasoning_effort;
+        let model = sampling_config.model.clone();
+        let client = xai_grok_sampler::SamplingClient::new(sampling_config)
+            .map_err(|e| self.to_acp_error(e))?;
         let strip_reasoning =
             should_strip_side_call_reasoning(client.api_backend(), reasoning_effort);
-        let model = sampling_config.map(|c| c.model).unwrap_or_default();
         Ok(SideCallSetup {
             client,
             strip_reasoning,

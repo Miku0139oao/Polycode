@@ -496,9 +496,9 @@ impl ManagedMcpsConfig {
 #[serde(default)]
 pub(crate) struct ModelOverrideConfig {
     pub web_search: String,
-    /// `None` = current model.
+    /// `None` = provider-aware default at the inference consumer.
     pub session_summary: Option<String>,
-    /// Compiled default (`grok-4.6`) when unset locally, remotely, and via env.
+    /// `None` = provider-aware default at the inference consumer.
     pub image_description: Option<String>,
     /// Next-prompt suggestion model pin.
     /// Unlike the other overrides this does NOT fill a compiled default; see [`PromptSuggestModelPin`].
@@ -546,7 +546,8 @@ fn non_empty_model_override(value: Option<&str>) -> Option<String> {
 }
 impl ModelOverrideConfig {
     /// CLI flag > env var > config.toml > remote settings > compiled default.
-    /// `image_description` and `session_summary` always resolve to `Some(_)` (default `grok-4.6`), never the session model.
+    /// Keep unset image/title pins as `None`: a subscription uses its selected model,
+    /// while native consumers retain the compiled Grok defaults.
     /// `prompt_suggestion` resolves to a [`PromptSuggestModelPin`] instead of a model string.
     /// It has no CLI flag; the default and the catalog guard live at the consumer, `handle_suggest_prompt`.
     pub(crate) fn resolve(
@@ -616,14 +617,6 @@ impl ModelOverrideConfig {
         }
         if let Some(v) = cli_session_summary_model {
             result.session_summary = non_empty_model_override(Some(v));
-        }
-        if result.session_summary.is_none() {
-            result.session_summary =
-                Some(crate::models::default_session_summary_model().to_owned());
-        }
-        if result.image_description.is_none() {
-            result.image_description =
-                Some(crate::models::default_image_description_model().to_owned());
         }
         result
     }

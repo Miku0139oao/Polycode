@@ -1417,7 +1417,7 @@ async fn manual_after_auto_last_flush_is_manual() {
     actor
         .handle
         .tx
-        .send(PersistenceMsg::GeneratedTitle(AUTO.into()))
+        .send(PersistenceMsg::GeneratedTitle { title: AUTO.into(), generation: 0 })
         .unwrap();
     actor
         .handle
@@ -1530,7 +1530,7 @@ async fn auto_after_committed_manual_emits_no_set_title() {
     actor
         .handle
         .tx
-        .send(PersistenceMsg::GeneratedTitle(AUTO.into()))
+        .send(PersistenceMsg::GeneratedTitle { title: AUTO.into(), generation: 0 })
         .unwrap();
     actor
         .handle

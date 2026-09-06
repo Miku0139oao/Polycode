@@ -1530,10 +1530,10 @@ pub struct Config {
     #[serde(skip)]
     pub web_search_model: String,
     /// Session title model.
-    /// Resolved to the compiled default (`default_session_summary_model`) when unset; see `ModelOverrideConfig::resolve`.
+    /// Unset stays `None`; consumers apply native defaults only after selecting the session route.
     #[serde(skip)]
     pub session_summary_model: Option<String>,
-    /// Image describe model (`grok-4.6` default via `ModelOverrideConfig::resolve`).
+    /// Image describe pin; unset is resolved by the provider-aware inference consumer.
     #[serde(skip)]
     pub image_description_model: Option<String>,
     /// Next-prompt suggestion model pin (`env > [models] prompt_suggestion > remote`).
@@ -4910,10 +4910,64 @@ fn with_resolved_model<T>(model_id: &str, f: impl FnOnce(ModelLookup) -> T) -> T
     let models = resolve_model_list(&cfg, None);
     f(ModelLookup::Loaded(find_model_by_id(&models, model_id)))
 }
+/// Subscription routes are process-local provider endpoints, not native xAI auth.
+/// Inspect the route, not a process-global provider selection: resident sessions can differ.
+/// This is only a routing restriction; it does not authorize a transport or enable the bridge.
+pub(crate) fn is_subscription_sampling(config: &SamplerConfig) -> bool {
+    let Ok(url) = url::Url::parse(&config.base_url) else {
+        return false;
+    };
+    let loopback = match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        _ => false,
+    };
+    loopback && matches!(url.path().trim_end_matches('/'), "/codex/v1" | "/cursor/v1")
+}
+
+/// A subscription helper must be explicitly catalogued on the *same provider route*.
+/// Never resolve native/session/env/deployment credentials here, even when they exist.
+/// A missing, ambiguous, foreign, or incompatible pin retains the complete selected config.
+pub(crate) fn subscription_aux_sampling_config(
+    primary: &SamplerConfig,
+    model_id: Option<&str>,
+    models: &IndexMap<String, ModelEntry>,
+) -> SamplerConfig {
+    let Some(entry) = model_id.and_then(|id| models.get(id)) else {
+        return primary.clone();
+    };
+    let info = entry.info();
+    if info.base_url != primary.base_url
+        || info.api_backend != primary.api_backend
+        || info.auth_scheme != primary.auth_scheme
+        || info.extra_headers != primary.extra_headers
+        || info.query_params != primary.query_params
+        || info.env_http_headers != primary.env_http_headers
+        || entry.api_base_url.as_ref().is_some_and(|url| url != &primary.base_url)
+    {
+        return primary.clone();
+    }
+    // Start with the complete selected transport (including its bearer resolver/callbacks).
+    // Only a verified same-provider catalog entry may change model-specific settings.
+    let mut helper = primary.clone();
+    helper.model = info.model.clone();
+    helper.context_window = info.context_window.get();
+    helper.max_completion_tokens = info.max_completion_tokens;
+    helper.temperature = info.temperature;
+    helper.top_p = info.top_p;
+    helper.reasoning_effort = info.reasoning_effort;
+    helper.supports_backend_search = info.supports_backend_search;
+    helper.compactions_remaining = info.compactions_remaining;
+    helper.compaction_at_tokens = info.compaction_at_tokens;
+    helper.stream_tool_calls = info.stream_tool_calls.unwrap_or(primary.stream_tool_calls);
+    helper
+}
+
 /// Resolve a standalone `SamplerConfig` for an auxiliary model slug (image description, session summary, ...).
 /// Resolved through the catalog so a `[model.*]` override redirects it to its own endpoint, credentials, and routing `model`.
 /// On `None` the caller falls back to the active session's model.
 pub(crate) fn resolve_aux_model_sampling_config(
+    primary: &SamplerConfig,
     model_id: &str,
     models: &IndexMap<String, ModelEntry>,
     endpoints: &EndpointsConfig,
@@ -4922,6 +4976,9 @@ pub(crate) fn resolve_aux_model_sampling_config(
     alpha_test_key: Option<String>,
     client_version: Option<String>,
 ) -> Option<SamplerConfig> {
+    if is_subscription_sampling(primary) {
+        return Some(subscription_aux_sampling_config(primary, Some(model_id), models));
+    }
     let catalog_entry = find_model_by_id(models, model_id).cloned();
     if let Some(entry) = &catalog_entry {
         let credentials = resolve_credentials_enforced(entry, session_key, disable_api_key_auth);
@@ -5042,6 +5099,14 @@ pub(crate) fn finalize_image_describe_sampler_config(
     client_identifier: Option<String>,
     max_retries: Option<u32>,
 ) -> (String, SamplerConfig) {
+    // Defense in depth for callers that already resolved a helper before a provider switch.
+    let resolved_aux = resolved_aux.filter(|cfg| {
+        !is_subscription_sampling(active_session_config)
+            || (cfg.base_url == active_session_config.base_url
+                && cfg.api_backend == active_session_config.api_backend
+                && cfg.auth_scheme == active_session_config.auth_scheme
+                && cfg.api_key == active_session_config.api_key)
+    });
     match resolved_aux {
         Some(mut describe_cfg) => {
             stamp_session_local_sampler_fields(

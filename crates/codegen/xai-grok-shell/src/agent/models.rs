@@ -643,6 +643,10 @@ impl ModelsManager {
             .unwrap_or(false)
     }
 
+    pub(crate) fn session_summary_model(&self) -> Option<String> {
+        self.inner.cfg.read().session_summary_model.clone()
+    }
+
     pub(crate) fn prompt_suggest_model_pin(&self) -> crate::config::PromptSuggestModelPin {
         self.inner.cfg.read().prompt_suggest_model_pin.clone()
     }

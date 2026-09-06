@@ -2104,6 +2104,41 @@ fn build_minimal_agent_for_tests() -> MvpAgent {
     let cfg = AgentConfig::default();
     MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config")
 }
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn subscription_summary_client_affinity_uses_the_complete_selected_route() {
+    use xai_grok_test_support::EnvGuard;
+    let _legacy = EnvGuard::unset("GROK_API_KEY");
+    for native in [false, true] {
+        let _api = if native {
+            EnvGuard::set("XAI_API_KEY", "test-native-api")
+        } else {
+            EnvGuard::unset("XAI_API_KEY")
+        };
+        let agent = build_minimal_agent_for_tests();
+        if native {
+            agent.auth_manager.hot_swap(auth_with_mode(crate::auth::AuthMode::ApiKey, "test-native-session"));
+            agent.cfg.borrow_mut().endpoints.deployment_key = Some("test-native-deployment".into());
+        }
+        for provider in ["codex", "cursor"] {
+            let primary = SamplingConfig {
+                model: format!("selected-{provider}"),
+                base_url: format!("http://127.0.0.1:1234/{provider}/v1"),
+                api_key: Some("test-process-transport".into()),
+                api_backend: crate::sampling::ApiBackend::ChatCompletions,
+                ..Default::default()
+            };
+            for pin in [None, Some("grok-4.6"), Some("unavailable-foreign-model")] {
+                agent.cfg.borrow_mut().session_summary_model = pin.map(str::to_owned);
+                let (client, model) = agent.build_summary_client(&primary).unwrap();
+                assert_eq!(model, primary.model);
+                assert_eq!(client.api_backend(), primary.api_backend);
+                assert!(format!("{client:?}").contains(&primary.base_url));
+            }
+        }
+    }
+}
+
 fn session_usage_request(session_id: &str) -> acp::ExtRequest {
     acp::ExtRequest::new(
         "x.ai/session/usage",

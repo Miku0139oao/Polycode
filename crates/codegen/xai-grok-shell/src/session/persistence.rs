@@ -296,7 +296,9 @@ pub enum PersistenceMsg {
     CompactionSegment(crate::extensions::notification::CompactionSegmentFile),
     /// Generated session title from background LLM task.
     /// Routed back through the persistence channel so the storage write stays sequential with other summary.json mutations.
-    GeneratedTitle(String),
+    GeneratedTitle { title: String, generation: u64 },
+    /// Refresh the first-title resolver after a successful model/provider selection.
+    SummarySampling { client: OaiCompatClient, model: String },
     /// Early-session title refresh (turns 3 and 6): overwrite an existing auto title with one regenerated from the whole conversation.
     /// Never overwrites a manual `/rename` (enforced atomically under the summary lock).
     RegenerateTitle(String),
@@ -2009,7 +2011,13 @@ impl SessionPersistence {
                         &self.info.cwd,
                     );
                 }
-                PersistenceMsg::GeneratedTitle(title) => {
+                PersistenceMsg::SummarySampling { client, model } => {
+                    self.summary.refresh_sampling(client, model);
+                }
+                PersistenceMsg::GeneratedTitle { title, generation } => {
+                    if !self.summary.accept_generated(generation) {
+                        continue;
+                    }
                     // Auto-generated titles must never overwrite a title the user set via `/rename`
                     // `set_generated_title_if_absent` writes only when the session still has no title (checked atomically under the summary lock)
                     // A manual rename that raced this generation thus wins, and its title is not clobbered locally or on remotes

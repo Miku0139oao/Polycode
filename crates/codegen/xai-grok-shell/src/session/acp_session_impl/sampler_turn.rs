@@ -779,8 +779,8 @@ impl SessionActor {
             .await
             .map(|c| c.model)
             .unwrap_or_default();
-        // Route the classifier to a dedicated model when a slug is configured
-        // A None or unresolvable slug falls back to the session client and model
+        // The worker resolves this pin at request time. A cached client here could
+        // keep spending on the old provider after a successful session model switch.
         let aux_classifier_sampler = match auto_cfg.classifier_model.as_deref() {
             Some(slug) => self.resolve_auto_classifier_sampler(slug).await,
             None => None,
@@ -811,6 +811,10 @@ impl SessionActor {
             while let Some((messages, respond_to)) = rx.recv().await {
                 let request_span = region!("permission.classifier_request", Parent::Root);
                 let result = async {
+                    let aux_classifier_sampler = match auto_cfg.classifier_model.as_deref() {
+                        Some(slug) => session.resolve_auto_classifier_sampler(slug).await,
+                        None => None,
+                    };
                     let (sampling_client, model, context_window) = match &aux_classifier_sampler {
                         Some((client, model, context_window)) => {
                             (client.clone(), model.clone(), *context_window)
@@ -905,12 +909,14 @@ impl SessionActor {
     }
 
     /// Resolve a standalone aux-model `SamplerConfig` for `slug` via the shared catalog routing, gathering the session-local auth context once.
-    /// The routing is Tier-1 catalog creds / Tier-2 xAI-proxy via session token / `XAI_API_KEY` / deployment key.
+    /// Subscription routes retain selected-provider affinity before any native credential lookup.
+    /// Native routing remains catalog creds, then xAI-proxy/session/API/deployment credentials.
     /// Shared by image-describe and the classifier so the gather can't drift.
     /// `None` means the caller falls back to the session model.
     pub(super) async fn resolve_aux_sampler_config(
         &self,
         slug: &str,
+        primary: &xai_grok_sampler::SamplerConfig,
     ) -> Option<xai_grok_sampler::SamplerConfig> {
         let creds = self.chat_state_handle.get_credentials().await;
         let session_key = self
@@ -925,6 +931,7 @@ impl SessionActor {
             .map(|am| am.grok_com_config().api_key_auth_disabled())
             .unwrap_or(false);
         crate::agent::config::resolve_aux_model_sampling_config(
+            primary,
             slug,
             &models,
             &endpoints,
@@ -943,7 +950,7 @@ impl SessionActor {
         slug: &str,
     ) -> Option<(xai_grok_sampler::SamplingClient, String, u64)> {
         let active_session_config = self.reconstruct_full_config().await;
-        let mut cfg = self.resolve_aux_sampler_config(slug).await?;
+        let mut cfg = self.resolve_aux_sampler_config(slug, &active_session_config).await?;
         crate::agent::config::stamp_session_local_sampler_fields(
             &mut cfg,
             &active_session_config,

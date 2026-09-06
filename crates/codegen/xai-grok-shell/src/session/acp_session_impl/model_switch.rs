@@ -2,6 +2,38 @@ use super::*;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use xai_chat_state::conversation_util::replace_or_insert_system_head;
 impl SessionActor {
+    /// Resolve the title client from the same complete config being committed by the switch.
+    /// Build before mutating live state, so a client construction failure cannot retain an
+    /// old-provider title resolver behind a nominally successful model selection.
+    fn selected_summary_client(
+        &self,
+        primary: &xai_grok_sampler::SamplerConfig,
+    ) -> Result<(xai_grok_sampler::SamplingClient, String), acp::Error> {
+        let models = self.models_manager.models();
+        let endpoints = self.models_manager.endpoints();
+        let pin = self.models_manager.session_summary_model();
+        let session_key = self.auth_manager.as_ref()
+            .and_then(|am| am.current_or_expired().map(|a| a.key));
+        let disable_api_key_auth = self.auth_manager.as_ref()
+            .is_some_and(|am| am.grok_com_config().api_key_auth_disabled());
+        let resolved = crate::agent::config::resolve_aux_model_sampling_config(
+            primary,
+            pin.as_deref().unwrap_or(crate::models::default_session_summary_model()),
+            &models,
+            &endpoints,
+            session_key.as_deref(),
+            disable_api_key_auth,
+            endpoints.alpha_test_key.clone(),
+            primary.client_version.clone(),
+        );
+        let (model, config) = crate::agent::config::finalize_image_describe_sampler_config(
+            resolved, primary, primary.client_identifier.clone(), primary.max_retries,
+        );
+        let client = xai_grok_sampler::SamplingClient::new(config)
+            .map_err(|e| self.to_acp_error(e))?;
+        Ok((client, model))
+    }
+
     pub(super) async fn handle_set_session_model(
         self: &std::sync::Arc<Self>,
         sampling_config: xai_grok_sampler::SamplerConfig,
@@ -14,6 +46,8 @@ impl SessionActor {
         if crate::polycode::enabled() && self.state.lock().await.running_task.is_some() {
             return Err(acp::Error::invalid_params().data("Wait for the active turn, or cancel it before switching models"));
         }
+        let (summary_client, summary_model) = self.selected_summary_client(&sampling_config)?;
+        self.abort_title_refresh();
         let model_id = acp::ModelId::new(sampling_config.model.clone());
         let new_context_window = self.compaction.context_window_override.unwrap_or_else(|| {
             std::num::NonZeroU64::new(sampling_config.context_window).unwrap_or_else(|| {
@@ -49,6 +83,12 @@ impl SessionActor {
                 "supports_backend_search": sampling_config.supports_backend_search,
             })),
         );
+        // Queue title invalidation before publishing the new chat route. The FIFO is
+        // the persistence actor's selection boundary, including already-queued titles.
+        let _ = self.notifications.persistence_tx.send(PersistenceMsg::SummarySampling {
+            client: summary_client,
+            model: summary_model,
+        });
         self.chat_state_handle
             .update_sampling_config(xai_grok_sampling_types::SamplingConfig {
                 base_url: sampling_config.base_url.clone(),
@@ -166,6 +206,12 @@ impl SessionActor {
         }
         cfg.reasoning_effort = Some(effort);
         let model_id = acp::ModelId::new(cfg.model.clone());
+        let mut primary = self.reconstruct_full_config().await;
+        primary.model = cfg.model.clone();
+        primary.reasoning_effort = cfg.reasoning_effort;
+        let (client, model) = self.selected_summary_client(&primary)?;
+        self.abort_title_refresh();
+        let _ = self.notifications.persistence_tx.send(PersistenceMsg::SummarySampling { client, model });
         self.chat_state_handle.update_sampling_config(cfg);
         let agent_name = self.agent.borrow().definition().name.clone();
         let _ = self

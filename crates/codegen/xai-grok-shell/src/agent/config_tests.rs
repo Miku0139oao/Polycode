@@ -1,6 +1,8 @@
 use super::*;
 use serial_test::serial;
 use xai_grok_test_support::EnvGuard;
+#[path = "aux_affinity_tests.rs"]
+mod aux_affinity;
 #[test]
 fn main_cli_tools_override_preserves_profile_injection_policy() {
     let overrides = CliAgentOverrides {
@@ -327,13 +329,13 @@ fn new_from_toml_cfg_restores_web_search_and_session_summary_models() {
     );
     assert_eq!(
         cfg.session_summary_model,
-        Some(crate::models::default_session_summary_model().to_owned()),
-        "empty config should produce compiled default session_summary model"
+        None,
+        "empty config must leave the title model provider-aware"
     );
     assert_eq!(
         cfg.image_description_model,
-        Some(crate::models::default_image_description_model().to_owned()),
-        "empty config should produce compiled default image_description model"
+        None,
+        "empty config must leave the image model provider-aware"
     );
     let with_overrides: toml::Value = toml::from_str(
         r#"
@@ -420,6 +422,7 @@ fn resolve_aux_model_honors_grok_build_override() {
         ),
     );
     let resolved = resolve_aux_model_sampling_config(
+        &SamplerConfig::default(),
         "grok-build",
         &catalog,
         &endpoints,
@@ -453,6 +456,7 @@ async fn aux_model_with_auth_provider_never_reroutes() {
     catalog.insert("proxied-aux".to_string(), entry);
     assert!(
         resolve_aux_model_sampling_config(
+            &SamplerConfig::default(),
             "proxied-aux",
             &catalog,
             &endpoints,
@@ -466,6 +470,7 @@ async fn aux_model_with_auth_provider_never_reroutes() {
     );
     let _ = provider.ensure_fresh_token(None).await;
     let resolved = resolve_aux_model_sampling_config(
+        &SamplerConfig::default(),
         "proxied-aux",
         &catalog,
         &endpoints,
@@ -6712,7 +6717,7 @@ fn resolve_runtime_fields_interactive_defaults() {
     );
     assert_eq!(
         cfg.session_summary_model,
-        Some(crate::models::default_session_summary_model().to_owned())
+        None
     );
     assert!(!cfg.path_not_found_hints);
 }

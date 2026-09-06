@@ -118,6 +118,7 @@ impl MvpAgent {
             )
         };
         let config = match crate::agent::config::resolve_aux_model_sampling_config(
+            primary,
             &slug,
             &models,
             &endpoints,
@@ -135,11 +136,7 @@ impl MvpAgent {
                 );
                 cfg
             }
-            None => {
-                let mut fallback = primary.clone();
-                fallback.model = slug;
-                fallback
-            }
+            None => primary.clone(),
         };
         let model = config.model.clone();
         let client = OaiCompatClient::new(config).map_err(map_sampling_err_to_acp)?;

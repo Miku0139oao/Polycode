@@ -502,7 +502,18 @@ impl SessionActor {
         cwd: &str,
         model_override: Option<&str>,
     ) -> Option<String> {
-        let sampling_client = self.prepare_chat_completion(false).await.ok()?;
+        self.refresh_token_if_expired().await;
+        let primary = self.reconstruct_full_config().await;
+        let (config, model) = if crate::agent::config::is_subscription_sampling(&primary) {
+            let config = crate::agent::config::subscription_aux_sampling_config(
+                &primary, model_override, &self.models_manager.models(),
+            );
+            let model = config.model.clone();
+            (config, model)
+        } else {
+            (primary, model_override.unwrap_or("grok-4.6").to_owned())
+        };
+        let sampling_client = xai_grok_sampler::SamplingClient::new(config).ok()?;
 
         let system = "You are a shell command autocomplete engine. \
             Given a partial command, output ONLY the completed command. \
@@ -514,11 +525,6 @@ impl SessionActor {
             ConversationItem::system(system.to_owned()),
             ConversationItem::user(user_msg),
         ];
-
-        let model = match model_override {
-            Some(m) => m.to_owned(),
-            None => "grok-4.6".to_owned(),
-        };
 
         let request = ConversationRequest {
             items,
@@ -570,13 +576,25 @@ impl SessionActor {
         let sampling_config = self.chat_state_handle.get_sampling_config().await;
         let session_model = sampling_config.as_ref().map(|c| c.model.as_str());
         let pin = self.models_manager.prompt_suggest_model_pin();
-        let Some(model) = prompt_suggest::effective_suggest_model(
-            &pin,
-            model_override,
-            session_model,
-            reasoning_is_off,
-            |m| self.models_manager.model_in_catalog(m),
-        ) else {
+        self.refresh_token_if_expired().await;
+        let primary = self.reconstruct_full_config().await;
+        let subscription_config = crate::agent::config::is_subscription_sampling(&primary).then(|| {
+            let helper = match &pin {
+                crate::config::PromptSuggestModelPin::Env(model)
+                | crate::config::PromptSuggestModelPin::Pinned(model) => Some(model.as_str()),
+                crate::config::PromptSuggestModelPin::Unpinned => model_override,
+            };
+            crate::agent::config::subscription_aux_sampling_config(
+                &primary, helper, &self.models_manager.models(),
+            )
+        });
+        let effective_model = subscription_config.as_ref().map(|c| c.model.clone()).or_else(|| {
+            prompt_suggest::effective_suggest_model(
+                &pin, model_override, session_model, reasoning_is_off,
+                |m| self.models_manager.model_in_catalog(m),
+            )
+        });
+        let Some(model) = effective_model else {
             tracing::debug!(
                 pin = ?pin,
                 client_hint = ?model_override,
@@ -605,8 +623,7 @@ impl SessionActor {
             return None;
         };
 
-        self.refresh_token_if_expired().await;
-        let mut sampling_config = self.reconstruct_full_config().await;
+        let mut sampling_config = subscription_config.unwrap_or(primary);
         sampling_config.model = model.clone();
         sampling_config.reasoning_effort = None;
         let supports_reasoning = self.models_manager.model_supports_reasoning_effort(&model);
