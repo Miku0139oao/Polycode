@@ -607,6 +607,7 @@ pub enum Action {
     SwitchAccount,
     /// User pressed login on the welcome screen.
     Login,
+    Provider(crate::app::provider::Command),
     /// Cancel an in-progress login that was started from inside a session (`/login` or a 401 re-auth prompt) and return to the previous view.
     /// Distinct from `Quit`: abandoning a mid-session re-auth must not exit the app or lose the open session.
     CancelLogin,
@@ -1316,6 +1317,7 @@ pub enum AfterSessionDelete {
 /// The event loop spawns these into a `JoinSet`; completions come back through [`TaskResult`] as `Action::TaskComplete`.
 #[derive(Debug)]
 pub enum Effect {
+    Provider { generation: u64, target: AgentId, operation: crate::app::provider::Operation },
     /// Run a `command` status line.
     RunStatusLineCommand(StatusLineRun),
     /// Create a new ACP session.
@@ -2179,6 +2181,7 @@ pub struct WorkspaceMemberUpsertFailure {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum TaskResult {
+    Provider { generation: u64, target: AgentId, reply: crate::app::provider::Reply },
     /// A `command` status line finished.
     StatusLineCommandFinished {
         id: crate::app::status_line::RunId,

@@ -701,6 +701,7 @@ pub struct AppView {
     pub leader_mode: bool,
     /// Explicit external process backend; independent of peer-claimed metadata.
     pub external_acp: bool,
+    pub(crate) provider: crate::app::provider::State,
     /// App-level credit balance used to show the usage warning on the welcome screen before any agent session exists.
     pub credit_balance: Option<crate::views::credit_bar::CreditBalance>,
     /// App-level auto top-up rule paired with `credit_balance` for the warning.
@@ -1638,6 +1639,7 @@ impl AppView {
             tier_restricted_commands: Vec::new(),
             leader_mode: false,
             external_acp: false,
+            provider: Default::default(),
             credit_balance: None,
             auto_topup: None,
             billing_poll_wanted: false,

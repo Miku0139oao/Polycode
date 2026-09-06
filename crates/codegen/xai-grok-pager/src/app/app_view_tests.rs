@@ -294,6 +294,7 @@ pub(crate) fn test_app() -> AppView {
         tier_restricted_commands: Vec::new(),
         leader_mode: true,
         external_acp: false,
+        provider: Default::default(),
         credit_balance: None,
         auto_topup: None,
         billing_poll_wanted: false,

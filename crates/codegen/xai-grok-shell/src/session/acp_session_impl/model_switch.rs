@@ -11,6 +11,9 @@ impl SessionActor {
         skip_prompt_rewrite: bool,
         auto_compact_threshold_percent: u8,
     ) -> Result<acp::ModelId, acp::Error> {
+        if crate::polycode::enabled() && self.state.lock().await.running_task.is_some() {
+            return Err(acp::Error::invalid_params().data("Wait for the active turn, or cancel it before switching models"));
+        }
         let model_id = acp::ModelId::new(sampling_config.model.clone());
         let new_context_window = self.compaction.context_window_override.unwrap_or_else(|| {
             std::num::NonZeroU64::new(sampling_config.context_window).unwrap_or_else(|| {

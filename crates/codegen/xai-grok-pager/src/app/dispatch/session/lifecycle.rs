@@ -1423,6 +1423,15 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
     result: Result<(), SwitchModelError>,
     prev_model_id: Option<acp::ModelId>,
 ) -> Vec<Effect> {
+    if result.is_ok() && xai_grok_shell::polycode::enabled() {
+        use crate::app::provider::Choice;
+        use xai_grok_shell::polycode::ProviderId;
+        app.provider.selected = Some(if model_id.0.starts_with("codex/") {
+            Choice::Subscription(ProviderId::Codex)
+        } else if model_id.0.starts_with("cursor/") {
+            Choice::Subscription(ProviderId::Cursor)
+        } else { Choice::Grok });
+    }
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.session.model_switch_pending = false;
         let mut effects = match result {

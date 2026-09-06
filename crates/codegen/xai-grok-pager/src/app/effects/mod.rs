@@ -100,6 +100,12 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::Provider { generation, target, operation } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                TaskResult::Provider { generation, target, reply: crate::app::provider::execute(operation, tx).await }
+            });
+        }
         Effect::Logout => {
             let tx = acp_tx.clone();
             tasks

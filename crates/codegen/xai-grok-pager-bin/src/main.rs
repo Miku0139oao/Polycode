@@ -1916,6 +1916,17 @@ fn main() {
         xai_grok_update::channel_name().unwrap_or_default(),
     ));
     let args = PagerArgs::parse_cli();
+    if args.polycode_native {
+        xai_grok_extra_ca::ensure_default_crypto_provider();
+        if let Err(error) = xai_grok_shell::polycode::enable_from_env(args.polycode_provider.as_deref()) {
+            eprintln!("Polycode: {error}");
+            std::process::exit(2);
+        }
+        // SAFETY: still single-threaded, before telemetry, runtime, and native worker
+        // startup. Tools, MCP servers, auth helpers, and child sessions must not inherit
+        // the process control bearer. The bridge and sampler retain it privately.
+        unsafe { std::env::remove_var("POLYCODE_BRIDGE_TOKEN"); }
+    }
     if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) {
         return;
     }
@@ -2003,9 +2014,11 @@ fn main() {
 async fn async_main(args: PagerArgs) -> Result<()> {
     xai_grok_extra_ca::ensure_default_crypto_provider();
     let mut args = args.apply_cwd()?;
-    let external_config = xai_grok_pager::acp::external::ExternalAgentConfig::resolve(
-        &args, &xai_grok_shell::config::load_effective_config()?,
-    )?;
+    let external_config = if args.polycode_native { None } else {
+        xai_grok_pager::acp::external::ExternalAgentConfig::resolve(
+            &args, &xai_grok_shell::config::load_effective_config()?,
+        )?
+    };
     if let Some(config) = &external_config { config.validate_launch(&args)?; }
     let is_external = external_config.is_some();
     if let Some(ref mode) = args.compaction_mode {

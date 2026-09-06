@@ -706,7 +706,15 @@ async fn eager_auth_or_login_fallback(
     AuthStartMode,
     Option<serde_json::Value>,
 ) {
+    if xai_grok_shell::polycode::enabled() && needs_login {
+        // The native session can be created without a first-party account. Keep its
+        // per-turn auth gate, but do not prevent opening the local provider picker.
+        return (false, login_label, login_method_id, auth_start_mode, None);
+    }
     if auth_methods.is_empty() {
+        if xai_grok_shell::polycode::enabled() {
+            return (false, None, None, AuthStartMode::Pending, None);
+        }
         // preferred_method pin unavailable: fail closed, no invented method
         return (true, None, None, AuthStartMode::Pending, None);
     }

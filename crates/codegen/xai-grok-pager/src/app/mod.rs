@@ -10,6 +10,7 @@
 //! - [`acp_handler`] — ACP notification routing
 //! - [`event_loop`] — biased tokio::select! loop
 pub mod actions;
+pub(crate) mod provider;
 pub mod agent;
 pub mod agent_view;
 pub mod app_view;
@@ -621,10 +622,21 @@ pub async fn run(
     let startup_start = std::time::Instant::now();
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-    let external_config = crate::acp::external::ExternalAgentConfig::resolve(&args, &raw_config)?;
+    if args.polycode_native {
+        if !xai_grok_shell::polycode::enabled() {
+            anyhow::bail!("The native launcher must initialize the Polycode bridge before starting the runtime");
+        }
+        // The trusted overlay is process-local: never attach to a shared leader.
+        args.no_leader = true;
+    }
+    let external_config = if args.polycode_native { None } else {
+        crate::acp::external::ExternalAgentConfig::resolve(&args, &raw_config)?
+    };
     if let Some(config) = &external_config { config.validate_launch(&args)?; }
     let is_external = external_config.is_some();
-    let had_prefetch = if is_external {
+    let had_prefetch = if args.polycode_native {
+        false // Provider login is always an explicit TUI action, never a startup browser.
+    } else if is_external {
         xai_tty_utils::redirect_native_stderr();
         false
     } else {

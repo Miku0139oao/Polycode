@@ -19,6 +19,7 @@ mod doom_loop_recovery;
 pub mod events;
 pub mod handle;
 pub mod metrics;
+pub mod local_transport;
 mod prewarm;
 pub mod retry;
 pub mod sampling_log;

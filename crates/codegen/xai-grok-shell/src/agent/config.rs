@@ -3565,6 +3565,7 @@ pub(crate) fn resolve_model_list(
     for entry in resolved.values_mut() {
         entry.info.derive_reasoning_effort_fields();
     }
+    crate::polycode::inject_models(&mut resolved, &cfg.endpoints);
     resolved
 }
 /// Layer 6 of [`resolve_model_list`]: fold the global `[models].extra_headers` into every model as a base.
@@ -4325,6 +4326,11 @@ impl ModelEntry {
     /// `None` falls through to the session / global key.
     /// Static only: never consults auth-provider tokens.
     pub(crate) fn own_credential(&self) -> Option<String> {
+        if crate::polycode::is_bridge_endpoint(&self.info.base_url) {
+            // Nonsecret marker for native BYOK gating. The actual token is applied by
+            // the sampler's registered loopback transport, never stored in chat/config.
+            return Some("polycode-process-auth".into());
+        }
         first_own_credential(self.api_key.as_deref(), self.env_key.as_ref())
     }
     /// The provider governing this model's bearer: `None` when a static `api_key`/`env_key` resolves.

@@ -90,6 +90,8 @@ pub enum QuestionFocus {
 /// Not `Clone`: `FeedbackTrace` owns its attachments' staged temp files.
 #[derive(Debug)]
 pub enum LocalQuestionKind {
+    /// Trusted local provider/account UI; never emits an ACP question response.
+    Provider { login: bool },
     /// Hard-modal card opened when a `UserPromptSubmit` hook blocks a prompt.
     /// Carries the local queue row the blocked prompt was requeued into.
     /// Esc, Ctrl+C, and dismissal are refused: the queue stays parked until the user picks Edit, Resend, or Discard.

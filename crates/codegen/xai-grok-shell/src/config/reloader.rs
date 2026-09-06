@@ -357,7 +357,10 @@ impl ConfigReloader {
         let new_model_table = new_global.get("model");
         let old_models_table = self.last_global_config.get("models");
         let new_models_table = new_global.get("models");
-        if old_model_table != new_model_table || old_models_table != new_models_table {
+        if old_model_table != new_model_table || old_models_table != new_models_table
+            || self.last_global_config.get("model_providers") != new_global.get("model_providers")
+            || self.last_global_config.get("auth_provider") != new_global.get("auth_provider")
+        {
             info!("model config change detected");
             let _ = self.config_update_tx.send(ConfigUpdate::ModelsChanged);
         }

@@ -1846,7 +1846,9 @@ fn translate_local_submit(
 ) -> InputOutcome {
     use crate::views::question_view::{LocalQuestionKind, QuestionSelection};
     if skipped {
-        return InputOutcome::Changed;
+        return if matches!(kind, LocalQuestionKind::Provider { .. }) {
+            InputOutcome::Action(Action::Provider(crate::app::provider::Command::Cancel))
+        } else { InputOutcome::Changed };
     }
     let Some(QuestionSelection::Single(Some(idx))) = qv.selections.first() else {
         if let LocalQuestionKind::FeedbackTrace { report, images } = kind {
@@ -1859,6 +1861,10 @@ fn translate_local_submit(
         return InputOutcome::Changed;
     };
     match kind {
+        LocalQuestionKind::Provider { login } => {
+            let id = qv.questions.first().and_then(|q| q.options.get(*idx)).and_then(|o| o.id.as_deref()).unwrap_or("cancel");
+            InputOutcome::Action(Action::Provider(crate::app::dispatch::provider::answer(id, login)))
+        }
         LocalQuestionKind::PromptBlocked { row_id } => {
             use crate::app::actions::PromptBlockChoice;
             let choice = match *idx {

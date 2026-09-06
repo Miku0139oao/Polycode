@@ -192,6 +192,7 @@ pub(crate) fn handle_ask_user_question(
                 kind => {
                     // The trace-consent and doctor-fix arms above own their variants; their labels here are graceful fallbacks
                     let cmd = match kind {
+                        LocalQuestionKind::Provider { .. } => "/provider",
                         LocalQuestionKind::Fork { .. } => "/fork",
                         LocalQuestionKind::NewSession => "/new",
                         LocalQuestionKind::CreditLimitUpsell { .. } => "credit-limit upsell",

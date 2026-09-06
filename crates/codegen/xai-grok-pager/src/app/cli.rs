@@ -425,6 +425,12 @@ pub struct PagerArgs {
     /// Working directory.
     #[arg(long)]
     pub cwd: Option<PathBuf>,
+    /// Keep the native engine and use the launcher's local subscription model bridge.
+    #[arg(long, conflicts_with_all = ["acp_executable", "leader", "leader_socket"])]
+    pub polycode_native: bool,
+    /// Initially highlight a provider; does not sign in or replace the native session.
+    #[arg(long, requires = "polycode_native", value_parser = ["native", "codex", "cursor"])]
+    pub polycode_provider: Option<String>,
     /// Explicitly use native Grok, ignoring configured external ACP settings.
     #[arg(long, conflicts_with = "acp_executable")]
     pub no_external_acp: bool,

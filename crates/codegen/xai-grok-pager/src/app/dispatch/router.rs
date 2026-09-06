@@ -149,6 +149,19 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         app.show_toast(crate::app::external::UNSUPPORTED);
         return vec![];
     }
+    if xai_grok_shell::polycode::enabled() {
+        if matches!(&action, Action::SwitchModel { .. } | Action::SetDefaultModel(_)) {
+            if let ActiveView::Agent(id) = app.active_view && let Some(agent) = app.agents.get(&id)
+                && (agent.session.state.is_busy() || agent.session.model_switch_pending)
+            {
+                app.show_toast("Wait for the turn to finish, or cancel it before changing models");
+                return vec![];
+            }
+        }
+        if let Action::SetDefaultModel(model_id) = action {
+            return dispatch(Action::SwitchModel { model_id, effort: None }, app);
+        }
+    }
     app.reconcile_foreign_resume_launch();
     let effects = match action {
         Action::Quit | Action::QuitConfirmed => {
@@ -1178,7 +1191,13 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             with_active_agent(app, |agent| agent.cycle_highlighted_link(false));
             vec![]
         }
-        Action::Login => dispatch_login(app),
+        Action::Provider(command) => super::provider::dispatch(app, command),
+        Action::Login => {
+            if xai_grok_shell::polycode::enabled()
+                && matches!(app.provider.selected, Some(crate::app::provider::Choice::Subscription(_)))
+            { super::provider::dispatch(app, crate::app::provider::Command::Menu { login: true }) }
+            else { dispatch_login(app) }
+        },
         Action::CancelLogin => dispatch_cancel_login(app),
         Action::SubmitAuthCode(code) => dispatch_submit_auth_code(app, code),
         Action::CopyAuthUrl => {

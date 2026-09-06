@@ -609,7 +609,9 @@ impl SamplingClient {
             }
         }
 
-        let http = if config.force_http1 {
+        let http = if let Some(http) = crate::local_transport::client(&config.base_url) {
+            http
+        } else if config.force_http1 {
             tracing::info!("Using HTTP/1.1 for sampling client (force_http1=true)");
             crate::shared_http::client_http1().map_err(SamplingError::Http)?
         } else {
@@ -713,10 +715,14 @@ impl SamplingClient {
                 x_api_key_prefix = x_api_key_prefix.as_deref().unwrap_or("none"),
             );
         }
-        let sent_bearer = Self::sent_fragment_from_headers(&headers, &self.defaults.auth_scheme);
+        let sent_bearer = if crate::local_transport::is_local(&self.base_url) { None } else {
+            Self::sent_fragment_from_headers(&headers, &self.defaults.auth_scheme)
+        };
         if let Some(injector) = &self.header_injector {
             injector.inject(&mut headers);
         }
+        // Last, after diagnostics/injectors: only the private process bearer reaches the bridge.
+        crate::local_transport::authorize(&self.base_url, &mut headers);
         SentRequest {
             builder: self.http.post(url).headers(headers),
             sent_bearer,
@@ -742,6 +748,7 @@ impl SamplingClient {
     /// For request-start diagnostics ([`Self::auth_info`]) only.
     /// 401 attribution must use the fragment captured by [`Self::post`], which cannot race a recovery.
     fn current_sent_bearer_suffix(&self) -> Option<String> {
+        if crate::local_transport::is_local(&self.base_url) { return None; }
         if self.bearer_resolver.is_some() {
             return self
                 .bearer_resolver
@@ -2201,6 +2208,46 @@ mod tests {
                 Some(ApiErrorCode::InvalidImage)
             ),
         );
+    }
+
+    #[tokio::test]
+    async fn polycode_native_transport_is_scoped_redacted_and_never_follows_redirects() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        crate::local_transport::register(&origin, "private-process-token").unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut byte = [0];
+                socket.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+                if request.ends_with(b"\r\n\r\n") { break; }
+            }
+            socket.write_all(b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/must-not-follow\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let cfg = SamplerConfig { base_url: format!("{origin}/codex/v1"), api_key: Some("polycode-process-auth".into()), ..minimal_config() };
+        assert!(!format!("{cfg:?}").contains("private-process-token"));
+        assert!(!serde_json::to_string(&cfg).unwrap().contains("private-process-token"));
+        let client = SamplingClient::new(cfg).unwrap();
+        assert_eq!(client.current_sent_bearer_suffix(), None);
+        let request = client.post(client.endpoint("chat/completions"));
+        assert!(request.sent_bearer.is_none());
+        let request = request.builder.build().unwrap();
+        assert!(!format!("{request:?}").contains("private-process-token"));
+        assert_eq!(request.headers()[AUTHORIZATION], "Bearer private-process-token");
+        let response = client.http.execute(request).await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+        let wire = server.join().unwrap();
+        assert!(wire.to_ascii_lowercase().contains("authorization: bearer private-process-token\r\n"));
+        assert!(!wire.contains("polycode-process-auth"));
+        let native = SamplingClient::new(SamplerConfig { api_key: Some("native-only-key".into()), ..minimal_config() }).unwrap();
+        let request = native.post(native.endpoint("chat/completions")).builder.build().unwrap();
+        assert_eq!(request.headers()[AUTHORIZATION], "Bearer native-only-key");
+        assert!(!format!("{request:?}").contains("private-process-token"));
     }
 
     fn minimal_config() -> SamplerConfig {

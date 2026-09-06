@@ -19,11 +19,17 @@ fn byok_from_models(
     preferred: Option<&str>,
     current: &str,
 ) -> Option<String> {
+    // A bridge bearer authorizes only the local model transport, never voice, tools,
+    // auth export, or native Grok. Do not promote it to process-wide xAI auth.
+    let credential = |m: &ModelEntry| {
+        (!crate::polycode::is_bridge_endpoint(&m.info.base_url))
+            .then(|| m.own_credential()).flatten()
+    };
     preferred
         .and_then(|id| models.get(id))
-        .and_then(|m| m.own_credential())
-        .or_else(|| models.get(current).and_then(|m| m.own_credential()))
-        .or_else(|| models.values().find_map(|m| m.own_credential()))
+        .and_then(credential)
+        .or_else(|| models.get(current).and_then(credential))
+        .or_else(|| models.values().find_map(credential))
 }
 struct MissingSessionCtx {
     has_session_key: bool,

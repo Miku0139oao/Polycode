@@ -249,6 +249,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         crate::app::workspace_sync::request(app);
     }
     match result {
+        TaskResult::Provider { generation, target, reply } => super::provider::complete(app, generation, target, reply),
         TaskResult::SessionCreated {
             agent_id,
             session_id,

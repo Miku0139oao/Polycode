@@ -13,6 +13,13 @@ use crate::session::ExtMethodResult;
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
+        "x.ai/auth/polycode/reload" if crate::polycode::enabled() => {
+            super::session_admin::handle_reload_models(agent)?;
+            to_raw_response(&acp::SessionModelState::new(
+                agent.models_manager.current_model_id(),
+                agent.models_manager.available().values().cloned().collect(),
+            ))
+        }
         "x.ai/auth/getBearerToken" => handle_get_bearer_token(agent).await,
         "x.ai/getApiKey" => handle_get_api_key(),
         "x.ai/setApiKey" => handle_set_api_key(args),

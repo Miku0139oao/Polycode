@@ -1292,7 +1292,8 @@ pub(crate) async fn run(
     // Seed auth state from ACP connection metadata.
     // --force-login overrides: show the login screen even when credentials exist.
     let force_login = args.force_login && !connection.auth_methods.is_empty();
-    let needs_interactive_login = connection.needs_login || force_login;
+    let needs_interactive_login = (connection.needs_login || force_login)
+        && !xai_grok_shell::polycode::enabled();
     if needs_interactive_login {
         app.welcome_prompt_focused = false;
 
@@ -1345,7 +1346,9 @@ pub(crate) async fn run(
     // else: auth_state defaults to Done (already authenticated eagerly)
     // Effects stashed until after the initial render, so the user sees the welcome/auth UI right away
     super::external::apply(&mut app);
-    let mut post_render_effects = if needs_interactive_login {
+    let mut post_render_effects = if xai_grok_shell::polycode::enabled() {
+        dispatch::dispatch(Action::Provider(crate::app::provider::Command::Menu { login: force_login }), &mut app)
+    } else if needs_interactive_login {
         if connection.auth_methods.is_empty() {
             // preferred_method pin unavailable: no advertised method to start
             app.auth_state = super::app_view::AuthState::Pending {

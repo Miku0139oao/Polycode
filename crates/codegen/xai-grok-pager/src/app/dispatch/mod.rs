@@ -23,6 +23,7 @@ mod modes;
 pub(crate) mod notes;
 mod permissions;
 mod prompt;
+pub(crate) mod provider;
 mod queue;
 mod rewind;
 mod router;

@@ -237,7 +237,7 @@ pub(crate) async fn apply(
     });
     let updated_model = rx
         .await
-        .map_err(|_| acp::Error::internal_error().data("failed to set session model"))?;
+        .map_err(|_| acp::Error::internal_error().data("failed to set session model"))??;
     agent.with_resident_mut(&session_id, |handle| {
         handle.model_id = model_id.clone();
         handle.reasoning_effort = applied_effort;

@@ -756,7 +756,7 @@ fn cwd_matches(session_cwd: &std::path::Path, target_cwd: &std::path::Path) -> b
 ///
 /// Re-reads config from disk, re-runs the `new_with_models()` resolution logic for user TOML config entries, and swaps the model list in-place.
 /// Prefetched (API) and default models are NOT re-fetched; only BYOK entries from config are updated.
-fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
+pub(super) fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
     let disk_config = crate::config::load_effective_config()
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
 
@@ -777,6 +777,8 @@ fn handle_reload_models(agent: &MvpAgent) -> ExtResult {
         let mut agent_config = agent.cfg.borrow_mut();
         agent_config.models = toml_config.models.clone();
         agent_config.config_models = toml_config.config_models.clone();
+        agent_config.model_providers = toml_config.model_providers.clone();
+        agent_config.auth_providers = toml_config.auth_providers.clone();
         agent_config.web_search_model = overrides.web_search;
         agent_config.session_summary_model = overrides.session_summary;
         agent_config.image_description_model = overrides.image_description;
