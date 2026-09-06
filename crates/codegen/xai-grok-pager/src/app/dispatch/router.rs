@@ -145,6 +145,10 @@ pub(super) fn dispatch_copy_auth_url(
 /// Do not extract a returning arm into a handler: as a delegation its `return`s become plain arm values and start flowing through the tail.
 /// The fat inline arms stayed inline for this reason; audit an arm's `return`s before moving it.
 pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
+    if app.external_acp && crate::app::external::action_denied(&action) {
+        app.show_toast(crate::app::external::UNSUPPORTED);
+        return vec![];
+    }
     app.reconcile_foreign_resume_launch();
     let effects = match action {
         Action::Quit | Action::QuitConfirmed => {

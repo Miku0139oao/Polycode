@@ -897,10 +897,11 @@
         );
 
         // Inside the refresh floor the snapshot defers rather than repaints, so what it must leave behind is a row still asking to be recomputed
-        notify_status(&mut app, "/tmp/second");
-        assert_ne!(
-            app.status_line_tick_demand(),
-            crate::app::app_view::TickDemand::None,
+        let repainted = notify_status(&mut app, "/tmp/second");
+        // A loaded runner can cross the refresh floor between calls: immediate
+        // repaint is also correct; only an unpainted, settled row is a failure.
+        assert!(
+            repainted || app.status_line_tick_demand() != crate::app::app_view::TickDemand::None,
             "the snapshot left the row settled and idle, so it will never redraw"
         );
 

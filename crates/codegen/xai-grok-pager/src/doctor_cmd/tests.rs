@@ -241,7 +241,9 @@ fn fake_standalone_facts_compose_through_shared_view() {
         false,
         RuntimeEvidence::Available(ColorLevel::TrueColor),
     );
-    let report = collect_report_with(snapshot);
+    // This fixture exercises terminal composition, not the host's real microphone.
+    // collect_report_with also performs a live voice probe, which adds an issue on CI/WSL.
+    let report = crate::diagnostics::view(snapshot.into());
 
     assert_eq!(report.issue_count(), 1);
     assert!(

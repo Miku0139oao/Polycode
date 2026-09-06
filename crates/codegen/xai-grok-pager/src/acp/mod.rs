@@ -2,6 +2,7 @@
 //!
 //! This module spawns the agent process, initializes the protocol, authenticates, and provides the channel for communication.
 
+pub mod external;
 pub mod leader_bridge;
 pub mod meta;
 pub mod model_state;
@@ -111,7 +112,7 @@ pub struct AcpConnection {
     ///
     /// In-process mode shares the agent's instance (single token cache); leader mode builds a dedicated one off the same local `auth.json`.
     /// Either way it resolves a fresh bearer per request via the refresh chain.
-    pub auth_manager: std::sync::Arc<xai_grok_shell::auth::AuthManager>,
+    pub auth_manager: Option<std::sync::Arc<xai_grok_shell::auth::AuthManager>>,
 }
 
 /// CLI flags that affect agent configuration, threaded from PagerArgs.
@@ -259,7 +260,7 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
         cancel_rewind_enabled,
         session_recap_available,
         feedback_trace_offer,
-        auth_manager,
+        auth_manager: Some(auth_manager),
     })
 }
 
@@ -397,7 +398,7 @@ pub async fn connect_via_leader(
         cancel_rewind_enabled,
         session_recap_available,
         feedback_trace_offer,
-        auth_manager,
+        auth_manager: Some(auth_manager),
     })
 }
 

@@ -476,6 +476,7 @@ pub(super) fn dispatch_send_prompt_inner(
     let voice_stt_language_from_app = app.voice_config.language.clone();
     let scheduler_background_loops_seed = app.scheduler_background_loops_seed;
     let login_method_id_from_app = app.login_method_id.as_ref().map(|id| id.0.to_string());
+    let external_acp = app.external_acp;
     let leader_mode = app.leader_mode;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
@@ -601,7 +602,9 @@ pub(super) fn dispatch_send_prompt_inner(
                         source,
                     });
                 }
-                if let Some(command) = command {
+                if agent.prompt.slash_controller.registry().is_external_denied(invocation.token) {
+                    CommandResult::Message(crate::app::external::UNSUPPORTED.into())
+                } else if let Some(command) = command {
                     // Central screen-mode gate
                     // Such a command is already filtered out of every completion list, but it stays resolvable
                     // A fully-typed invocation thus earns a hint that names the way out instead of leaking to the model
@@ -799,7 +802,7 @@ pub(super) fn dispatch_send_prompt_inner(
             .recognized_token_ranges(&text, &agent.session.models);
 
         let immediate_server_send =
-            immediate_server_send_eligible(agent, leader_mode) && agent.prompt.images.is_empty();
+            !external_acp && immediate_server_send_eligible(agent, leader_mode) && agent.prompt.images.is_empty();
         tracing::debug!(
             target: "qtrace",
             pid = std::process::id(),
@@ -821,7 +824,7 @@ pub(super) fn dispatch_send_prompt_inner(
 
         // Images can't use immediate server-send; a park on an empty held wait still does a Send Now
         if !immediate_server_send
-            && immediate_server_send_eligible(agent, leader_mode)
+            && !external_acp && immediate_server_send_eligible(agent, leader_mode)
             && !agent.prompt.images.is_empty()
             && parked_sendable_wait
             && !hold_behind_existing_queue

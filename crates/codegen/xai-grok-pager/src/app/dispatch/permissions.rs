@@ -188,7 +188,7 @@ pub(super) fn dispatch_permission_select(
     // Idempotency: if YOLO is already on, the pager auto-approves in `handle_permission_request` before the panel is shown
     // So the user couldn't have selected this option
     // The `is_yolo()` guard is defensive; a redundant call would re-emit the toast and a duplicate `PersistPermissionMode` effect, but is safe
-    if enable_always_approve {
+    if enable_always_approve && !app.external_acp {
         let already_on = app
             .agents
             .get(&id)

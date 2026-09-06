@@ -44,6 +44,7 @@ pub mod subscription;
 mod x10_filter;
 pub(crate) use effects::sanitize_user_error;
 mod event_loop;
+mod external;
 mod event_loop_stall;
 mod exit_timeout;
 pub(crate) mod external_editor;
@@ -620,6 +621,13 @@ pub async fn run(
     let startup_start = std::time::Instant::now();
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+    let external_config = crate::acp::external::ExternalAgentConfig::resolve(&args, &raw_config)?;
+    if let Some(config) = &external_config { config.validate_launch(&args)?; }
+    let is_external = external_config.is_some();
+    let had_prefetch = if is_external {
+        xai_tty_utils::redirect_native_stderr();
+        false
+    } else {
     let grok_com_config = match xai_grok_shell::agent::config::Config::new_from_toml_cfg(
         &raw_config,
     ) {
@@ -654,6 +662,8 @@ pub async fn run(
         }
     };
     xai_grok_shell::agent::mvp_agent::warm_async_http_client();
+    had_prefetch
+    };
     tokio::task::spawn_blocking(|| {});
     if let Ok(cwd) = std::env::current_dir() {
         crate::git_info::populate_from_cwd_async(cwd);
@@ -682,7 +692,7 @@ pub async fn run(
     let prefetch_elapsed = startup_start.elapsed();
     let requested_confinement = xai_grok_sandbox::requested_confinement_profile();
     let LeaderMode {
-        use_leader,
+        use_leader: native_use_leader,
         policy_disable_reason,
         disabled_by_confinement,
     } = resolve_leader_mode(
@@ -693,6 +703,7 @@ pub async fn run(
         true,
         requested_confinement,
     );
+    let use_leader = native_use_leader && !is_external;
     tracing::info!(
         use_leader,
         ?policy_disable_reason,
@@ -716,7 +727,7 @@ pub async fn run(
             }
         }
     }
-    if let Some(reason) = policy_disable_reason {
+    if !is_external && let Some(reason) = policy_disable_reason {
         tokio::spawn(xai_grok_shell::leader::kill_stale_reachable_leaders(reason));
     }
     if let Some(err) =
@@ -743,7 +754,17 @@ pub async fn run(
     let mut materialize_ctx = session_startup::MaterializeCtx::from_pager_args(&args);
     materialize_ctx.restore_progress_on_stdout =
         std::io::IsTerminal::is_terminal(&std::io::stdout());
-    let materialized = session_startup::materialize_startup(materialize_ctx, intent).await?;
+    let materialized = if is_external {
+        match intent {
+            session_startup::SessionStartupIntent::NewAuto => session_startup::MaterializedStartup::NewAuto,
+            session_startup::SessionStartupIntent::Resume { session_id: Some(session_id), .. } => session_startup::MaterializedStartup::Resume {
+                session_id, original_cwd: None, title: None, deferred_local_miss: false, suppress_code_restore: false,
+            },
+            _ => anyhow::bail!("external ACP requires a new session or an explicit external session ID"),
+        }
+    } else {
+        session_startup::materialize_startup(materialize_ctx, intent).await?
+    };
     if args.chat()
         && let session_startup::MaterializedStartup::Resume { session_id, .. } = &materialized
     {
@@ -773,6 +794,7 @@ pub async fn run(
         _ => None,
     };
     if session_title.is_none()
+        && !is_external
         && !args.chat()
         && let Some(id) = title_lookup_id
     {
@@ -964,7 +986,9 @@ pub async fn run(
         startup_failure::ConnectAttempt::First,
         &timer,
         async {
-            if use_leader {
+            if let Some(config) = external_config {
+                crate::acp::external::connect(config, &cancel).await
+            } else if use_leader {
                 crate::acp::connect_via_leader(&cancel, connect_flags, &raw_config).await
             } else {
                 crate::acp::connect(&cancel, connect_flags).await
@@ -2322,7 +2346,7 @@ mod tests {
         assert_eq!(
             first_5,
             vec![
-                "Grok Build TUI",
+                "Polycode — Grok Build TUI with Codex and Cursor backends",
                 "",
                 "Usage: grok [OPTIONS] [PROMPT] [COMMAND]",
                 "",

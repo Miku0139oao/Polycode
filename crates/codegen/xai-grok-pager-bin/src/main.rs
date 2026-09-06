@@ -1179,7 +1179,7 @@ async fn run_agent_command(
     let is_leader = matches!(agent_args.mode, Some(AgentCmd::Leader(_)));
     if !is_stdio && !is_leader {
         eprintln!(
-            "Grok Build (pager) - v{}",
+            "Polycode (Grok Build pager) - v{}",
             xai_grok_version::display_version_with_commit(
                 env!("VERSION_WITH_COMMIT"),
                 xai_grok_update::channel_label(),
@@ -2003,6 +2003,11 @@ fn main() {
 async fn async_main(args: PagerArgs) -> Result<()> {
     xai_grok_extra_ca::ensure_default_crypto_provider();
     let mut args = args.apply_cwd()?;
+    let external_config = xai_grok_pager::acp::external::ExternalAgentConfig::resolve(
+        &args, &xai_grok_shell::config::load_effective_config()?,
+    )?;
+    if let Some(config) = &external_config { config.validate_launch(&args)?; }
+    let is_external = external_config.is_some();
     if let Some(ref mode) = args.compaction_mode {
         unsafe { std::env::set_var("GROK_COMPACTION_MODE", mode) };
     }
@@ -2039,8 +2044,8 @@ async fn async_main(args: PagerArgs) -> Result<()> {
     if let Some(Command::Wrap(ref wrap_args)) = args.command {
         return xai_grok_pager::wrap_cmd::run(wrap_args);
     }
-    args.pin_local_resume_target()?;
-    let saved_profile = args.saved_resume_profile();
+    if !is_external { args.pin_local_resume_target()?; }
+    let saved_profile = if is_external { None } else { args.saved_resume_profile() };
     let sandbox_profile_arg = match args.startup_sandbox_profile(saved_profile.as_deref()) {
         xai_grok_pager::app::cli::SandboxStartup::Apply(profile) => profile,
         xai_grok_pager::app::cli::SandboxStartup::Conflict { requested, saved } => {
@@ -2060,7 +2065,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             }
         }
     }
-    if command_needs_pre_sandbox_policy_heal(args.command.as_ref()) {
+    if !is_external && command_needs_pre_sandbox_policy_heal(args.command.as_ref()) {
         match xai_grok_shell::config::load_agent_config_disk_only() {
             Ok(agent_cfg) => {
                 let auth_manager = std::sync::Arc::new(xai_grok_shell::auth::AuthManager::new(
@@ -2368,7 +2373,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
     let bg_update_wait: std::sync::Arc<tokio::sync::Mutex<Option<UpdateWaitHandle>>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(None));
     let bg_update_rx: Option<tokio::sync::oneshot::Receiver<Option<auto_update::UpdateAvailable>>> =
-        if should_check_for_updates(args.no_auto_update) {
+        if !is_external && should_check_for_updates(args.no_auto_update) {
             let update_config = update_config.clone();
             let wait_slot = bg_update_wait.clone();
             let (tx, rx) = tokio::sync::oneshot::channel();

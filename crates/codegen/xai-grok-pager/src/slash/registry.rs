@@ -128,6 +128,7 @@ pub struct CommandRegistry {
     /// Kept separate from `hidden` so the per-command `set_*_visible` setters can never un-hide a restricted command.
     /// The deny list always wins over every other visibility gate.
     restricted: HashSet<String>,
+    external: bool,
     /// Names of tools the connected agent has advertised.
     ///
     /// Fail-closed:
@@ -171,11 +172,26 @@ impl CommandRegistry {
             hidden,
             menu_hidden,
             restricted: HashSet::new(),
+            external: false,
             available_tools: None,
             saved_workflows: Vec::new(),
         };
         reg.rebuild_triggers();
         reg
+    }
+
+    pub(crate) fn set_external(&mut self, external: bool) {
+        if self.external != external {
+            self.external = external;
+            self.rebuild_triggers();
+        }
+    }
+
+    pub(crate) fn is_external_denied(&self, key: &str) -> bool {
+        self.external && self.commands.iter().zip(&self.sources).any(|(cmd, source)| {
+            *source == CommandSource::Builtin && !external_builtin_allowed(cmd.name())
+                && (cmd.name() == key || cmd.aliases().contains(&key))
+        })
     }
 
     fn set_command_visible(&mut self, name: &str, visible: bool) {
@@ -510,6 +526,9 @@ impl CommandRegistry {
         for (idx, command) in self.commands.iter().enumerate() {
             let source = self.sources[idx];
             let canonical = command.name();
+            if self.external && source == CommandSource::Builtin && !external_builtin_allowed(canonical) {
+                continue;
+            }
 
             // Skip commands gated by missing tools, using the same skip pattern as `hidden`
             if !self.tools_satisfied(command) {
@@ -554,6 +573,10 @@ impl CommandRegistry {
             }
         }
     }
+}
+
+fn external_builtin_allowed(name: &str) -> bool {
+    matches!(name, "exit" | "quit" | "model" | "login" | "help")
 }
 
 #[cfg(test)]

@@ -1089,7 +1089,8 @@ pub(crate) async fn run(
     >,
     mut writer_event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::render::draw::WriterEvent>,
 ) -> anyhow::Result<RunResult> {
-    crate::unified_log::init(connection.tx.clone());
+    let external_acp = connection.auth_manager.is_none();
+    if !external_acp { crate::unified_log::init(connection.tx.clone()); }
     crate::unified_log::info("pager started", None, None);
     xai_grok_telemetry::startup::enter(xai_grok_telemetry::startup::StartupPhase::AppInit);
     let mut app = AppView::new(
@@ -1097,6 +1098,7 @@ pub(crate) async fn run(
         connection.models,
         connection.available_commands,
     );
+    app.external_acp = external_acp;
     app.pending_startup = Some(pending_startup);
     app.tracing_rx = Some(tracing_handle.rx);
     // Startup terminal height for the auto-compact derivation; kept fresh by `Event::Resize` from here on
@@ -1342,6 +1344,7 @@ pub(crate) async fn run(
     }
     // else: auth_state defaults to Done (already authenticated eagerly)
     // Effects stashed until after the initial render, so the user sees the welcome/auth UI right away
+    super::external::apply(&mut app);
     let mut post_render_effects = if needs_interactive_login {
         if connection.auth_methods.is_empty() {
             // preferred_method pin unavailable: no advertised method to start
@@ -1380,7 +1383,7 @@ pub(crate) async fn run(
     }
 
     // After auth so API-key and managed policy resolve correctly
-    let voice_mode_enabled = crate::app::resolve_voice_mode_live(
+    let voice_mode_enabled = !external_acp && crate::app::resolve_voice_mode_live(
         remote_settings.as_ref().and_then(|s| s.voice_mode_enabled),
         app.is_api_key_auth,
     );
@@ -1900,6 +1903,7 @@ pub(crate) async fn run(
     // `AUDIO_SUPPORTED` reflects whether mic capture is compiled in
     // It is true for production CLI builds on macOS/Windows (cpal) and Linux (subprocess recorder)
     // It is false for Bazel builds (no capture in the test sandbox)
+    super::external::apply(&mut app);
     let mut voice_rx = None::<tokio::sync::mpsc::Receiver<xai_grok_voice::VoiceEvent>>;
     let voice_auth_factory = connection.auth_manager.clone();
 
@@ -2285,8 +2289,10 @@ pub(crate) async fn run(
         // Lazy voice pipeline: only after `/voice` or Ctrl+Space while gates allow
         // Consume the queued cold-start, carrying its hold-ownership and bound target forward into the live recording it spawns
         if let VoiceState::ColdStart { hold, target } = app.voice_state {
-            if app.voice_cmd_tx.is_none() && app.voice_can_start_pipeline() {
-                let voice_auth = crate::voice::build_voice_auth(voice_auth_factory.clone());
+            if app.voice_cmd_tx.is_none() && app.voice_can_start_pipeline()
+                && let Some(auth_manager) = voice_auth_factory.as_ref()
+            {
+                let voice_auth = crate::voice::build_voice_auth(auth_manager.clone());
                 let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(32);
                 let (event_tx, event_rx) = tokio::sync::mpsc::channel(128);
                 let voice_config = app.voice_config.clone();
@@ -4354,6 +4360,7 @@ pub(crate) fn session_flags_for_effects(
     effs: &[super::actions::Effect],
 ) -> effects::SessionFlags {
     effects::SessionFlags {
+        external_acp: app.external_acp,
         plan_mode: app.plan_mode,
         subagents: app.subagents,
         ask_user: app.ask_user,
@@ -4426,8 +4433,10 @@ fn process_effects(
     app: &mut AppView,
     progress_tx: &tokio::sync::mpsc::UnboundedSender<effects::RestoreProgressMsg>,
 ) -> bool {
+    super::external::apply(app);
     let flags = session_flags_for_effects(app, &effs);
     for eff in effs {
+        if app.external_acp && !super::external::effect_allowed(&eff) { continue; }
         let (quit, meta) = effects::execute(eff, tasks, &app.acp_tx, &app.cwd, &flags, progress_tx);
         // Install auth abort handle if the current auth state still matches.
         if let Some((seq, abort_handle)) = meta.auth_abort_handle

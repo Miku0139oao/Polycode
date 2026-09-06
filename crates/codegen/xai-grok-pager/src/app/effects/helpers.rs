@@ -316,6 +316,7 @@ pub(crate) fn sanitize_user_error(raw: &str) -> String {
 /// `_meta["x.ai/session"].kind` is stamped `"chat"` so the shell takes the `require_gateway` / thin profile.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SessionFlags {
+    pub external_acp: bool,
     pub plan_mode: bool,
     pub subagents: bool,
     pub ask_user: bool,

@@ -22,7 +22,7 @@ pub(super) fn handle_permission_request(
         return false;
     };
 
-    if agent.session.is_yolo()
+    if !app.external_acp && agent.session.is_yolo()
         && let Some(allow) = perm
             .request
             .options

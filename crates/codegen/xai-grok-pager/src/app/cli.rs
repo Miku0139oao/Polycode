@@ -401,7 +401,7 @@ pub struct LeaderArgs {
 #[command(
     name = "grok",
     version = xai_grok_version::full_version(),
-    about = "Grok Build TUI",
+    about = "Polycode — Grok Build TUI with Codex and Cursor backends",
     disable_version_flag = true,
     next_display_order = None,
     help_template = "\
@@ -425,6 +425,18 @@ pub struct PagerArgs {
     /// Working directory.
     #[arg(long)]
     pub cwd: Option<PathBuf>,
+    /// Explicitly use native Grok, ignoring configured external ACP settings.
+    #[arg(long, conflicts_with = "acp_executable")]
+    pub no_external_acp: bool,
+    /// Connect the TUI to an external stdio ACP agent (absolute executable path).
+    #[arg(long = "acp-executable", value_name = "PATH")]
+    pub acp_executable: Option<PathBuf>,
+    /// Literal external agent argument; repeat as --acp-arg=VALUE for flags.
+    #[arg(long = "acp-arg", value_name = "ARG", requires = "acp_executable")]
+    pub acp_args: Vec<String>,
+    /// Advertised ACP authentication method to use (defaults to the first).
+    #[arg(long = "acp-auth-method", requires = "acp_executable")]
+    pub acp_auth_method: Option<String>,
     /// Use a custom leader socket path instead of the default `~/.grok/leader.sock`.
     #[arg(
         long = "leader-socket",

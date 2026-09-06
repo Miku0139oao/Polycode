@@ -7,14 +7,30 @@
     <img alt="SpaceXAI logo" src="https://media.x.ai/v1/website/spacexai-symbol-black-transparent-6435cf42.png" width="96">
   </picture>
   <br>
-  Grok Build (<code>grok</code>)
+  Polycode
 </h1>
 
-**Grok Build** is SpaceXAI's terminal-based AI coding agent. It runs as a
+**Polycode** preserves Grok Build's fullscreen coding TUI and adds official
+ChatGPT/Codex and Cursor subscription backends. This is an independent fork,
+not an official xAI, OpenAI, or Cursor release.
+
+```powershell
+.\polycode.ps1 -Backend codex -Project D:\my-project
+.\polycode.ps1 -Backend cursor -Project D:\my-project
+```
+
+[Setup, build, billing boundaries and limitations](integrations/README.md).
+The upstream release-installation instructions below install **Grok Build**, not
+this Polycode fork; build this checkout to use the additional backends.
+
+**Upstream Grok Build** is SpaceXAI's terminal-based AI coding agent. It runs as a
 full-screen TUI that understands your codebase, edits files, executes shell
 commands, searches the web, and manages long-running tasks — interactively,
 headlessly for scripting/CI, or embedded in editors via the Agent Client
 Protocol (ACP).
+
+**This fork:** [Use your ChatGPT/Codex or Cursor subscription in the original TUI](integrations/README.md).
+External agents are opt-in; upstream Grok remains available.
 
 [Installing the released binary](#installing-the-released-binary) ·
 [Building from source](#building-from-source) ·

@@ -157,10 +157,9 @@ pub(crate) fn execute(
         } => {
             let tx = acp_tx.clone();
             let compat = xai_grok_tools::types::compat::CompatConfig::default();
-            let mcp_servers = xai_grok_shell::util::config::load_mcp_servers(
-                &session_cwd,
-                &compat,
-            );
+            let mcp_servers = if session_flags.external_acp { Vec::new() } else {
+                xai_grok_shell::util::config::load_mcp_servers(&session_cwd, &compat)
+            };
             let mcp_count = mcp_servers.len();
             #[allow(unused_mut)]
             let mut meta = session_flags.to_meta();
@@ -561,10 +560,11 @@ pub(crate) fn execute(
             }
             let cwd = session_cwd.unwrap_or_else(|| cwd.to_path_buf());
             let mcp_started = std::time::Instant::now();
-            let mcp_servers = xai_grok_shell::util::config::load_mcp_servers(
-                &cwd,
-                &xai_grok_tools::types::compat::CompatConfig::default(),
-            );
+            let mcp_servers = if session_flags.external_acp { Vec::new() } else {
+                xai_grok_shell::util::config::load_mcp_servers(
+                    &cwd, &xai_grok_tools::types::compat::CompatConfig::default(),
+                )
+            };
             tracing::info!(
                 elapsed_ms = mcp_started.elapsed().as_millis() as u64,
                 server_count = mcp_servers.len(),

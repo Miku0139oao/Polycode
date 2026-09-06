@@ -699,6 +699,8 @@ pub struct AppView {
     /// They are only meaningful when a leader is coordinating a fleet of sessions.
     /// Set in `event_loop::run` from `connection.leader_status_rx.is_some()`; defaults to `false` (non-leader, dashboard hidden).
     pub leader_mode: bool,
+    /// Explicit external process backend; independent of peer-claimed metadata.
+    pub external_acp: bool,
     /// App-level credit balance used to show the usage warning on the welcome screen before any agent session exists.
     pub credit_balance: Option<crate::views::credit_bar::CreditBalance>,
     /// App-level auto top-up rule paired with `credit_balance` for the warning.
@@ -1336,6 +1338,7 @@ impl AppView {
     }
     /// Apply typed auth metadata from the shell.
     pub fn apply_auth_meta(&mut self, meta: &xai_grok_shell::auth::AuthMeta) {
+        if self.external_acp { return; }
         self.pending_gate_verification = None;
         let was_gated = self.gate.is_some();
         self.account_email = meta.email.clone();
@@ -1634,6 +1637,7 @@ impl AppView {
             has_external_auth_provider: false,
             tier_restricted_commands: Vec::new(),
             leader_mode: false,
+            external_acp: false,
             credit_balance: None,
             auto_topup: None,
             billing_poll_wanted: false,
@@ -1698,6 +1702,7 @@ impl AppView {
     /// Sync voice availability into slash surfaces, cheatsheet, and settings.
     /// Mirrors `apply_session_recap_available` for `/recap`.
     pub fn apply_voice_mode_enabled(&mut self, enabled: bool) {
+        let enabled = enabled && !self.external_acp;
         self.voice_mode_enabled = enabled;
         crate::app::VOICE_MODE_ENABLED.store(enabled, std::sync::atomic::Ordering::Release);
         for agent in self.agents.values_mut() {

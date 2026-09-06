@@ -286,6 +286,7 @@ fn test_app() -> AppView {
         has_external_auth_provider: false,
         tier_restricted_commands: Vec::new(),
         leader_mode: true,
+        external_acp: false,
         credit_balance: None,
         auto_topup: None,
         billing_poll_wanted: false,

@@ -166,6 +166,12 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         .get_mut(&id)
                         .expect("find_session_match returned an existing AgentId");
 
+                    // Standard ACP has no Grok promptId/isReplay metadata. Derive
+                    // local render provenance from the outstanding session operation.
+                    if app.external_acp {
+                        meta.is_replay |= agent.session.loading_replay;
+                        if !meta.is_replay { meta.prompt_id = agent.session.current_prompt_id.clone(); }
+                    }
                     let dedup_drop = !meta.is_replay
                         && meta.event_seq.is_some_and(|seq| {
                             agent.last_applied_event_seq.is_some_and(|last| seq <= last)

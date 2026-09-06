@@ -1,0 +1,2 @@
+# DotSlash launcher must remain executable under Linux/WSL after Windows checkout.
+bin/protoc text eol=lf
