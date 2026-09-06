@@ -360,17 +360,12 @@ pub(crate) enum DescribeError {
     #[error("image describe model returned no content")]
     EmptyResponse,
 }
-/// Call the vision model and return its description text.
-///
-/// `image_urls` should be the cached URLs from [`persist_user_images`].
-/// That is `uri` if present on the original [`ImageContent`], otherwise the `data:<mime>;base64,...` URI.
-/// The caller is responsible for outline and prompt assembly so this stays a pure transport helper.
-pub(crate) async fn describe_user_images(
-    client: OaiCompatClient,
+fn image_describe_request(
     model: &str,
     prompt_text: String,
     image_urls: &[String],
-) -> Result<String, DescribeError> {
+    local_subscription_provider: Option<&str>,
+) -> ConversationRequest {
     let mut user_item = ConversationItem::User(UserItem {
         content: vec![ContentPart::Text {
             text: std::sync::Arc::<str>::from(prompt_text),
@@ -385,10 +380,32 @@ pub(crate) async fn describe_user_images(
             });
         }
     }
-    let request = ConversationRequest::from_items(vec![user_item])
-        .with_model(model)
-        .with_temperature(0.2)
-        .with_max_output_tokens(4_096);
+    ConversationRequest {
+        // Only these hardcoded helper defaults are omitted; the client's configured
+        // defaults still merge normally, and the image request is never disabled.
+        temperature: local_subscription_provider.is_none().then_some(0.2),
+        max_output_tokens: local_subscription_provider.is_none().then_some(4_096),
+        ..ConversationRequest::from_items(vec![user_item]).with_model(model)
+    }
+}
+
+/// Call the vision model and return its description text.
+///
+/// `image_urls` should be the cached URLs from [`persist_user_images`].
+/// That is `uri` if present on the original [`ImageContent`], otherwise the `data:<mime>;base64,...` URI.
+/// The caller is responsible for outline and prompt assembly so this stays a pure transport helper.
+pub(crate) async fn describe_user_images(
+    client: OaiCompatClient,
+    model: &str,
+    prompt_text: String,
+    image_urls: &[String],
+) -> Result<String, DescribeError> {
+    let request = image_describe_request(
+        model,
+        prompt_text,
+        image_urls,
+        client.local_subscription_provider(),
+    );
     const DESCRIBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
     let response = tokio::time::timeout(DESCRIBE_TIMEOUT, client.conversation_collect(request))
         .await
@@ -450,6 +467,35 @@ pub(crate) fn persist_and_prepend_image_files(
 mod tests {
     use super::*;
     use xai_grok_sampling_types::conversation::{ConversationItem, UserItem};
+    #[test]
+    fn image_describe_subscription_request_keeps_images_and_native_defaults() {
+        let urls = vec!["data:image/png;base64,aW1hZ2U=".to_owned()];
+        for provider in [None, Some("codex"), Some("cursor")] {
+            let request = image_describe_request(
+                "vision-model",
+                "Describe the image".into(),
+                &urls,
+                provider,
+            );
+            assert_eq!(request.temperature, provider.is_none().then_some(0.2));
+            assert_eq!(request.max_output_tokens, provider.is_none().then_some(4_096));
+            assert_eq!(request.model.as_deref(), Some("vision-model"));
+            assert_eq!(request.items.len(), 1);
+            let ConversationItem::User(user) = &request.items[0] else {
+                panic!("image description must retain the user request");
+            };
+            assert_eq!(user.content.len(), 2);
+            assert!(matches!(
+                &user.content[0],
+                ContentPart::Text { text } if text.as_ref() == "Describe the image"
+            ));
+            assert!(matches!(
+                &user.content[1],
+                ContentPart::Image { url } if url.as_ref() == urls[0].as_str()
+            ));
+        }
+    }
+
     #[test]
     fn persist_and_prepend_image_files_writes_assets_and_lists_paths() {
         let dir = tempfile::tempdir().unwrap();

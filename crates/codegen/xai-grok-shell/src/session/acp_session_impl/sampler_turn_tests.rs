@@ -5,6 +5,149 @@ use super::{
     MAX_OUTPUT_TOKEN_LIMIT_RETRIES, classifier_request_fits_context, resolve_configured_cutoff,
 };
 
+#[test]
+fn cursor_classifier_keeps_policy_action_and_exact_schema_instructions() {
+    use crate::sampling::ConversationItem;
+    use xai_grok_workspace::permission::{
+        AccessKind, ClassifierContext, ClassifierMessageRole, ClassifierPromptType,
+        build_classifier_messages, classifier_output_json_schema,
+    };
+    for prompt_type in [ClassifierPromptType::Full, ClassifierPromptType::JustCommand] {
+        let messages = build_classifier_messages(
+            "bash",
+            &AccessKind::Bash("cp source destination".into()),
+            Some("cp source destination"),
+            &ClassifierContext::default(),
+            prompt_type,
+        );
+        let original: Vec<_> = messages
+            .into_iter()
+            .map(|message| match message.role {
+                ClassifierMessageRole::System => ConversationItem::system(message.text),
+                ClassifierMessageRole::User => ConversationItem::user(message.text),
+            })
+            .collect();
+        let request = super::permission_classifier_request(
+            original.clone(),
+            "classifier-model".into(),
+            "session".into(),
+            Some("cursor"),
+            None,
+            Some(xai_grok_sampling_types::ReasoningEffort::Low),
+        );
+        assert!(request.json_schema.is_none());
+        assert_eq!(request.items.len(), original.len() + 1);
+        let instruction = request.items[0].text_content();
+        let schema = instruction
+            .strip_prefix("Respond with JSON only matching this schema: ")
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(schema).unwrap(),
+            classifier_output_json_schema()
+        );
+        for (actual, expected) in request.items[1..].iter().zip(&original) {
+            assert_eq!(
+                std::mem::discriminant(actual),
+                std::mem::discriminant(expected)
+            );
+            assert_eq!(actual.text_content(), expected.text_content());
+        }
+        assert!(request.tools.is_empty());
+        assert!(request.hosted_tools.is_empty());
+        assert!(request.tool_choice.is_none());
+        assert_eq!(request.model.as_deref(), Some("classifier-model"));
+        assert_eq!(request.x_grok_session_id.as_deref(), Some("session"));
+        assert!(
+            request.x_grok_req_id.as_deref().unwrap().starts_with("xai-perm-auto-")
+        );
+    }
+}
+
+#[test]
+fn classifier_cursor_omits_only_default_low_preserving_explicit_efforts() {
+    use xai_grok_sampling_types::ReasoningEffort;
+    for configured in [
+        None,
+        Some(ReasoningEffort::None),
+        Some(ReasoningEffort::Minimal),
+        Some(ReasoningEffort::Low),
+        Some(ReasoningEffort::Medium),
+        Some(ReasoningEffort::High),
+        Some(ReasoningEffort::Xhigh),
+        Some(ReasoningEffort::Max),
+    ] {
+        let config = crate::agent::config::AutoModeConfig {
+            reasoning_effort: configured,
+            ..Default::default()
+        };
+        let (_, resolved) = crate::util::config::auto_mode_classifier_defaults(&config, true);
+        let request = super::permission_classifier_request(
+            vec![crate::sampling::ConversationItem::user("proposed action")],
+            "classifier-model".into(),
+            "session".into(),
+            Some("cursor"),
+            configured,
+            resolved,
+        );
+        assert_eq!(request.reasoning_effort, configured);
+        assert!(request.temperature.is_none());
+        assert!(request.max_output_tokens.is_none());
+    }
+}
+
+#[test]
+fn classifier_codex_and_native_keep_structured_format_and_reasoning_defaults() {
+    use xai_grok_sampling_types::ReasoningEffort;
+    for provider in [None, Some("codex")] {
+        for supports_reasoning in [false, true] {
+            let (_, resolved) = crate::util::config::auto_mode_classifier_defaults(
+                &crate::agent::config::AutoModeConfig::default(),
+                supports_reasoning,
+            );
+            let request = super::permission_classifier_request(
+                vec![crate::sampling::ConversationItem::user("proposed action")],
+                "cursor/model-prefix-is-not-routing".into(),
+                "session".into(),
+                provider,
+                None,
+                resolved,
+            );
+            assert_eq!(
+                request.json_schema,
+                Some(xai_grok_workspace::permission::classifier_output_json_schema())
+            );
+            assert_eq!(
+                request.reasoning_effort,
+                supports_reasoning.then_some(ReasoningEffort::Low)
+            );
+            assert_eq!(request.items.len(), 1);
+            assert_eq!(request.items[0].text_content(), "proposed action");
+            assert!(request.temperature.is_none());
+            assert!(request.max_output_tokens.is_none());
+        }
+    }
+}
+
+#[test]
+fn classifier_without_backend_schema_does_not_relax_unparseable_output() {
+    use xai_grok_workspace::permission::{ClassifierVerdict, parse_classifier_model_text};
+    for response in [
+        "",
+        "not JSON",
+        r#"{"shouldBlock":"false"}"#,
+        "Here the model rambles: setting \"shouldBlock\": false would be unsafe, so block it. {\"other\": 1}",
+    ] {
+        assert_eq!(
+            parse_classifier_model_text(response),
+            ClassifierVerdict::Unavailable
+        );
+    }
+    assert_eq!(
+        parse_classifier_model_text(r#"{"thinking":"unsafe","shouldBlock":true,"reason":"needs approval"}"#),
+        ClassifierVerdict::Block,
+    );
+}
+
 fn x_cut(to: &str) -> XSearchOptions {
     XSearchOptions {
         date_bound: Some(SearchDateBound::new(None, Some(to.into())).unwrap()),

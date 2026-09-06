@@ -664,6 +664,13 @@ impl SamplingClient {
         self.defaults.api_backend.clone()
     }
 
+    /// The subscription provider for this client's exactly registered local endpoint.
+    /// Unregistered/native endpoints return `None`, regardless of model name or URL suffix.
+    /// This read-only accessor exposes no transport credentials or client defaults.
+    pub fn local_subscription_provider(&self) -> Option<&'static str> {
+        crate::local_transport::subscription_provider(&self.base_url)
+    }
+
     /// The credential tail is captured at build time — see [`SentRequest`] for
     /// why a record-time re-read would race the recovery a 401 triggers.
     fn post(&self, url: impl reqwest::IntoUrl) -> SentRequest {
@@ -2215,7 +2222,65 @@ mod tests {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
+        // Keep registry coverage in this test: registration is process-global and one-shot.
+        let unregistered = SamplingClient::new(SamplerConfig {
+            base_url: format!("{origin}/cursor/v1"),
+            model: "cursor/example".into(),
+            ..minimal_config()
+        })
+        .unwrap();
+        assert_eq!(unregistered.local_subscription_provider(), None);
         crate::local_transport::register(&origin, "private-process-token").unwrap();
+        assert_eq!(unregistered.local_subscription_provider(), Some("cursor"));
+        for provider in ["codex", "cursor"] {
+            let endpoint = format!("{origin}/{provider}/v1");
+            let registered = SamplingClient::new(SamplerConfig {
+                base_url: endpoint.clone(),
+                model: "not-a-subscription-model-prefix".into(),
+                temperature: Some(0.2),
+                max_completion_tokens: Some(64),
+                top_p: Some(0.7),
+                ..minimal_config()
+            })
+            .unwrap();
+            assert_eq!(registered.local_subscription_provider(), Some(provider));
+            // Detection must not change explicitly configured client defaults.
+            assert_eq!(registered.defaults.temperature, Some(0.2));
+            assert_eq!(registered.defaults.max_completion_tokens, Some(64));
+            assert_eq!(registered.defaults.top_p, Some(0.7));
+            let mut helper_request = ConversationRequest {
+                reasoning_effort: Some(xai_grok_sampling_types::ReasoningEffort::Low),
+                ..Default::default()
+            };
+            registered
+                .apply_conversation_defaults(&mut helper_request)
+                .unwrap();
+            assert_eq!(helper_request.temperature, Some(0.2));
+            assert_eq!(helper_request.max_output_tokens, Some(64));
+            assert_eq!(helper_request.top_p, Some(0.7));
+            assert_eq!(
+                helper_request.reasoning_effort,
+                Some(xai_grok_sampling_types::ReasoningEffort::Low)
+            );
+            for base_url in [
+                format!("{endpoint}/"),
+                format!("{endpoint}?route=local"),
+                format!("{endpoint}#local"),
+                format!("{origin}/nested/{provider}/v1"),
+                format!("https://example.test/{provider}/v1"),
+                format!("http://127.0.0.1:1/{provider}/v1"),
+                endpoint.replace("127.0.0.1", "localhost"),
+                endpoint.replacen("http:", "https:", 1),
+            ] {
+                let native = SamplingClient::new(SamplerConfig {
+                    base_url,
+                    model: format!("{provider}/example"),
+                    ..minimal_config()
+                })
+                .unwrap();
+                assert_eq!(native.local_subscription_provider(), None);
+            }
+        }
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
             socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();

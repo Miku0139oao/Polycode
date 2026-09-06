@@ -131,15 +131,12 @@ pub(crate) fn title_fallback_from_user_text(user_message: &str) -> String {
     }
 }
 
-/// Generate the initial session title from the first user message, for the fast first-prompt path ([`crate::session::summary::SummaryGenerator`]).
-/// The title is later refreshed from the whole conversation at the early checkpoints in [`TITLE_REFRESH_TURNS`], then frozen.
-pub async fn generate_session_summary(
-    user_message: String,
-    client: OaiCompatClient,
+fn session_title_request(
+    clean_message: &str,
     model: &str,
-) -> String {
-    let clean_message = title_source_text(&user_message);
-    let request = ConversationRequest::from_items(vec![
+    local_subscription_provider: Option<&str>,
+) -> ConversationRequest {
+    let mut request = ConversationRequest::from_items(vec![
         ConversationItem::system(
             r#"You are tasked with generating the session title. The user is asking almost always software engineering related questions on their codebase.
 We describe the session title below
@@ -173,10 +170,25 @@ Just generate the session_title and nothing else"#,
             "additionalProperties": false
         }),
     }])
-    .with_max_output_tokens(100)
-    .with_temperature(1.0)
     .with_tool_choice(ConversationToolChoice::Function("session_title".to_owned()));
+    // Leave the forced title tool unchanged. Only omit the helper's numeric
+    // defaults; any configured client defaults still reach the provider.
+    if local_subscription_provider.is_none() {
+        request = request.with_max_output_tokens(100).with_temperature(1.0);
+    }
+    request
+}
 
+/// Generate the initial session title from the first user message, for the fast first-prompt path ([`crate::session::summary::SummaryGenerator`]).
+/// The title is later refreshed from the whole conversation at the early checkpoints in [`TITLE_REFRESH_TURNS`], then frozen.
+pub async fn generate_session_summary(
+    user_message: String,
+    client: OaiCompatClient,
+    model: &str,
+) -> String {
+    let clean_message = title_source_text(&user_message);
+    let request =
+        session_title_request(&clean_message, model, client.local_subscription_provider());
     match client.conversation_collect(request).await {
         Ok(response) => {
             if let Some(a) = response.assistant()
@@ -235,6 +247,24 @@ mod tests {
         TITLE_SOURCE_MAX_BYTES, clean_title_text, strip_system_reminder_blocks,
         title_fallback_from_user_text, title_refresh_instruction, title_source_text,
     };
+
+    #[test]
+    fn session_title_subscription_request_retains_forced_tool_and_native_defaults() {
+        for provider in [None, Some("codex"), Some("cursor")] {
+            let request = super::session_title_request("Fix the parser", "title-model", provider);
+            assert_eq!(request.temperature, provider.is_none().then_some(1.0));
+            assert_eq!(request.max_output_tokens, provider.is_none().then_some(100));
+            assert_eq!(request.model.as_deref(), Some("title-model"));
+            assert_eq!(request.items.len(), 2);
+            assert!(request.items[1].text_content().contains("Fix the parser"));
+            assert_eq!(request.tools.len(), 1);
+            assert_eq!(request.tools[0].name, "session_title");
+            assert!(matches!(
+                request.tool_choice,
+                Some(super::ConversationToolChoice::Function(name)) if name == "session_title"
+            ));
+        }
+    }
 
     #[test]
     fn checkpoints_reached_counts_and_catches_up() {

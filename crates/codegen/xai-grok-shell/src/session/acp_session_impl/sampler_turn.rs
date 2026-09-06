@@ -12,6 +12,57 @@ fn classifier_request_fits_context(input_tokens: u64, context_window: u64) -> bo
     input_tokens <= context_window.saturating_sub(CLASSIFIER_REQUEST_TOKEN_RESERVE)
 }
 
+/// Build the same classifier side-query for every provider, without unsupported
+/// Cursor-only backend controls. Parsing and permission fallback remain downstream.
+fn permission_classifier_request(
+    mut items: Vec<ConversationItem>,
+    model: String,
+    session_id: String,
+    local_subscription_provider: Option<&str>,
+    configured_reasoning_effort: Option<xai_grok_sampling_types::ReasoningEffort>,
+    defaulted_reasoning_effort: Option<xai_grok_sampling_types::ReasoningEffort>,
+) -> ConversationRequest {
+    let is_cursor = local_subscription_provider == Some("cursor");
+    let schema = xai_grok_workspace::permission::classifier_output_json_schema();
+    let json_schema = if is_cursor {
+        // JustCommand normally relies solely on json_schema for the output shape.
+        // Retain that exact schema as a harness instruction, not a backend option;
+        // keep every original policy/context/action message and the existing parser.
+        items.insert(
+            0,
+            ConversationItem::system(format!(
+                "Respond with JSON only matching this schema: {schema}"
+            )),
+        );
+        None
+    } else {
+        Some(schema)
+    };
+    ConversationRequest {
+        items,
+        tools: vec![],
+        hosted_tools: vec![],
+        tool_choice: None,
+        model: Some(model),
+        // Keep configured client defaults; these helpers inject no numeric limits.
+        temperature: None,
+        max_output_tokens: None,
+        json_schema,
+        // Cursor rejects reasoning_effort. Omit ONLY the internally injected Low;
+        // explicit config/remote effort (even Low or None) must still be sent.
+        reasoning_effort: configured_reasoning_effort.or_else(|| {
+            defaulted_reasoning_effort.filter(|effort| {
+                !is_cursor || *effort != xai_grok_sampling_types::ReasoningEffort::Low
+            })
+        }),
+        x_grok_conv_id: Some(format!("perm-classifier-{}", uuid::Uuid::new_v4())),
+        x_grok_req_id: Some(format!("xai-perm-auto-{}", uuid::Uuid::new_v4())),
+        x_grok_session_id: Some(session_id),
+        x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
+        ..ConversationRequest::default()
+    }
+}
+
 /// Per-prompt cap on the Length tool-call salvage streak. Matches the agent implementation's `MAX_RETRY_ITERATIONS`.
 pub(super) const MAX_OUTPUT_TOKEN_LIMIT_RETRIES: u32 = 5;
 
@@ -844,7 +895,16 @@ impl SessionActor {
                             }
                         })
                         .collect::<Vec<_>>();
-                    let input_tokens = xai_chat_state::estimate_conversation_tokens(&items);
+                    let request = permission_classifier_request(
+                        items,
+                        model,
+                        session_id,
+                        sampling_client.local_subscription_provider(),
+                        auto_cfg.reasoning_effort,
+                        classifier_reasoning_effort,
+                    );
+                    // Include the textual Cursor schema in the existing context bound.
+                    let input_tokens = xai_chat_state::estimate_conversation_tokens(&request.items);
                     if !classifier_request_fits_context(input_tokens, context_window) {
                         return Err(
                             xai_grok_workspace::permission::ClassifierFailure::TransportError(
@@ -853,29 +913,6 @@ impl SessionActor {
                             ),
                         );
                     }
-                    let request = ConversationRequest {
-                        items,
-                        tools: vec![],
-                        hosted_tools: vec![],
-                        tool_choice: None,
-                        model: Some(model),
-                        // Thinking modes can reject explicit temperature or output limits, so retain provider defaults; the schema bounds output
-                        temperature: None,
-                        max_output_tokens: None,
-                        // Structured output: constrain the model to the {thinking, shouldBlock, reason} schema
-                        // The response is then guaranteed parseable (parity with forced-classify tooling)
-                        json_schema: Some(
-                            xai_grok_workspace::permission::classifier_output_json_schema(),
-                        ),
-                        // Resolved `[auto_mode]` effort: explicit config/remote, else the built-in `Low` default when the model supports it
-                        // None means the provider default
-                        reasoning_effort: classifier_reasoning_effort,
-                        x_grok_conv_id: Some(format!("perm-classifier-{}", uuid::Uuid::new_v4())),
-                        x_grok_req_id: Some(format!("xai-perm-auto-{}", uuid::Uuid::new_v4())),
-                        x_grok_session_id: Some(session_id),
-                        x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
-                        ..ConversationRequest::default()
-                    };
                     let fut = sampling_client.conversation_collect(request);
                     let response = tokio::time::timeout(classify_timeout, fut)
                         .await

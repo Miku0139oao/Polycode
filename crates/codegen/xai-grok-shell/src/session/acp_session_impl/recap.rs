@@ -37,6 +37,46 @@ fn build_side_question_attempt(base: &ConversationRequest) -> ConversationReques
     request.x_grok_req_id = Some(format!("xai-btw-{}", uuid::Uuid::new_v4()));
     request
 }
+
+/// Omit only helper-owned numeric defaults for registered subscription clients.
+/// Inspect the original options before defaulting/clamping/reserving: explicit
+/// values (including 0.2 / 64) must still reach the provider, even if unsupported.
+fn prompt_suggest_numeric_controls(
+    sampling: &crate::util::config::PromptSuggestConfig,
+    reserve_reasoning_budget: bool,
+    local_subscription_provider: Option<&str>,
+) -> (Option<f32>, Option<u32>) {
+    let emit_temperature =
+        sampling.temperature.is_some() || local_subscription_provider.is_none();
+    let emit_max_output_tokens =
+        sampling.max_output_tokens.is_some() || local_subscription_provider.is_none();
+    let (visible_output_tokens, temperature, _) =
+        crate::util::config::prompt_suggest_sampling_defaults(sampling);
+    let max_output_tokens = crate::util::config::prompt_suggest_reasoning_budget(
+        visible_output_tokens,
+        reserve_reasoning_budget,
+    );
+    (
+        emit_temperature.then_some(temperature),
+        emit_max_output_tokens.then_some(max_output_tokens),
+    )
+}
+
+fn shell_suggest_request(
+    items: Vec<ConversationItem>,
+    model: String,
+    local_subscription_provider: Option<&str>,
+) -> ConversationRequest {
+    ConversationRequest {
+        items,
+        tools: vec![],
+        model: Some(model),
+        temperature: local_subscription_provider.is_none().then_some(0.1),
+        max_output_tokens: local_subscription_provider.is_none().then_some(50),
+        ..Default::default()
+    }
+}
+
 impl SessionActor {
     /// Answers a `/btw` side question with one model call over the parent session's context.
     /// The exchange is saved to `btw_history.jsonl` under a new btw session ID.
@@ -526,16 +566,14 @@ impl SessionActor {
             ConversationItem::user(user_msg),
         ];
 
-        let request = ConversationRequest {
+        let request = shell_suggest_request(
             items,
-            tools: vec![],
-            model: Some(model),
-            temperature: Some(0.1),
-            max_output_tokens: Some(50),
-            ..Default::default()
-        };
+            model,
+            sampling_client.local_subscription_provider(),
+        );
 
-        // Collect via the client so the LengthPolicy gate applies: a suggestion truncated at the 50-token cap must not become ghost text
+        // Collect via the client so LengthPolicy still rejects truncated ghost text,
+        // whether the limit came from the helper, client config, or provider.
         match sampling_client
             .conversation_collect_with_idle_timeout(request, std::time::Duration::from_secs(5))
             .await
@@ -568,8 +606,7 @@ impl SessionActor {
         let session_id = self.session_info.id.to_string();
 
         let sampling = crate::util::config::resolve_prompt_suggest_config_from_disk();
-        let (visible_output_tokens, temperature, configured_reasoning_effort) =
-            crate::util::config::prompt_suggest_sampling_defaults(&sampling);
+        let configured_reasoning_effort = sampling.reasoning_effort;
         let reasoning_is_off =
             crate::util::config::prompt_suggest_reasoning_is_off(configured_reasoning_effort);
 
@@ -646,10 +683,6 @@ impl SessionActor {
             &self.session_info.id,
             crate::agent::mvp_agent::reasoning_effort::EffortTarget::SummaryClient,
         );
-        let max_output_tokens = crate::util::config::prompt_suggest_reasoning_budget(
-            visible_output_tokens,
-            suggest_reasoning.reserve_budget,
-        );
         let reasoning_effort = suggest_reasoning.effort;
         let request_model = sampling_config.model.clone();
         let sampling_client = match xai_grok_sampler::SamplingClient::new(sampling_config) {
@@ -659,6 +692,12 @@ impl SessionActor {
                 return None;
             }
         };
+
+        let (temperature, max_output_tokens) = prompt_suggest_numeric_controls(
+            &sampling,
+            suggest_reasoning.reserve_budget,
+            sampling_client.local_subscription_provider(),
+        );
 
         tracing::debug!(
             model = %model,
@@ -685,8 +724,8 @@ impl SessionActor {
             items,
             tools: vec![],
             model: Some(request_model.clone()),
-            temperature: Some(temperature),
-            max_output_tokens: Some(max_output_tokens),
+            temperature,
+            max_output_tokens,
             reasoning_effort,
             x_grok_conv_id: Some(format!("promptsuggest-{}", uuid::Uuid::new_v4())),
             x_grok_req_id: Some(request_id.clone()),
@@ -747,6 +786,110 @@ impl SessionActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_suggest_subscription_defaults_differ_from_explicit_equal_controls() {
+        use crate::util::config::PromptSuggestConfig;
+        for provider in [Some("codex"), Some("cursor")] {
+            for reserve in [false, true] {
+                assert_eq!(
+                    prompt_suggest_numeric_controls(
+                        &PromptSuggestConfig::default(),
+                        reserve,
+                        provider,
+                    ),
+                    (None, None),
+                );
+                let explicit = PromptSuggestConfig {
+                    temperature: Some(0.2),
+                    max_output_tokens: Some(64),
+                    ..Default::default()
+                };
+                assert_eq!(
+                    prompt_suggest_numeric_controls(&explicit, reserve, provider),
+                    (Some(0.2), Some(if reserve { 320 } else { 64 })),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prompt_suggest_subscription_numeric_options_are_independent() {
+        use crate::util::config::PromptSuggestConfig;
+        for provider in [Some("codex"), Some("cursor")] {
+            let temperature_only = PromptSuggestConfig {
+                temperature: Some(0.2),
+                ..Default::default()
+            };
+            let limit_only = PromptSuggestConfig {
+                max_output_tokens: Some(64),
+                ..Default::default()
+            };
+            assert_eq!(
+                prompt_suggest_numeric_controls(&temperature_only, true, provider),
+                (Some(0.2), None),
+            );
+            assert_eq!(
+                prompt_suggest_numeric_controls(&limit_only, true, provider),
+                (None, Some(320)),
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_suggest_native_defaults_and_explicit_clamp_reserve_are_unchanged() {
+        use crate::util::config::PromptSuggestConfig;
+        assert_eq!(
+            prompt_suggest_numeric_controls(&PromptSuggestConfig::default(), false, None),
+            (Some(0.2), Some(64)),
+        );
+        assert_eq!(
+            prompt_suggest_numeric_controls(&PromptSuggestConfig::default(), true, None),
+            (Some(0.2), Some(320)),
+        );
+        for provider in [None, Some("codex"), Some("cursor")] {
+            for limit in [0, 64, 128, u32::MAX] {
+                for reserve in [false, true] {
+                    let sampling = PromptSuggestConfig {
+                        temperature: Some(0.73),
+                        max_output_tokens: Some(limit),
+                        ..Default::default()
+                    };
+                    let (visible, temperature, _) =
+                        crate::util::config::prompt_suggest_sampling_defaults(&sampling);
+                    assert_eq!(
+                        prompt_suggest_numeric_controls(&sampling, reserve, provider),
+                        (
+                            Some(temperature),
+                            Some(crate::util::config::prompt_suggest_reasoning_budget(visible, reserve)),
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shell_suggest_subscription_request_keeps_inference_payload() {
+        for provider in [None, Some("codex"), Some("cursor")] {
+            let request = shell_suggest_request(
+                vec![
+                    ConversationItem::system("autocomplete"),
+                    ConversationItem::user("git st"),
+                ],
+                "cursor/model-name-does-not-select-controls".into(),
+                provider,
+            );
+            assert_eq!(request.items.len(), 2);
+            assert_eq!(request.items[1].text_content(), "git st");
+            assert_eq!(
+                request.model.as_deref(),
+                Some("cursor/model-name-does-not-select-controls")
+            );
+            assert_eq!(request.temperature, provider.is_none().then_some(0.1));
+            assert_eq!(request.max_output_tokens, provider.is_none().then_some(50));
+        }
+    }
 
     fn api(status: u16, message: &str, should_retry: Option<bool>) -> SamplingError {
         SamplingError::Api {

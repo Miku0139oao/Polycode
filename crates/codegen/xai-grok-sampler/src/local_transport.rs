@@ -51,6 +51,15 @@ fn transport(base: &str) -> Option<&'static Transport> {
 pub(crate) fn is_local(base: &str) -> bool {
     transport(base).is_some()
 }
+/// Only endpoints in the process-local registration identify a subscription.
+/// Return a provider label, never the transport's bearer or endpoint.
+pub(crate) fn subscription_provider(base: &str) -> Option<&'static str> {
+    let t = transport(base)?;
+    t.endpoints
+        .iter()
+        .position(|endpoint| endpoint == base)
+        .map(|index| ["codex", "cursor"][index])
+}
 pub(crate) fn client(base: &str) -> Option<reqwest::Client> {
     transport(base).map(|t| t.client.clone())
 }
