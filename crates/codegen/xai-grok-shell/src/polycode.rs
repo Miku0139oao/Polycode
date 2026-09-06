@@ -90,7 +90,7 @@ pub fn initial_provider() -> Option<&'static str> {
     bridge().and_then(|b| b.initial_provider.as_deref())
 }
 
-/// Called only by --polycode-native, before connecting the in-process native agent.
+/// Called only by --polycode-native, before connecting the native agent.
 /// Environment variables alone cannot activate this transport.
 pub fn enable_from_env(initial_provider: Option<&str>) -> Result<(), String> {
     let base =
@@ -99,6 +99,23 @@ pub fn enable_from_env(initial_provider: Option<&str>) -> Result<(), String> {
         std::env::var("POLYCODE_BRIDGE_TOKEN").map_err(|_| "POLYCODE_BRIDGE_TOKEN is required")?;
     let mut bridge = Bridge::new(&base, token)?;
     bridge.initial_provider = initial_provider.map(str::to_owned);
+    install(bridge)
+}
+
+/// Secret-bearing snapshot, serialized ONLY into the trusted leader's private pipe.
+/// Deliberately not Debug and never part of user config, session state, or ACP.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LeaderBridgeBootstrap {
+    base: String,
+    token: String,
+    initial_provider: Option<String>,
+    catalog: Catalog,
+}
+pub(crate) fn enable_from_leader(bootstrap: LeaderBridgeBootstrap) -> Result<(), String> {
+    install(Bridge::from_leader_bootstrap(bootstrap)?)
+}
+fn install(bridge: Bridge) -> Result<(), String> {
     xai_grok_sampler::local_transport::register(bridge.base.as_str(), &bridge.token)
         .map_err(str::to_owned)?;
     BRIDGE
@@ -129,7 +146,7 @@ fn loopback_origin(raw: &str) -> Result<Url, String> {
     Ok(url)
 }
 impl Bridge {
-    fn new(base: &str, token: String) -> Result<Self, String> {
+    pub(crate) fn new(base: &str, token: String) -> Result<Self, String> {
         let base = loopback_origin(base)?;
         if token.len() < 16 || !token.bytes().all(|b| b.is_ascii_graphic()) {
             return Err("Invalid bridge process token".into());
@@ -147,6 +164,28 @@ impl Bridge {
             catalog: RwLock::new(Catalog::default()),
             initial_provider: None,
         })
+    }
+    pub(crate) fn leader_bootstrap(&self) -> LeaderBridgeBootstrap {
+        LeaderBridgeBootstrap {
+            base: self.base.to_string(),
+            token: self.token.clone(),
+            initial_provider: self.initial_provider.clone(),
+            catalog: self.catalog(),
+        }
+    }
+    pub(crate) fn from_leader_bootstrap(bootstrap: LeaderBridgeBootstrap) -> Result<Self, String> {
+        let mut bridge = Self::new(&bootstrap.base, bootstrap.token)?;
+        if bootstrap
+            .initial_provider
+            .as_deref()
+            .is_some_and(|p| !matches!(p, "native" | "codex" | "cursor"))
+        {
+            return Err("Invalid initial bridge provider".into());
+        }
+        bridge.validate_catalog(&bootstrap.catalog)?;
+        bridge.initial_provider = bootstrap.initial_provider;
+        *bridge.catalog.write().expect("bridge catalog") = bootstrap.catalog;
+        Ok(bridge)
     }
     async fn request<T: DeserializeOwned>(
         &self,
@@ -442,6 +481,62 @@ mod tests {
             assert!(status.message.is_none());
             assert_ne!(status.state, LoginState::Completed);
             server.join().unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn leader_bootstrap_preserves_snapshot_and_fetches_same_catalog_with_private_auth() {
+        let catalog = serde_json::json!({"providers":[{"id":"cursor","name":"Cursor","loggedIn":true,"models":[{"id":"fresh-model","name":"Fresh","contextWindow":64000}]}]}).to_string();
+        let (origin, server) = server(vec![("200 OK", catalog)]);
+        let mut parent = Bridge::new(&origin, "private-leader-process-token".into()).unwrap();
+        parent.initial_provider = Some("cursor".into());
+        let snapshot = Catalog {
+            providers: vec![Provider {
+                id: ProviderId::Codex,
+                name: "ChatGPT".into(),
+                logged_in: false,
+                models: vec![],
+            }],
+        };
+        *parent.catalog.write().unwrap() = snapshot;
+        let leader = Bridge::from_leader_bootstrap(parent.leader_bootstrap()).unwrap();
+        assert_eq!(leader.initial_provider.as_deref(), Some("cursor"));
+        assert_eq!(leader.catalog().providers[0].id, ProviderId::Codex);
+        leader.refresh(false).await.unwrap();
+        assert_eq!(leader.catalog().providers[0].models[0].id, "fresh-model");
+        assert_eq!(
+            parent.catalog().providers[0].id,
+            ProviderId::Codex,
+            "process-local caches must not be aliased"
+        );
+        let requests = server.join().unwrap();
+        assert!(requests[0].starts_with("GET /control/catalog "));
+        assert!(
+            requests[0]
+                .to_ascii_lowercase()
+                .contains("authorization: bearer private-leader-process-token\r\n")
+        );
+    }
+    #[test]
+    fn leader_bootstrap_revalidates_transport_and_catalog_without_secret_errors() {
+        let bridge = Bridge::new(
+            "http://127.0.0.1:12345",
+            "private-leader-process-token".into(),
+        )
+        .unwrap();
+        let mut bad_origin = bridge.leader_bootstrap();
+        bad_origin.base = "https://example.com".into();
+        let mut bad_catalog = bridge.leader_bootstrap();
+        bad_catalog.catalog.providers.push(Provider {
+            id: ProviderId::Codex,
+            name: "private-leader-process-token".into(),
+            logged_in: false,
+            models: vec![],
+        });
+        let mut bad_provider = bridge.leader_bootstrap();
+        bad_provider.initial_provider = Some("private-leader-process-token".into());
+        for snapshot in [bad_origin, bad_catalog, bad_provider] {
+            let error = Bridge::from_leader_bootstrap(snapshot).err().unwrap();
+            assert!(!error.contains("private-leader-process-token"));
         }
     }
     #[test]

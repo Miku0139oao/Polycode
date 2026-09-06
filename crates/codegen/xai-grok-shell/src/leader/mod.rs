@@ -54,6 +54,7 @@ mod client;
 #[cfg(feature = "test-support")]
 pub mod in_process;
 mod lock;
+pub mod polycode_bootstrap;
 pub mod protocol;
 mod server;
 #[cfg(test)]
@@ -1460,6 +1461,7 @@ pub async fn connect_or_spawn(
     if let Some(profile) = xai_grok_sandbox::requested_confinement_profile() {
         return Err(ConnectionError::SandboxConfinement(profile));
     }
+    polycode_bootstrap::require_scope().map_err(|e| ConnectionError::SpawnFailed(e.into()))?;
     let start = std::time::Instant::now();
     let mut lock = LeaderLock::new(&env_urls.grok_ws_url);
     let sock_path = lock.socket_path().clone();
@@ -1691,9 +1693,27 @@ fn path_is_under(path: &Path, dir: &Path) -> bool {
     path.starts_with(&dir)
 }
 fn spawn_leader_subprocess(env_urls: &LeaderEnvUrls) -> Result<u32, ConnectionError> {
-    let exe = resolve_exe_for_spawn()?;
+    // The private bootstrap protocol is only entrusted to this exact binary,
+    // never to a shared normal leader or the managed grok symlink.
+    let private_frame = if polycode_bootstrap::is_launch() {
+        Some(
+            polycode_bootstrap::launch_frame()
+                .map_err(|e| ConnectionError::SpawnFailed(e.into()))?,
+        )
+    } else {
+        None
+    };
+    let exe = if private_frame.is_some() {
+        std::env::current_exe().map_err(|_| {
+            ConnectionError::SpawnFailed("Private leader executable unavailable".into())
+        })?
+    } else {
+        resolve_exe_for_spawn()?
+    };
     let mut cmd = Command::new(exe);
     cmd.arg("agent").arg("leader");
+    // Preserve same-launch reconnects. For private leaders, the pipe lease is
+    // the stronger lifetime bound and also revokes busy/client-less leaders.
     cmd.arg("--no-exit-on-disconnect");
     cmd.arg(RELAY_ON_DEMAND_FLAG);
     cmd.arg("--grok-ws-url").arg(&env_urls.grok_ws_url);
@@ -1713,7 +1733,10 @@ fn spawn_leader_subprocess(env_urls: &LeaderEnvUrls) -> Result<u32, ConnectionEr
     }
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null());
-    let log_path = crate::util::grok_home::grok_home().join("leader.log");
+    let log_path = polycode_bootstrap::socket_override()
+        .filter(|_| private_frame.is_some())
+        .map(|socket| socket.with_extension("log"))
+        .unwrap_or_else(|| crate::util::grok_home::grok_home().join("leader.log"));
     match std::fs::File::create(&log_path) {
         Ok(log_file) => {
             info!("Leader stderr → log file");
@@ -1739,6 +1762,7 @@ fn spawn_leader_subprocess(env_urls: &LeaderEnvUrls) -> Result<u32, ConnectionEr
         use windows::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP.0);
     }
+    polycode_bootstrap::prepare_command(&mut cmd);
     #[allow(clippy::disallowed_methods)]
     let mut child = cmd
         .spawn()
@@ -1746,7 +1770,26 @@ fn spawn_leader_subprocess(env_urls: &LeaderEnvUrls) -> Result<u32, ConnectionEr
     let pid = child.id();
     info!(pid, "Spawned leader subprocess");
     std::thread::spawn(move || {
+        let mut lease_id = None;
+        if let Some(frame) = private_frame {
+            let sent = child
+                .stdin
+                .take()
+                .ok_or("Private leader pipe unavailable")
+                .and_then(|writer| polycode_bootstrap::send_and_retain(writer, &frame));
+            match sent {
+                Ok(id) => lease_id = Some(id),
+                Err(_) => {
+                    // Never include the command, frame, or parser errors in diagnostics.
+                    warn!("Private leader bootstrap failed");
+                    let _ = child.kill();
+                }
+            }
+        }
         let _ = child.wait();
+        if let Some(id) = lease_id {
+            polycode_bootstrap::release_lease(id);
+        }
     });
     Ok(pid)
 }

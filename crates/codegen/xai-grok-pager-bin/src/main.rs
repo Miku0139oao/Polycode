@@ -1916,17 +1916,45 @@ fn main() {
         xai_grok_update::channel_name().unwrap_or_default(),
     ));
     let args = PagerArgs::parse_cli();
-    if args.polycode_native {
+    use xai_grok_shell::leader::polycode_bootstrap;
+    let private_leader = matches!(&args.command,
+        Some(Command::Agent(agent)) if matches!(&agent.mode,
+            Some(AgentCmd::Leader(leader)) if leader.polycode_leader_bootstrap));
+    let _polycode_launch = if args.polycode_native || private_leader {
         xai_grok_extra_ca::ensure_default_crypto_provider();
-        if let Err(error) = xai_grok_shell::polycode::enable_from_env(args.polycode_provider.as_deref()) {
+        let initialized = if private_leader {
+            if args.polycode_native {
+                Err("Private leader bootstrap cannot be combined with launcher flags".to_owned())
+            } else {
+                polycode_bootstrap::consume_stdin().map_err(str::to_owned)
+            }
+        } else {
+            xai_grok_shell::polycode::enable_from_env(args.polycode_provider.as_deref())
+        };
+        // SAFETY: still single-threaded, before telemetry, runtime, or the pipe
+        // watcher. Tools, MCP servers, auth helpers, and ordinary child sessions
+        // must never inherit the control bearer, including in the leader process.
+        unsafe {
+            std::env::remove_var("POLYCODE_BRIDGE_TOKEN");
+        }
+        if let Err(error) = initialized {
             eprintln!("Polycode: {error}");
             std::process::exit(2);
         }
-        // SAFETY: still single-threaded, before telemetry, runtime, and native worker
-        // startup. Tools, MCP servers, auth helpers, and child sessions must not inherit
-        // the process control bearer. The bridge and sampler retain it privately.
-        unsafe { std::env::remove_var("POLYCODE_BRIDGE_TOKEN"); }
-    }
+        if private_leader {
+            None
+        } else {
+            match polycode_bootstrap::start_launch(args.leader_socket.as_deref()) {
+                Ok(launch) => Some(launch),
+                Err(error) => {
+                    eprintln!("Polycode: {error}");
+                    std::process::exit(2);
+                }
+            }
+        }
+    } else {
+        None
+    };
     if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) {
         return;
     }
@@ -1996,7 +2024,24 @@ fn main() {
             eprintln!("grok: failed to start tokio runtime: {e}");
             shutdown_and_flush_telemetry(1);
         });
-    let result = run_and_shutdown(runtime, async_main(args), RUNTIME_SHUTDOWN_GRACE);
+    polycode_bootstrap::watch_owner();
+    let result = run_and_shutdown(
+        runtime,
+        async {
+            let mut run = std::pin::pin!(async_main(args));
+            tokio::select! {
+                biased;
+                result = &mut run => result,
+                () = polycode_bootstrap::owner_disconnected() => {
+                    // The IPC server receives the same revocation and takes its
+                    // normal native shutdown path. Bound hung bootstrap/cleanup.
+                    tokio::time::timeout(std::time::Duration::from_secs(5), &mut run)
+                        .await.unwrap_or(Ok(()))
+                },
+            }
+        },
+        RUNTIME_SHUTDOWN_GRACE,
+    );
     xai_grok_telemetry::debug_log::flush();
     if let Err(e) = result {
         xai_tty_utils::restore_native_stderr();
@@ -2014,12 +2059,26 @@ fn main() {
 async fn async_main(args: PagerArgs) -> Result<()> {
     xai_grok_extra_ca::ensure_default_crypto_provider();
     let mut args = args.apply_cwd()?;
-    let external_config = if args.polycode_native { None } else {
+    // The snapshot on the pipe seeds the trusted overlay; fetch the same bridge
+    // catalog before *any* native agent/config/model bootstrap in this process.
+    if xai_grok_shell::leader::polycode_bootstrap::is_bootstrapped_leader() {
+        xai_grok_shell::polycode::bridge()
+            .ok_or_else(|| anyhow::anyhow!("Private leader bridge unavailable"))?
+            .refresh(false)
+            .await
+            .map_err(anyhow::Error::msg)?;
+    }
+    let external_config = if xai_grok_shell::polycode::enabled() {
+        None
+    } else {
         xai_grok_pager::acp::external::ExternalAgentConfig::resolve(
-            &args, &xai_grok_shell::config::load_effective_config()?,
+            &args,
+            &xai_grok_shell::config::load_effective_config()?,
         )?
     };
-    if let Some(config) = &external_config { config.validate_launch(&args)?; }
+    if let Some(config) = &external_config {
+        config.validate_launch(&args)?;
+    }
     let is_external = external_config.is_some();
     if let Some(ref mode) = args.compaction_mode {
         unsafe { std::env::set_var("GROK_COMPACTION_MODE", mode) };
@@ -2057,8 +2116,14 @@ async fn async_main(args: PagerArgs) -> Result<()> {
     if let Some(Command::Wrap(ref wrap_args)) = args.command {
         return xai_grok_pager::wrap_cmd::run(wrap_args);
     }
-    if !is_external { args.pin_local_resume_target()?; }
-    let saved_profile = if is_external { None } else { args.saved_resume_profile() };
+    if !is_external {
+        args.pin_local_resume_target()?;
+    }
+    let saved_profile = if is_external {
+        None
+    } else {
+        args.saved_resume_profile()
+    };
     let sandbox_profile_arg = match args.startup_sandbox_profile(saved_profile.as_deref()) {
         xai_grok_pager::app::cli::SandboxStartup::Apply(profile) => profile,
         xai_grok_pager::app::cli::SandboxStartup::Conflict { requested, saved } => {

@@ -381,6 +381,9 @@ fn generate_random_key(len: usize) -> String {
 /// Arguments for the `agent leader` subcommand.
 #[derive(Debug, clap::Args, Clone)]
 pub struct LeaderArgs {
+    /// Internal: consume trusted runtime bootstrap and a lifetime lease from stdin.
+    #[arg(long, hide = true)]
+    pub polycode_leader_bootstrap: bool,
     /// Keep the leader running after the last client disconnects.
     #[arg(long)]
     pub no_exit_on_disconnect: bool,
@@ -426,7 +429,7 @@ pub struct PagerArgs {
     #[arg(long)]
     pub cwd: Option<PathBuf>,
     /// Keep the native engine and use the launcher's local subscription model bridge.
-    #[arg(long, conflicts_with_all = ["acp_executable", "leader", "leader_socket"])]
+    #[arg(long, conflicts_with = "acp_executable")]
     pub polycode_native: bool,
     /// Initially highlight a provider; does not sign in or replace the native session.
     #[arg(long, requires = "polycode_native", value_parser = ["native", "codex", "cursor"])]
@@ -444,6 +447,7 @@ pub struct PagerArgs {
     #[arg(long = "acp-auth-method", requires = "acp_executable")]
     pub acp_auth_method: Option<String>,
     /// Use a custom leader socket path instead of the default `~/.grok/leader.sock`.
+    /// With --polycode-native this is a namespace hint; a launch-unique suffix is added.
     #[arg(
         long = "leader-socket",
         value_name = "PATH",
@@ -1068,6 +1072,53 @@ impl PagerArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn polycode_default_launcher_retains_native_leader_options() {
+        for extra in [
+            vec![],
+            vec!["--leader"],
+            vec!["--leader-socket", "custom.sock"],
+            vec!["--no-leader"],
+        ] {
+            let mut argv = vec!["grok", "--polycode-native", "--no-external-acp"];
+            argv.extend(extra.iter().copied());
+            let args = PagerArgs::try_parse_from(argv).unwrap();
+            assert!(args.polycode_native);
+            assert!(args.no_external_acp);
+            assert_eq!(args.no_leader, extra.contains(&"--no-leader"));
+            assert_eq!(args.leader, extra.contains(&"--leader"));
+        }
+    }
+    #[test]
+    fn private_bootstrap_flag_is_only_valid_for_agent_leader() {
+        let args =
+            PagerArgs::try_parse_from(["grok", "agent", "leader", "--polycode-leader-bootstrap"])
+                .unwrap();
+        let Some(Command::Agent(agent)) = args.command else {
+            panic!("expected agent")
+        };
+        assert!(matches!(
+            agent.mode,
+            Some(AgentCmd::Leader(LeaderArgs {
+                polycode_leader_bootstrap: true,
+                ..
+            }))
+        ));
+        assert!(PagerArgs::try_parse_from(["grok", "--polycode-leader-bootstrap"]).is_err());
+        assert!(
+            PagerArgs::try_parse_from(["grok", "agent", "stdio", "--polycode-leader-bootstrap"])
+                .is_err()
+        );
+        assert!(
+            PagerArgs::try_parse_from([
+                "grok",
+                "--polycode-native",
+                "--acp-executable",
+                "external"
+            ])
+            .is_err()
+        );
+    }
     #[test]
     fn version_flags_parse_as_early_intent_without_exiting() {
         for flag in ["--version", "-v", "-V"] {

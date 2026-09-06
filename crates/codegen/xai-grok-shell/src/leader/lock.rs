@@ -43,9 +43,11 @@ pub const LEADER_SOCKET_ENV: &str = "GROK_LEADER_SOCKET";
 
 /// The explicit socket-path override, if [`LEADER_SOCKET_ENV`] is set and non-empty.
 fn leader_socket_override() -> Option<PathBuf> {
-    std::env::var_os(LEADER_SOCKET_ENV)
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
+    super::polycode_bootstrap::socket_override().or_else(|| {
+        std::env::var_os(LEADER_SOCKET_ENV)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    })
 }
 
 /// The lock path paired with a given socket path: the sibling file with a `.lock` extension (`/x/leader-foo.sock` becomes `/x/leader-foo.lock`).

@@ -3,6 +3,104 @@ use std::time::Duration;
 use super::*;
 use tempfile::TempDir;
 
+#[tokio::test]
+async fn polycode_reload_refreshes_leader_overlay_for_direct_and_wrapped_requests() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let bridge = crate::polycode::Bridge::new(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        "private-reload-test-token".into(),
+    )
+    .unwrap();
+    let server = std::thread::spawn(move || {
+        for (status, body) in [
+            (
+                "200 OK",
+                r#"{"providers":[{"id":"codex","name":"ChatGPT","loggedIn":true,"models":[{"id":"model-one","name":"One","contextWindow":32000}]}]}"#,
+            ),
+            (
+                "200 OK",
+                r#"{"providers":[{"id":"cursor","name":"Cursor","loggedIn":true,"models":[{"id":"model-two","name":"Two","contextWindow":64000}]}]}"#,
+            ),
+            ("500 Internal Server Error", "private-reload-test-token"),
+        ] {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("local catalog accept failed: {e}"),
+                }
+            };
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                socket.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("GET /control/catalog "));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer private-reload-test-token\r\n")
+            );
+            write!(socket, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+    });
+    let direct = serde_json::json!({"jsonrpc":"2.0","id":42,"method":"x.ai/auth/polycode/reload","params":{}});
+    let wrapped = serde_json::json!({"jsonrpc":"2.0","id":"reload-2","method":"_x.ai/auth/polycode/reload","params":{"method":"x.ai/auth/polycode/reload","params":{}}});
+    assert!(
+        refresh_polycode_catalog(&direct, Some(&bridge))
+            .await
+            .is_none()
+    );
+    assert_eq!(bridge.catalog().providers[0].models[0].id, "model-one");
+    assert!(
+        refresh_polycode_catalog(&wrapped, Some(&bridge))
+            .await
+            .is_none()
+    );
+    assert_eq!(bridge.catalog().providers[0].models[0].id, "model-two");
+    let error = refresh_polycode_catalog(&wrapped, Some(&bridge))
+        .await
+        .unwrap();
+    assert!(!error.contains("private-reload-test-token"));
+    let error: serde_json::Value = serde_json::from_str(&error).unwrap();
+    assert_eq!(error["id"], "reload-2");
+    assert_eq!(error["error"]["code"], -32603);
+    assert_eq!(
+        bridge.catalog().providers[0].models[0].id,
+        "model-two",
+        "failed refresh must preserve the last valid overlay"
+    );
+    // Native permission/MCP/subagent traffic and normal leaders are untouched.
+    for method in [
+        "session/request_permission",
+        "x.ai/mcp/list",
+        "session/new",
+        "session/set_model",
+    ] {
+        let request = serde_json::json!({"method":method});
+        assert!(
+            refresh_polycode_catalog(&request, Some(&bridge))
+                .await
+                .is_none()
+        );
+    }
+    assert!(refresh_polycode_catalog(&direct, None).await.is_none());
+    server.join().unwrap();
+}
+
 /// Parse a raw payload for the parse-once helper APIs.
 /// Panics on invalid JSON: the routing loop parses once up front, so non-JSON payloads never reach the helpers (they forward or drop verbatim).
 fn pv(payload: &str) -> serde_json::Value {

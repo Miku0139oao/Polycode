@@ -10,7 +10,6 @@
 //! - [`acp_handler`] — ACP notification routing
 //! - [`event_loop`] — biased tokio::select! loop
 pub mod actions;
-pub(crate) mod provider;
 pub mod agent;
 pub mod agent_view;
 pub mod app_view;
@@ -18,6 +17,7 @@ pub mod bundle;
 pub(crate) mod cancel_latency;
 pub mod cli;
 pub mod consent;
+pub(crate) mod provider;
 pub use crate::link_opener;
 use xai_grok_telemetry::region;
 use xai_grok_telemetry::region::Parent;
@@ -45,9 +45,9 @@ pub mod subscription;
 mod x10_filter;
 pub(crate) use effects::sanitize_user_error;
 mod event_loop;
-mod external;
 mod event_loop_stall;
 mod exit_timeout;
+mod external;
 pub(crate) mod external_editor;
 mod foreign_sessions;
 mod inline_edit;
@@ -466,6 +466,28 @@ pub fn resolve_leader_mode<'p>(
         disabled_by_confinement: None,
     }
 }
+/// Polycode has no remote-login prefetch from which to learn the normal leader
+/// default. Prefer its private native leader, without overriding explicit local
+/// or remote policy, --no-leader, or the existing confinement safety veto.
+fn resolve_pager_leader_mode<'p>(
+    args: &PagerArgs,
+    raw_config: &toml::Value,
+    remote_settings: Option<&xai_grok_shell::util::config::RemoteSettings>,
+    requested_confinement: Option<&'p str>,
+) -> LeaderMode<'p> {
+    let private_default = args.polycode_native
+        && config::use_leader_from_toml_opt(raw_config).is_none()
+        && remote_settings.and_then(|s| s.leader_mode).is_none();
+    resolve_leader_mode(
+        args.leader || private_default,
+        args.no_leader,
+        raw_config,
+        remote_settings,
+        true,
+        requested_confinement,
+    )
+}
+
 /// Leader mode as resolved, plus the sandbox profile that overrode it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeaderMode<'p> {
@@ -624,15 +646,21 @@ pub async fn run(
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
     if args.polycode_native {
         if !xai_grok_shell::polycode::enabled() {
-            anyhow::bail!("The native launcher must initialize the Polycode bridge before starting the runtime");
+            anyhow::bail!(
+                "The native launcher must initialize the Polycode bridge before starting the runtime"
+            );
         }
-        // The trusted overlay is process-local: never attach to a shared leader.
-        args.no_leader = true;
+        // The native launcher installs a private leader scope and bootstrap pipe.
+        // Keep ordinary leader policy (including an explicit --no-leader) intact.
     }
-    let external_config = if args.polycode_native { None } else {
+    let external_config = if args.polycode_native {
+        None
+    } else {
         crate::acp::external::ExternalAgentConfig::resolve(&args, &raw_config)?
     };
-    if let Some(config) = &external_config { config.validate_launch(&args)?; }
+    if let Some(config) = &external_config {
+        config.validate_launch(&args)?;
+    }
     let is_external = external_config.is_some();
     let had_prefetch = if args.polycode_native {
         false // Provider login is always an explicit TUI action, never a startup browser.
@@ -640,41 +668,43 @@ pub async fn run(
         xai_tty_utils::redirect_native_stderr();
         false
     } else {
-    let grok_com_config = match xai_grok_shell::agent::config::Config::new_from_toml_cfg(
-        &raw_config,
-    ) {
-        Ok(c) => c.grok_com_config,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to parse config for auth refresh, using defaults");
-            xai_grok_shell::auth::GrokComConfig::default()
+        let grok_com_config = match xai_grok_shell::agent::config::Config::new_from_toml_cfg(
+            &raw_config,
+        ) {
+            Ok(c) => c.grok_com_config,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to parse config for auth refresh, using defaults");
+                xai_grok_shell::auth::GrokComConfig::default()
+            }
+        };
+        if matches!(
+            xai_grok_shell::auth::maybe_run_pre_tui_external_login(
+                &grok_com_config,
+                args.force_login,
+                io::stdin().is_terminal(),
+            )
+            .await?,
+            xai_grok_shell::auth::PreTuiLoginOutcome::SignedIn(_)
+        ) {
+            args.force_login = false;
         }
-    };
-    if matches!(
-        xai_grok_shell::auth::maybe_run_pre_tui_external_login(
-            &grok_com_config,
-            args.force_login,
-            io::stdin().is_terminal(),
+        xai_tty_utils::redirect_native_stderr();
+        let refreshed_auth = tokio::time::timeout(
+            xai_grok_shell::http::STARTUP_AUTH_REFRESH_TIMEOUT,
+            xai_grok_shell::auth::try_ensure_fresh_auth(&grok_com_config),
         )
-        .await?,
-        xai_grok_shell::auth::PreTuiLoginOutcome::SignedIn(_)
-    ) {
-        args.force_login = false;
-    }
-    xai_tty_utils::redirect_native_stderr();
-    let refreshed_auth = tokio::time::timeout(
-        xai_grok_shell::http::STARTUP_AUTH_REFRESH_TIMEOUT,
-        xai_grok_shell::auth::try_ensure_fresh_auth(&grok_com_config),
-    )
-    .await
-    .unwrap_or(None);
-    let had_prefetch = match refreshed_auth {
-        Some(auth) => xai_grok_shell::agent::models::startup_prefetch::begin_with_auth(Some(auth)),
-        None => {
-            xai_grok_shell::agent::models::startup_prefetch::begin(Some(grok_com_config.clone()))
-        }
-    };
-    xai_grok_shell::agent::mvp_agent::warm_async_http_client();
-    had_prefetch
+        .await
+        .unwrap_or(None);
+        let had_prefetch = match refreshed_auth {
+            Some(auth) => {
+                xai_grok_shell::agent::models::startup_prefetch::begin_with_auth(Some(auth))
+            }
+            None => xai_grok_shell::agent::models::startup_prefetch::begin(Some(
+                grok_com_config.clone(),
+            )),
+        };
+        xai_grok_shell::agent::mvp_agent::warm_async_http_client();
+        had_prefetch
     };
     tokio::task::spawn_blocking(|| {});
     if let Ok(cwd) = std::env::current_dir() {
@@ -707,12 +737,10 @@ pub async fn run(
         use_leader: native_use_leader,
         policy_disable_reason,
         disabled_by_confinement,
-    } = resolve_leader_mode(
-        args.leader,
-        args.no_leader,
+    } = resolve_pager_leader_mode(
+        &args,
         &raw_config,
         remote_settings.as_ref(),
-        true,
         requested_confinement,
     );
     let use_leader = native_use_leader && !is_external;
@@ -768,11 +796,22 @@ pub async fn run(
         std::io::IsTerminal::is_terminal(&std::io::stdout());
     let materialized = if is_external {
         match intent {
-            session_startup::SessionStartupIntent::NewAuto => session_startup::MaterializedStartup::NewAuto,
-            session_startup::SessionStartupIntent::Resume { session_id: Some(session_id), .. } => session_startup::MaterializedStartup::Resume {
-                session_id, original_cwd: None, title: None, deferred_local_miss: false, suppress_code_restore: false,
+            session_startup::SessionStartupIntent::NewAuto => {
+                session_startup::MaterializedStartup::NewAuto
+            }
+            session_startup::SessionStartupIntent::Resume {
+                session_id: Some(session_id),
+                ..
+            } => session_startup::MaterializedStartup::Resume {
+                session_id,
+                original_cwd: None,
+                title: None,
+                deferred_local_miss: false,
+                suppress_code_restore: false,
             },
-            _ => anyhow::bail!("external ACP requires a new session or an explicit external session ID"),
+            _ => anyhow::bail!(
+                "external ACP requires a new session or an explicit external session ID"
+            ),
         }
     } else {
         session_startup::materialize_startup(materialize_ctx, intent).await?
@@ -1908,6 +1947,31 @@ mod tests {
             resolve_use_leader(false, false, &empty_config(), None, true, None);
         assert!(!use_leader);
         assert_eq!(reason, None);
+    }
+    #[test]
+    fn polycode_launcher_defaults_to_private_leader_without_overriding_user_policy() {
+        use clap::Parser;
+        let mut args =
+            PagerArgs::try_parse_from(["grok", "--polycode-native", "--no-external-acp"]).unwrap();
+        let defaults = empty_config();
+        assert!(resolve_pager_leader_mode(&args, &defaults, None, None).use_leader);
+        assert!(
+            !args.no_leader,
+            "native startup must not manufacture --no-leader"
+        );
+        let off = config_with_leader(false);
+        assert!(!resolve_pager_leader_mode(&args, &off, None, None).use_leader);
+        let confined = resolve_pager_leader_mode(&args, &defaults, None, Some("strict"));
+        assert!(!confined.use_leader);
+        assert_eq!(confined.disabled_by_confinement, Some("strict"));
+        args.no_leader = true;
+        assert!(!resolve_pager_leader_mode(&args, &defaults, None, None).use_leader);
+        args.no_leader = false;
+        args.leader = true;
+        assert!(resolve_pager_leader_mode(&args, &off, None, None).use_leader);
+        args.leader = false;
+        args.polycode_native = false;
+        assert!(!resolve_pager_leader_mode(&args, &defaults, None, None).use_leader);
     }
     #[test]
     fn cli_flag_overrides_config() {

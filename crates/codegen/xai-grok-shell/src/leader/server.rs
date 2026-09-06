@@ -465,6 +465,31 @@ fn method_of(json: &serde_json::Value) -> Option<&str> {
     }
     Some(top)
 }
+/// Reload must refresh the leader's own process-local overlay before the existing
+/// native model reload handler runs. The TUI's catalog/cache is a different process.
+async fn refresh_polycode_catalog(
+    json: &serde_json::Value,
+    bridge: Option<&crate::polycode::Bridge>,
+) -> Option<String> {
+    if method_of(json) != Some("x.ai/auth/polycode/reload") {
+        return None;
+    }
+    let bridge = bridge?;
+    if bridge.refresh(false).await.is_ok() {
+        return None;
+    }
+    // Keep the caller's original ID: namespacing/pending accounting has not run.
+    // No request errors, response bodies, URLs, or credentials are echoed.
+    Some(
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": json.get("id").cloned().unwrap_or(serde_json::Value::Null),
+            "error": {"code": -32603, "message": "Native leader bridge catalog refresh failed"},
+        })
+        .to_string(),
+    )
+}
+
 /// The real params object for a payload, unwrapping the gateway ext wrapper.
 /// For a wrapped ext (its `params` carries its own `method` and nested `params`) the real params live at `params.params`.
 /// Otherwise `params` is already real.
@@ -1565,6 +1590,7 @@ pub async fn run_leader_server(
     leader_version_override: Option<&'static str>,
     control_state: LeaderServerControlState,
 ) -> Result<(), ServerError> {
+    super::polycode_bootstrap::cancel_with_owner(cancel.clone());
     let _ = std::fs::remove_file(&socket_path);
     let shutdown_reason_rx = shutdown_tx.subscribe();
     let listener = LeaderListener::bind(&socket_path)?;
@@ -1843,6 +1869,15 @@ pub async fn run_leader_server(
                                 client_id = id.0,
                                 "Dropped pre-ready notification (leader not yet ready)"
                             );
+                        }
+                        continue;
+                    }
+                    if let Some(request) = json.as_ref()
+                        && let Some(error) =
+                            refresh_polycode_catalog(request, crate::polycode::bridge()).await
+                    {
+                        if let Some(client) = clients.get(&id) {
+                            let _ = client.tx.try_send(ClientOutbound::Acp(error.into()));
                         }
                         continue;
                     }
