@@ -1,12 +1,8 @@
-<# Polycode Windows entrypoint. Requires the WSL build; see integrations/README.md. #>
-param(
-    [ValidateSet('codex', 'cursor', 'native')][string]$Backend = 'codex',
-    [string]$Project = (Get-Location).Path,
-    [string]$Distro = 'archlinux',
-    [string]$Binary = '/root/grok-build-target/debug/xai-grok-pager',
-    [string]$CodexExecutable,
-    [string]$CursorDirectory,
-    [string]$Resume
-)
-& (Join-Path $PSScriptRoot 'integrations/launch.ps1') @PSBoundParameters
+<# Polycode Windows entrypoint. Wrapper options use one dash; native CLI arguments pass through.
+Examples: polycode -Backend cursor --model MODEL; polycode -- --help
+#>
+# Deliberately no param block: PowerShell parameter binding otherwise consumes native
+# --help/--version, abbreviations and positional prompts before they reach Polycode.
+$ErrorActionPreference = 'Stop'
+& (Join-Path $PSScriptRoot 'integrations/launch.ps1') @args
 exit $LASTEXITCODE
