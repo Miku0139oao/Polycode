@@ -957,7 +957,9 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                         effort,
                         prev_model_id: rollback_prev,
                     });
-                return if unchanged {
+                return if unchanged || xai_grok_shell::polycode::enabled() {
+                    // Bridge-mode startup choices persist only after the deferred
+                    // native model switch is acknowledged by the session actor.
                     vec![]
                 } else {
                     vec![Effect::PersistPreferredModel {
@@ -1194,7 +1196,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::Provider(command) => super::provider::dispatch(app, command),
         Action::Login => {
             if xai_grok_shell::polycode::enabled()
-                && matches!(app.provider.selected, Some(crate::app::provider::Choice::Subscription(_)))
             { super::provider::dispatch(app, crate::app::provider::Command::Menu { login: true }) }
             else { dispatch_login(app) }
         },
