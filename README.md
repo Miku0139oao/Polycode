@@ -10,18 +10,20 @@
   Polycode
 </h1>
 
-**Polycode** preserves Grok Build's fullscreen coding TUI and adds official
-ChatGPT/Codex and Cursor subscription backends. This is an independent fork,
-not an official xAI, OpenAI, or Cursor release.
+**Polycode** is an independent [Grok Build](https://github.com/xai-org/grok-build)
+fork developing **Grok, ChatGPT subscription, and experimental Cursor subscription
+selection in the same TUI**, while retaining Grok's native agent engine, tools,
+MCP, permissions, sessions, and features. It is not an official xAI, OpenAI,
+or Cursor release.
 
-```powershell
-.\polycode.ps1 -Backend codex -Project D:\my-project
-.\polycode.ps1 -Backend cursor -Project D:\my-project
-```
+**Native integration is in progress; v0.2.0 is pending verification and release.**
+The earlier external-ACP prototype (`d549db3`) replaced the agent and does **not**
+meet this architecture. Its passing tests and live logins are historical evidence,
+not proof of native completion.
 
-[Setup, build, billing boundaries and limitations](integrations/README.md).
-The upstream release-installation instructions below install **Grok Build**, not
-this Polycode fork; build this checkout to use the additional backends.
+[Install](#install-polycode-windows--wsl) ·
+[Provider selection and limitations](integrations/README.md) ·
+[Verification status](integrations/VERIFICATION.md)
 
 **Upstream Grok Build** is SpaceXAI's terminal-based AI coding agent. It runs as a
 full-screen TUI that understands your codebase, edits files, executes shell
@@ -29,10 +31,7 @@ commands, searches the web, and manages long-running tasks — interactively,
 headlessly for scripting/CI, or embedded in editors via the Agent Client
 Protocol (ACP).
 
-**This fork:** [Use your ChatGPT/Codex or Cursor subscription in the original TUI](integrations/README.md).
-External agents are opt-in; upstream Grok remains available.
-
-[Installing the released binary](#installing-the-released-binary) ·
+[Install Polycode](#install-polycode-windows--wsl) ·
 [Building from source](#building-from-source) ·
 [Documentation](#documentation) ·
 [Repository layout](#repository-layout) ·
@@ -40,32 +39,63 @@ External agents are opt-in; upstream Grok remains available.
 [Contributing](#contributing) ·
 [License](#license)
 
-![Grok Build TUI](https://media.x.ai/v1/website/universe-tui-screenshot-6f7a0837.png)
+![Upstream Grok Build TUI; not evidence of native subscription integration](https://media.x.ai/v1/website/universe-tui-screenshot-6f7a0837.png)
 
 **Learn more about Grok Build at [x.ai/cli](https://x.ai/cli)**
 
-This repository contains the Rust source for the `grok` CLI/TUI and its agent
-runtime. It is synced periodically from the SpaceXAI monorepo.
-
-A small `SOURCE_REV` file at the root records the full monorepo commit SHA
-for the version of the code present in this tree.
+The upstream Rust CLI/TUI and agent runtime originate in the SpaceXAI monorepo.
+`SOURCE_REV` records the imported upstream revision, not this fork's native
+integration or release status.
 
 </div>
 
 ---
 
-## Installing the released binary
+## Install Polycode (Windows + WSL)
 
-Prebuilt binaries are published for macOS, Linux, and Windows:
+**Planned v0.2.0 installer — not yet verified as a published, working release.**
+Wait for [verification](integrations/VERIFICATION.md) and the
+[release](https://github.com/Miku0139oao/Polycode/releases) to be finalized before
+using this command. It downloads and executes code from this project's repository;
+review the script first if needed.
 
-```sh
-curl -fsSL https://x.ai/cli/install.sh | bash   # macOS / Linux / Git Bash
-irm https://x.ai/cli/install.ps1 | iex          # Windows PowerShell
-grok --version
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/main/install.ps1))) -Version v0.2.0
 ```
 
-See the [changelog](https://x.ai/build/changelog) for the latest fixes,
-features, and improvements in each release.
+Target: **Windows with an existing WSL Arch Linux x86_64 distribution**, glibc
+2.43 or newer, zlib, libgcc, and Windows interop enabled; default distro name
+`archlinux` (installer override: `-Distro NAME`). This is not an Ubuntu, macOS,
+or native Windows binary support claim. The installer does not install WSL.
+The planned package includes the native binary, Bun runtime, and provider service;
+no Rust build, Codex CLI, Cursor CLI, or prior CLI login should be needed.
+
+Intended workflow after the native release passes verification:
+
+```powershell
+polycode                                  # enter the native provider UI
+polycode -Project D:\my-project
+polycode -Backend codex -Project D:\my-project  # optional initial preference only
+```
+
+Choose Grok, ChatGPT subscription, or experimental Cursor **inside the TUI**.
+Browser OAuth must start there, return to the same TUI, and allow model/provider
+switching without restarting. `-Backend` does not select an external agent.
+These are release requirements, **not yet demonstrated end to end**.
+
+The draft installer uses per-user Windows files and WSL binaries, checks release
+SHA-256 sums, and adds `polycode` to PATH. An already-open terminal may need its
+PATH refreshed after installation; authentication and provider switching must
+not require a TUI restart. Planned assets are `polycode-wsl-x64.gz`,
+`polycode-bun-wsl-x64.gz`, `polycode-runtime.zip`, and `SHA256SUMS`.
+
+Subscription quotas and provider billing rules still apply; there is no quota
+bypass or automatic metered-API fallback. Cursor uses an undocumented protocol
+with account/terms risks; parity remains unproven. See the
+[security and compatibility boundaries](integrations/README.md).
+
+Upstream installers at [x.ai/cli](https://x.ai/cli) install **Grok Build**, not
+Polycode. Upstream changes are listed in the [Grok changelog](https://x.ai/build/changelog).
 
 ## Building from source
 
@@ -85,8 +115,8 @@ Requirements:
 
 - **protoc** — proto codegen resolves [`bin/protoc`](bin/protoc) via DotSlash,
   or falls back to a `protoc` on `PATH` / `$PROTOC`.
-- macOS and Linux are supported build hosts; Windows builds are best-effort
-  and not currently tested from this tree.
+- For this fork, use the target WSL Arch x64 environment above. Upstream supports
+  additional build hosts, but those are not verified Polycode release targets.
 
 ```sh
 cargo run -p xai-grok-pager-bin              # build + launch the TUI
@@ -94,14 +124,19 @@ cargo build -p xai-grok-pager-bin --release  # release binary: target/release/xa
 cargo check -p xai-grok-pager-bin            # fast validation
 ```
 
-The binary artifact is named `xai-grok-pager`; official installs ship it as
-`grok`. On first launch it opens your browser to authenticate — see the
-[authentication guide](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md).
+The binary artifact is named `xai-grok-pager`; upstream installs ship it as
+`grok`. These Cargo commands alone do not initialize Polycode's native provider
+service. The integrated launcher/build path is described in
+[integrations/README.md](integrations/README.md); do not use an older ACP binary
+as a native integration build. The upstream
+[authentication guide](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md)
+describes Grok authentication, not proof of subscription OAuth support.
 
 ## Documentation
 
-Full online documentation is available at
-[docs.x.ai/build/overview](https://docs.x.ai/build/overview).
+Upstream Grok Build documentation is available at
+[docs.x.ai/build/overview](https://docs.x.ai/build/overview). For this fork's
+subscription integration status, use [integrations/README.md](integrations/README.md).
 
 The user guide ships with the pager crate:
 [`crates/codegen/xai-grok-pager/docs/user-guide/`](crates/codegen/xai-grok-pager/docs/user-guide/)
@@ -120,6 +155,7 @@ MCP servers, skills, plugins, hooks, headless mode, sandboxing, and more.
 | `crates/codegen/...` | The rest of the CLI crate closure (config, MCP, markdown, sandbox, ...) |
 | `crates/common/`, `crates/build/`, `prod/mc/` | Small shared leaf crates pulled in by the closure |
 | `third_party/` | Vendored upstream source (Mermaid diagram stack) — see below |
+| `integrations/native-provider/` | In-progress subscription model transports and local OAuth service; not replacement agents |
 
 > [!IMPORTANT]
 > The root `Cargo.toml` (workspace members, dependency versions, lints,

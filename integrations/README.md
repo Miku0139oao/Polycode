@@ -1,109 +1,82 @@
-# Polycode：ChatGPT 訂閱與 Cursor 後端
+# Polycode：同一個原生 TUI，選擇模型來源
 
-保留原版 Grok Build 全螢幕 TUI，由你選擇 **原生 Grok、Codex agent、Cursor agent**。為便於追蹤上游，底層 Rust crate／二進位與 `.grok` 原生設定名稱仍保留；Polycode 是本 fork 的專案與啟動入口名稱，不會覆寫已安裝的 `grok.exe`。Codex/Cursor 模式使用各自官方 CLI 的登入，不需要另外輸入 OpenAI 或 Anthropic 模型 API key。
+**原生整合開發中；v0.2.0 尚待驗證與發佈。** 目標是保留 Grok Build **真正的 agent engine、工具迴圈、MCP、權限、sandbox、原生 sessions 與功能**，只切換 Grok／ChatGPT 訂閱／實驗性 Cursor 訂閱的模型來源。不是只保留畫面，也不是用 Codex／Cursor agent 代替 Grok。
 
-## Windows 上啟動（本機已建置的 WSL 版本）
+舊版 `d549db3` 外部 ACP 原型已被否決為最終架構。它的 Rust／adapter 測試與真實登入紀錄只證明舊路徑；詳見 [VERIFICATION.md](VERIFICATION.md)。目前原生 service 與 Cursor 合計 **55 項離線測試**是開發檢查點，尚未證明真正原生 TUI、瀏覽器 OAuth 或 live endpoints 可用。
 
-在 PowerShell 執行：
+## 安裝與啟動
+
+[根目錄 README](../README.md#install-polycode-windows--wsl) 提供預定的一行 PowerShell 安裝指令，來源是本專案 [Miku0139oao/Polycode](https://github.com/Miku0139oao/Polycode)。**請等 native 驗證及 v0.2.0 資產發佈完成，勿把現有公開原型視為可用的原生版本。**
+
+目標環境限定 **Windows + 已安裝的 WSL Arch Linux x64、glibc 2.43 以上**，並需 zlib、libgcc 與 Windows interop；預設 distro 為 `archlinux`。不宣稱 Ubuntu、macOS 或 Windows 原生 binary 相容。預定套件內含 Rust binary、Bun 與本地 provider service，不要求安裝 Codex／Cursor CLI，也不要求先執行任何 CLI login。
+
+以下為待驗證的原生版使用方式：
 
 ```powershell
-# 先完成官方登入（已登入可略過）
-codex login
-# Cursor 請使用官方 Cursor CLI 的 agent login，勿誤用 Grok 的 agent.exe。
-
-# 切換後端；Project 指向你要工作的專案
-.\polycode.ps1 -Backend codex -Project D:\my-project
-.\polycode.ps1 -Backend cursor -Project D:\my-project
-.\polycode.ps1 -Backend native -Project D:\my-project
+polycode                                  # 目前目錄，直接進入原生 provider UI
+polycode -Project D:\my-project             # 指定專案
+polycode -Backend codex -Project D:\my-project
+polycode -Backend cursor -Project D:\my-project
+polycode -Backend native -Project D:\my-project
 ```
 
-預設 WSL 發行版為 `archlinux`，二進位為 `/root/grok-build-target/debug/xai-grok-pager`。可用 `-Distro`、`-Binary` 覆寫。Codex 安裝位置不同時傳 `-CodexExecutable`；Cursor 傳 `-CursorDirectory`（包含官方 `node.exe`、`index.js` 的版本目錄）。Launcher 不更改你的全域 Grok／Codex／Cursor 設定，也不自動更換模型計費來源。
+`-Backend` 是**可省略的初始選擇偏好**（預設 `auto`）；`native` 指 Grok 模型來源，`codex` 指 ChatGPT 訂閱模型 transport。三者都必須使用 Grok 原生 engine，不是 external-agent 模式。底層 Rust crate、上游設定與 `grok` 命名仍保留，Polycode 是獨立入口。
 
-恢復指定外部會話可加 `-Resume SESSION_ID`。`-Backend native` 會明確忽略 `[external_acp]`，不是發生錯誤時自動回退。
+### TUI 內的必要流程（尚待端到端驗證）
 
-此 Windows 路徑使用 **WSL TUI → Windows ACP bridge → 官方 Windows agent**，沿用 Windows 上已有的登入。專案必須位於 `/mnt/<磁碟>/` 對應的 Windows 磁碟；Linux-only `/home/...` 專案請使用 Linux 版官方 CLI。Bridge 只轉換結構化檔案路徑，不改寫提示文字、模型 ID 或權限選項。
+1. 未登入也能開啟 provider UI，選擇 Grok、ChatGPT 或實驗性 Cursor。
+2. 在 TUI 選擇登入，由 TUI 開啟供應商瀏覽器授權頁；完成後回到**同一個 TUI**，不需先登入 CLI 或重啟。
+3. 取得帳戶實際可用的模型，再明確選擇模型；登入成功不代表自動切換。之後可在同一原生 session 切換來源／模型，保留歷史、工具、MCP 與權限狀態。
+4. 登入失敗、取消、逾時或舊回覆不得切換模型、改用另一個帳戶或付費 API。執行中的 turn 須完成或明確取消後才切換，不得遺失工具結果或審批。
 
-WSL 必須啟用 Windows executable interoperability。若出現 `Exec format error`，請檢查 WSL interop／binfmt 設定。此機 Arch 的 systemd 沒有保留 WSLInterop 註冊，已補 `/etc/binfmt.d/WSLInterop.conf`（內容為 `:WSLInterop:M::MZ::/init:PF`）；不要改成 shell 執行任意未驗證指令。
+目前 Rust 工作草稿提供 `/provider`、`/login [grok|codex|cursor]`、`/provider refresh`、`/provider cancel`，並接入 `/model`。這是待驗證介面，不是已發佈功能保證。`-Resume` 必須恢復 **Grok 原生 session**，不得沿用舊文件中的 Codex／Cursor 外部 session ID。
 
-## Linux／macOS 或自行設定
+## 原生架構與功能邊界
+
+`PowerShell → WSL native launcher + 本地 provider service → Grok TUI / 原生 engine → 所選模型 transport`
+
+本地 service 負責 OAuth、credential refresh、模型目錄及串流協定轉換，不執行 Codex／Cursor CLI，不掌管專案工具、MCP、權限或 session。模型回傳工具意圖，**由 Grok 原生權限流程決定執行或拒絕，並送回真實結果**。Cursor 的遠端工具橋接不得執行或猜測替代工具；未知內建工具須明確拒絕。
+
+保留上游功能是驗收要求，包含 hooks、skills／plugins、worktree、rewind、原生歷史、附件、headless、cloud／分享／voice 等；各功能原有的帳戶、平台或服務條件仍適用。**不得沿用外部 ACP 模式的停用清單作為已完成原生整合。** Provider 能力差異必須明示及處理，不能靜默丟棄參數、附件、角色或假造 usage，也不能因此悄悄縮減最終需求。
+
+### Cursor：實驗性且有未解相容性
+
+使用未公開、可能隨時變動的 Cursor 協定，不是官方通用模型 API；使用者已同意研究其 **協定、帳戶及服務條款風險**，這不代表供應商認可或保證帳戶安全。
+
+目前仍在調查 system／developer／history 角色語義、遠端 agent 指令、sampling／length controls、usage、image／多模態與 native request 的相容性。文字化保存 transcript 不等於角色語義等價；離線工具往返也不證明真實後端接受。現有 transport 對未支援的控制／圖片等明確報錯，**不是功能等價完成，也不是同意移除這些需求**。詳細缺口見 [Cursor checkpoint](native-provider/cursor/README.md)。
+
+## 登入資料、安全與費用
+
+- Polycode 自行從供應商授權流程取得憑證，存於 **WSL** `${XDG_DATA_HOME:-$HOME/.local/share}/polycode/auth/`，與官方 CLI 的帳戶檔分離；不要提交或分享此目錄。
+- Credential store 草稿使用 provider 分檔、跨程序鎖、revision 與原子提交協調 refresh／登入更新；新建目錄／檔案權限為 `0700`／`0600`。這是本機敏感檔案，**不是加密保管庫**；鎖與 revision 也不等於 live token rotation 已驗證。
+- 不擷取瀏覽器或 CLI credential，不複製 `auth.json`，不使用第三方 token proxy。不要在 issue、日誌或截圖公開 token、授權 callback 或原始敏感 payload。本地 loopback service 不應對外公開。
+- 不繞過配額、帳單或帳戶限制，不默默切換到 metered API、別的模型／來源。登入、目錄、generation 或用量錯誤必須明確回報。
+- **訂閱不代表無限或零額外費用**。模型資格、額度、on-demand／credits 及組織政策仍由供應商管理；有費用疑慮請先在帳戶停用額外用量或設定限制。Polycode 不更改計費設定，也不能保證帳戶端絕無超額費用。
+- Grok 自己的登入與用量規則仍適用。上游 telemetry／Sentry 設定也不是匿名或零網路保證。
+
+## 開發者：整合後的來源建置
+
+先依 [根目錄 README](../README.md#building-from-source) 準備 pinned Rust／DotSlash。以下必須在**原生 Rust 修改、service 及 launcher 已合併的 checkout**執行；不適用公開 ACP 原型或只有文件的分支。
 
 ```sh
-# Codex：node 與 cli.mjs 都使用絕對路徑
-/path/to/xai-grok-pager \
-  --acp-executable /absolute/path/to/node \
-  --acp-arg=/absolute/path/to/grok-build/integrations/codex-acp/cli.mjs \
-  --acp-arg=--codex-executable \
-  --acp-arg=/absolute/path/to/codex \
-  --acp-auth-method codex_chatgpt
-
-# Cursor：必須是官方 Cursor agent，不要只憑 PATH 中的 agent 名稱猜測
-/path/to/xai-grok-pager \
-  --acp-executable /absolute/path/to/cursor-agent \
-  --acp-arg=acp \
-  --acp-auth-method cursor_login
-```
-
-也可使用 Grok 的 `config.toml`：
-
-```toml
-[external_acp]
-executable = "/absolute/path/to/node"
-args = ["/absolute/path/to/grok-build/integrations/codex-acp/cli.mjs", "--codex-executable", "/absolute/path/to/codex"]
-auth_method = "codex_chatgpt"
-```
-
-CLI 的 `--acp-executable` 會整組替換設定檔命令；每個 argument 分別使用 `--acp-arg=VALUE`。不經 shell、不搜尋模糊的 executable 名稱。連線／驗證失敗會顯示錯誤，**不退回原生 Grok 或另一個付費 API**。
-
-在 TUI 使用 `/model` 選擇後端實際提供的模型。恢復時使用 `--resume EXTERNAL_SESSION_ID`，ID 屬於該後端，不能混用 Grok、Codex 與 Cursor 的 ID。
-
-## 訂閱與費用邊界
-
-- **Codex**：強制 ChatGPT 登入與 OpenAI provider；每次建立會話、送出 prompt 前檢查 account 類型。拒絕 API-key／Bedrock 登入，並要求人工審批與 workspace-write sandbox。
-- **Cursor**：使用官方 `cursor_login` 與帳戶用量規則。CLI 整合不是獨立的 OpenAI API key。
-- **訂閱不是無限用量**。帳戶方案、模型、組織政策、額外 credits／on-demand 設定由供應商管理。若不希望超額付費，請在供應商帳戶關閉額外用量或設定限制；此介面無法代替帳戶帳單系統提供絕對費用上限。
-- 不擷取瀏覽器 token，不複製 auth.json，不記錄上游原始 stderr，不顯示帳戶識別資訊。外部程序不繼承 `XAI_*`／`GROK_*` 環境值；可執行檔位置請使用明確 CLI arguments。
-
-## 功能與限制
-
-共用原版 TUI 的文字／Markdown 顯示、串流、工具進度、權限確認、取消、模型選擇與明確 ID 的會話恢復。權限選項只回傳後端提供的 ID；取消或過期的確認不得變成授權。Codex 的長會話恢復包含分頁歷史讀取。
-
-Cursor 的 `ask_question`／`create_plan` 會使用原版選項與預覽介面，保持確切選項 ID，且計畫必須明確選擇 Accept 才批准；取消、自由文字或不完整答案不會冒充批准。Todo 更新合併為標準 ACP plan；task／image 擴充只顯示後端提供的摘要，不冒充 Grok 子代理或重新執行工具。Codex 選項問答也接入同一介面；secret／純自由文字問答明確不支援。
-
-**這是替換 agent 後端，不是把 Cursor 訂閱當通用模型 API。** 外部模式下工具、MCP、sandbox、規則與記憶由官方後端掌管，不再執行 Grok 的工具迴圈。
-
-Grok 專屬的雲端／分享／voice／rewind／worktree／原生歷史清單／hooks 設定、headless 模式與部分附件快捷流程會被明確停用，而不是假裝支援。Cursor 模式／configOptions 不等於 Grok 的 plan／yolo 指令；未適配的控制不會送出。一般程序 telemetry/Sentry 仍沿用原專案設定，這不是零網路或匿名保證。
-
-## 建置
-
-參考根目錄 README 的 Rust／DotSlash 需求。上游固定 Rust 1.94.0；Windows 原生 build 是上游 best-effort，這裡已在 WSL 驗證。
-
-```sh
-# 從 repository root，在 Linux/WSL 中執行
-cargo +1.94.0 install dotslash --locked
+# WSL Arch；repository root
 CARGO_TARGET_DIR=/root/grok-build-target cargo +1.94.0 build -p xai-grok-pager-bin
+npm ci --prefix integrations/native-provider
+node --test integrations/native-provider/test/*.test.mjs integrations/native-provider/cursor/provider.test.mjs
 ```
 
-跨 Windows/WSL checkout 時 `bin/protoc` 必須是 LF，否則 shebang 會找 `dotslash\r` 而失敗。不要修改根 `Cargo.toml`；它由上游產生。
+建置成功後，Windows PowerShell 的來源入口草稿為：
 
-## 驗證
-
-```sh
-cargo +1.94.0 test -p xai-grok-pager --lib -- --test-threads=4
-node --test integrations/tests/*.test.mjs
-cd integrations/codex-acp && npm test
-node smoke.mjs  # 只做握手／驗證，不呼叫模型
+```powershell
+.\polycode.ps1 -Project D:\my-project -Distro archlinux -Binary /root/grok-build-target/debug/xai-grok-pager -Runtime /usr/sbin/bun
 ```
 
-`integrations/tests/pty_smoke.py` 搭配 `mock_acp.py` 驗證真正全螢幕 TUI 的串流與取消。`pty_live.py`、`codex-acp/live-test.mjs`、`cursor-live-test.mjs` 的真實模型測試需要明確 `--allow-subscription-usage`，會消耗少量帳戶用量。測試不自動允許未知工具請求。`live-tool-test.mjs` 只允許精確匹配的臨時 fixture 唯讀命令，並以隨機內容驗證真正工具讀取。
+`-Binary`／`-Runtime` 是 WSL 絕對路徑；來源開發需自行備妥 Bun，正式套件預定內含 runtime。`bin/protoc` 必須為 LF；不要修改上游生成的根 `Cargo.toml`。建置或離線測試通過不能取代真正 native TUI／OAuth／模型與工具測試。
 
-Windows 完整 launcher 測試使用 `tests/conpty_live.mjs`：另外安裝 test-only `node-pty`，可用 `NODE_PTY_MODULE` 指向其安裝目錄，再執行 `node integrations/tests/conpty_live.mjs --allow-subscription-usage codex`（或 `cursor`）。不需要將 node-pty 加到產品執行相依項。
+## 來源與致謝
 
-本次完整測試結果與已知邊界見 [VERIFICATION.md](VERIFICATION.md)。
-
-## 參考與設計理由
-
-- [Codex app-server](https://developers.openai.com/codex/app-server)：官方 agent 的驗證、串流、審批與會話介面；不是 ACP，所以使用獨立 adapter。
-- [Codex authentication](https://developers.openai.com/codex/auth.md)：ChatGPT 訂閱登入與 API-key 計費的區別。
-- [Cursor ACP](https://cursor.com/docs/cli/acp)：官方 stdio ACP、登入、會話與互動擴充。
-- [Cursor pricing](https://cursor.com/docs/account/pricing)：包含用量與額外用量規則。
-- OpenCode／Pi：參考 OAuth provider、模型與串流適配方式。日後若要保留 **Grok 自己的 agent** 而直接呼叫 ChatGPT 訂閱模型，應另做專用 OAuth／Responses provider，不可只換 URL；目前先採用可直接驗證的官方 agent 整合。
+- [Grok Build](https://github.com/xai-org/grok-build)：原生 TUI、engine 與工具；[上游 user guide](../crates/codegen/xai-grok-pager/docs/user-guide/)。
+- [OpenAI authentication](https://developers.openai.com/codex/auth.md)：ChatGPT 與 API-key 計費方式不同；借用授權協定不代表執行官方 CLI。
+- [Cursor pricing](https://cursor.com/docs/account/pricing)：帳戶用量規則。[官方 ACP 文件](https://cursor.com/docs/cli/acp)屬舊原型背景，不是原生 transport 的相容性證明。
+- OpenCode／Pi 的 OAuth／streaming 設計參考，以及 [Cursor provenance 與保留授權](native-provider/cursor/PROVENANCE.md)。
+- [Apache-2.0 LICENSE](../LICENSE)、[THIRD-PARTY-NOTICES](../THIRD-PARTY-NOTICES)與上游 crate／vendored notices 仍適用；發佈包還須保留 Bun、npm 與改編 Cursor transport 的授權文件。
