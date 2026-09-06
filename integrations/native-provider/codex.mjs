@@ -56,11 +56,17 @@ export function toResponses(body) {
   }
   const request = {
     model: body.model, input, instructions: instructions.join('\n\n'), stream: true, store: false,
-    tools: (body.tools ?? []).map(t => ({ type: 'function', name: names.get(t.function.name), description: t.function.description ?? '', parameters: t.function.parameters ?? { type: 'object', properties: {} }, strict: false })),
+    tools: (body.tools ?? []).map(t => ({ type: 'function', name: names.get(t.function.name), description: t.function.description ?? '', parameters: t.function.parameters ?? { type: 'object', properties: {} }, strict: t.function.strict ?? false })),
     ...(choice ? { tool_choice: choice } : {}),
     parallel_tool_calls: body.parallel_tool_calls ?? true,
     include: ['reasoning.encrypted_content'],
   };
+  if (body.response_format) {
+    const format = body.response_format;
+    if (['text', 'json_object'].includes(format.type)) request.text = { format: { type: format.type } };
+    else if (format.type === 'json_schema' && format.json_schema?.name && format.json_schema?.schema) request.text = { format: { ...format.json_schema, type: 'json_schema' } };
+    else throw new Error('Unsupported structured response format');
+  }
   const effort = body.reasoning_effort ?? body.reasoning?.effort;
   if (effort) request.reasoning = { effort, summary: 'auto' };
   return { request, originals };
