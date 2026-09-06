@@ -63,6 +63,9 @@ fn card(app: &mut AppView, title: String, options: Vec<QuestionOption>, login: b
     .with_local_kind(LocalQuestionKind::Provider { login })
     .with_no_freeform();
     agent.question_view = Some(state);
+    // Replacing a card restores scrollback focus during cleanup. Explicitly give
+    // the new local card keyboard ownership, including asynchronous catalog refresh.
+    agent.active_pane = crate::app::agent_view::ActivePane::Prompt;
     agent.prompt.set_text("");
 }
 fn menu(app: &mut AppView) {

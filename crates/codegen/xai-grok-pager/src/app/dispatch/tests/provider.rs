@@ -11,6 +11,9 @@ fn polycode_unauthenticated_startup_opens_local_provider_ui_without_authenticati
     let ActiveView::Agent(id) = app.active_view else {
         panic!("native view missing")
     };
+    // Refresh/replacement must not leave the newly drawn provider card parked.
+    let _ = dispatch_enabled(&mut app, Command::Menu { login: false });
+    assert_eq!(app.agents[&id].active_pane, crate::app::agent_view::ActivePane::Prompt);
     let q = app.agents[&id].question_view.as_ref().unwrap();
     assert!(matches!(
         q.local_kind,

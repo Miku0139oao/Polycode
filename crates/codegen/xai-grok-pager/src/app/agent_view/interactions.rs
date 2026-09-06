@@ -333,6 +333,9 @@ impl AgentView {
     pub(super) fn handle_question_key(&mut self, key: &KeyEvent) -> InputOutcome {
         use crate::views::question_view::{CursorMotion, QuestionFocus};
         if key.code == KeyCode::Esc {
+            if self.question_view.as_ref().is_some_and(|q| matches!(q.local_kind, Some(crate::views::question_view::LocalQuestionKind::Provider { .. }))) {
+                return self.submit_question_answers(true);
+            }
             return self.handle_card_esc();
         }
         let Some(ref mut qv) = self.question_view else {
@@ -1076,6 +1079,7 @@ impl AgentView {
                 qv.local_kind,
                 Some(crate::views::question_view::LocalQuestionKind::DoctorFix { .. })
                     | Some(crate::views::question_view::LocalQuestionKind::FeedbackTrace { .. })
+                    | Some(crate::views::question_view::LocalQuestionKind::Provider { .. })
             )
         });
         if follows_skip_submit {
@@ -2310,6 +2314,24 @@ mod question_no_freeform_tests {
         let z = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
         let _ = agent.handle_question_key(&z);
         assert_eq!(qv(&agent).focus, QuestionFocus::InputMode);
+    }
+}
+#[cfg(test)]
+mod provider_cancel_tests {
+    use super::super::test_fixtures::make_agent;
+    use super::question_no_freeform_tests::open_question;
+    use super::*;
+
+    #[test]
+    fn polycode_escape_and_dismiss_cancel_the_local_provider_operation() {
+        for dismiss in [false, true] {
+            let mut agent = make_agent();
+            open_question(&mut agent, false);
+            agent.question_view.as_mut().unwrap().local_kind = Some(crate::views::question_view::LocalQuestionKind::Provider { login: true });
+            let result = if dismiss { agent.dismiss_question_view() } else { agent.handle_question_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)) };
+            assert!(matches!(result, InputOutcome::Action(Action::Provider(crate::app::provider::Command::Cancel))));
+            assert!(agent.question_view.is_none());
+        }
     }
 }
 #[cfg(test)]
