@@ -6,7 +6,7 @@ use indexmap::IndexMap;
 use reqwest::{Client, Method, Url};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::agent::config::{ConfigModelOverride, EnvKeys, ModelEntry};
+use crate::agent::config::{ConfigModelOverride, ModelEntry};
 use crate::agent::model_providers::ModelProviderConfig;
 use crate::sampling::ApiBackend;
 
@@ -327,6 +327,21 @@ impl Bridge {
             .iter()
             .any(|p| self.model_base(*p) == base)
     }
+    /// Require both the authenticated control catalog and the exact injected route.
+    /// A prefix, arbitrary loopback URL, or signed-out catalog entry is not authority.
+    fn ready_model(&self, id: &str, entry: &ModelEntry) -> bool {
+        self.catalog().providers.iter().any(|p| {
+            p.logged_in
+                && entry.info.base_url == self.model_base(p.id)
+                && entry.info.api_backend == ApiBackend::ChatCompletions
+                && entry.info.extra_headers.is_empty()
+                && p.models.iter().any(|m| {
+                    id == format!("{}/{}", p.id.as_str(), m.id)
+                        && entry.info.id.as_deref() == Some(id)
+                        && entry.info.model == m.id
+                })
+        })
+    }
     /// Append last, after native/global config resolution. User headers/credentials must not
     /// override the trusted transport, nor may the process key enter a native Grok entry.
     fn inject(
@@ -334,10 +349,9 @@ impl Bridge {
         resolved: &mut IndexMap<String, ModelEntry>,
         endpoints: &crate::agent::config::EndpointsConfig,
     ) {
-        for provider in self.catalog().providers {
+        for provider in self.catalog().providers.into_iter().filter(|p| p.logged_in) {
             let config = ModelProviderConfig {
                 base_url: Some(self.model_base(provider.id)),
-                env_key: Some(EnvKeys::One("POLYCODE_BRIDGE_TOKEN".into())),
                 api_backend: Some(ApiBackend::ChatCompletions),
                 ..Default::default()
             };
@@ -352,6 +366,7 @@ impl Bridge {
                 }
                 .with_provider_defaults(&config, provider.id.as_str())
                 .apply(&key, None, endpoints);
+                entry.info.id = Some(key.clone());
                 entry.auth_provider = Some(crate::auth::AuthProviderRef::fail_closed(
                     "polycode process transport".into(),
                 ));
@@ -367,6 +382,17 @@ pub(crate) fn inject_models(
     if let Some(bridge) = bridge() {
         bridge.inject(resolved, endpoints);
     }
+}
+pub(crate) fn is_ready_model(id: &str, entry: &ModelEntry) -> bool {
+    // install() registers the opaque sampler transport BEFORE publishing BRIDGE.
+    bridge().is_some_and(|b| b.ready_model(id, entry))
+}
+pub(crate) fn is_ready_model_entry(entry: &ModelEntry) -> bool {
+    entry
+        .info
+        .id
+        .as_deref()
+        .is_some_and(|id| is_ready_model(id, entry))
 }
 pub fn is_bridge_endpoint(base: &str) -> bool {
     bridge().is_some_and(|b| b.owns_endpoint(base))
@@ -576,6 +602,25 @@ mod tests {
             );
         }
         let entry = &models["codex/actual-id"];
+        assert!(bridge.ready_model("codex/actual-id", entry));
+        assert!(!bridge.ready_model("cursor/actual-id", entry));
+        assert!(!bridge.ready_model("codex/missing", entry));
+        for endpoint in ["http://127.0.0.1:1235/codex/v1", "https://api.x.ai/v1"] {
+            let mut forged = entry.clone();
+            forged.info.base_url = endpoint.into();
+            assert!(!bridge.ready_model("codex/actual-id", &forged));
+        }
+        let mut forged = entry.clone();
+        forged.info.model = "uncatalogued-model".into();
+        assert!(!bridge.ready_model("codex/actual-id", &forged));
+        bridge.catalog.write().unwrap().providers[0].logged_in = false;
+        assert!(!bridge.ready_model("codex/actual-id", entry));
+        let mut signed_out = IndexMap::new();
+        bridge.inject(&mut signed_out, &cfg.endpoints);
+        assert!(
+            signed_out.is_empty(),
+            "signed-out models cannot be registered"
+        );
         assert_eq!(entry.info.model, "actual-id");
         assert_eq!(entry.info.base_url, "http://127.0.0.1:1234/codex/v1");
         assert_eq!(entry.info.api_backend, ApiBackend::ChatCompletions);
@@ -584,12 +629,14 @@ mod tests {
             "\"chat_completions\""
         );
         assert!(entry.info.extra_headers.is_empty());
-        // No session token may fall through even if the bridge env key is absent.
-        assert_ne!(
+        // No static, synthetic or native credential is embedded in the model.
+        // Even without a globally installed transport this entry fails closed.
+        assert!(entry.api_key.is_none());
+        assert!(entry.env_key.is_none());
+        assert!(
             resolve_credentials(entry, Some("native-session-token"))
                 .api_key
-                .as_deref(),
-            Some("native-session-token")
+                .is_none()
         );
         assert!(!format!("{entry:?}").contains("not-a-real-process-token"));
     }

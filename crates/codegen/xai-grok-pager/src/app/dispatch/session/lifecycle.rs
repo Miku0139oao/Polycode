@@ -147,7 +147,9 @@ pub(in crate::app::dispatch) fn dispatch_new_session(app: &mut AppView) -> Vec<E
             return effects;
         }
     }
-    if app.external_acp { return dispatch_new_session_inner(app, None); }
+    if app.external_acp {
+        return dispatch_new_session_inner(app, None);
+    }
     let in_git_repo = get_active_agent(app)
         .map(|a| a.current_branch.is_some())
         .unwrap_or(app.cwd_has_git_ancestor);
@@ -339,6 +341,15 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
     app: &mut AppView,
     model_id: Option<acp::ModelId>,
 ) -> (AgentId, Vec<Effect>) {
+    let (agent_id, mut effects) = create_local_session_view(app);
+    effects.extend(start_local_session(app, agent_id, model_id));
+    (agent_id, effects)
+}
+
+/// Allocate only the local native UI. Provider login must not create an ACP session.
+pub(in crate::app::dispatch) fn create_local_session_view(
+    app: &mut AppView,
+) -> (AgentId, Vec<Effect>) {
     let (previous_session_id, effective_cwd, inherit_worktree) = match get_active_agent(app) {
         Some(a) => (
             a.session.session_id.clone(),
@@ -347,7 +358,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
         ),
         None => (None, app.cwd.clone(), false),
     };
-    let mut effects = unregister_session_effect(previous_session_id);
+    let effects = unregister_session_effect(previous_session_id);
     reseed_tip_for_new_session(app);
     let agent_id = AgentId(app.next_agent_id);
     app.next_agent_id += 1;
@@ -451,6 +462,26 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
             agent.workspace_mode_cli_locked = locked;
         }
         agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
+    }
+    (agent_id, effects)
+}
+
+/// Commit a local placeholder only after the caller has selected its initial model.
+pub(in crate::app::dispatch) fn start_local_session(
+    app: &mut AppView,
+    agent_id: AgentId,
+    model_id: Option<acp::ModelId>,
+) -> Vec<Effect> {
+    if !app.session_startup_allowed() {
+        app.show_toast("Resolve folder trust and startup consent before starting a session");
+        return vec![];
+    }
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    let effective_cwd = agent.session.cwd.clone();
+    let chat_kind = agent.chat_kind;
+    {
         agent.mcp_init_progress = Some(McpInitProgress {
             total: 0,
             connected: 0,
@@ -459,15 +490,14 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
         agent.session.prompt_history_loading = true;
     }
     let preferred_session_id = app.deferred_startup.preferred_session_id.take();
-    effects.push(Effect::CreateSession {
+    vec![Effect::CreateSession {
         agent_id,
         cwd: effective_cwd,
         model_id,
         permission_mode_override: None,
         preferred_session_id,
         chat_kind,
-    });
-    (agent_id, effects)
+    }]
 }
 /// Exit the current session and return to the welcome screen.
 pub(in crate::app::dispatch) fn dispatch_exit_session(app: &mut AppView) -> Vec<Effect> {
@@ -1067,6 +1097,19 @@ pub(in crate::app::dispatch) fn handle_session_created(
     new_models: Option<acp::SessionModelState>,
     scheduler_background_loops: Option<bool>,
 ) -> Vec<Effect> {
+    // Cancelled provider placeholders have unique, retired IDs. A late result
+    // cannot bind a successor, drain its prompts, or change its model catalog.
+    let provider_start = app.provider.local_target == Some(agent_id) && app.provider.creating;
+    let provider_model = if provider_start {
+        new_models.as_ref().map(|m| m.current_model_id.clone())
+    } else {
+        None
+    };
+    if provider_start {
+        app.provider.local_target = None;
+        app.provider.creating = false;
+        app.provider.pending_session_id = None;
+    }
     let agent_count = app.agents.len();
     let switch_hint =
         crate::views::dashboard::session_switch_hint_command(app.screen_mode.is_minimal());
@@ -1166,6 +1209,12 @@ pub(in crate::app::dispatch) fn handle_session_created(
         });
         notify_session_ready(&app.notification_service, agent);
         note_peek_page_flip(app, agent_id, drain.page_flip_entry);
+        if let Some(model_id) = provider_model {
+            effects.push(Effect::PersistPreferredModel {
+                model_id,
+                reasoning_effort: None,
+            });
+        }
         return effects;
     }
     vec![]
@@ -1313,6 +1362,24 @@ pub(in crate::app::dispatch) fn handle_session_failed(
     agent_id: AgentId,
     error: String,
 ) -> Vec<Effect> {
+    if app.provider.local_target == Some(agent_id) && app.provider.creating {
+        app.provider.creating = false;
+        if let Some(sid) = app.provider.pending_session_id.take() {
+            app.provider.retired_sessions.insert(sid);
+        }
+        if let Some(agent) = app.agents.get_mut(&agent_id) {
+            agent.session.prompt_history_loading = false;
+            agent.mcp_init_progress = None;
+            agent.session.pending_prompts.clear();
+        }
+        let generation = app.provider.generation;
+        return super::super::provider::complete(
+            app,
+            generation,
+            agent_id,
+            crate::app::provider::Reply::Error(format!("Session creation failed: {error}")),
+        );
+    }
     tracing::error!(agent = ?agent_id, error = %error, "Session creation failed");
     let msg = format!("Session creation failed: {error}");
     let is_orphan = app
@@ -1430,7 +1497,9 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
             Choice::Subscription(ProviderId::Codex)
         } else if model_id.0.starts_with("cursor/") {
             Choice::Subscription(ProviderId::Cursor)
-        } else { Choice::Grok });
+        } else {
+            Choice::Grok
+        });
     }
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.session.model_switch_pending = false;

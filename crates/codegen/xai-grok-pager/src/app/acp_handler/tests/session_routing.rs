@@ -2,6 +2,23 @@
     use super::*;
 
     #[test]
+    fn polycode_local_picker_and_cancelled_create_drop_unowned_acp_traffic() {
+        let mut app = make_app_with_agent("unused");
+        app.agents.get_mut(&AgentId(0)).unwrap().session.session_id = None;
+        app.provider.local_target = Some(AgentId(0));
+        assert!(find_session_match(&app, &acp::SessionId::new("stranger")).is_none());
+        app.provider.creating = true;
+        app.provider.pending_session_id = Some("committed".into());
+        assert!(find_session_match(&app, &acp::SessionId::new("stranger")).is_none());
+        assert!(matches!(find_session_match(&app, &acp::SessionId::new("committed")), Some(SessionMatch::Root(AgentId(0)))));
+        app.provider.retired_sessions.insert("cancelled".into());
+        assert!(find_session_match(&app, &acp::SessionId::new("cancelled")).is_none());
+        // Even a later ordinary native placeholder cannot absorb cancelled traffic.
+        app.provider.local_target = None;
+        assert!(find_session_match(&app, &acp::SessionId::new("cancelled")).is_none());
+    }
+
+    #[test]
     fn acp_chunk_for_inactive_agent_lands_in_its_scrollback() {
         // Regression: switching away from a streaming agent must not discard chunks bound for that agent
         // Only `TaskResult::PromptResponse` once survived, so the user saw a bare "Worked for X.Xs" with no body text

@@ -707,8 +707,9 @@ async fn eager_auth_or_login_fallback(
     Option<serde_json::Value>,
 ) {
     if xai_grok_shell::polycode::enabled() && needs_login {
-        // The native session can be created without a first-party account. Keep its
-        // per-turn auth gate, but do not prevent opening the local provider picker.
+        // Unlock only the local UI, not ACP authentication. The provider picker
+        // creates no native session until a registered subscription model is chosen;
+        // the shell verifies its own catalog/transport before admitting that session.
         return (false, login_label, login_method_id, auth_start_mode, None);
     }
     if auth_methods.is_empty() {

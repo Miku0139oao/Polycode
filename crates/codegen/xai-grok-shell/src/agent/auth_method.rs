@@ -1,5 +1,9 @@
 use agent_client_protocol as acp;
 
+#[cfg(test)]
+#[path = "auth_method_subscription_tests.rs"]
+mod subscription_tests;
+
 use crate::agent::config::ModelEntry;
 use crate::auth::PreferredAuthMethod;
 
@@ -10,13 +14,41 @@ use crate::auth::PreferredAuthMethod;
 /// Every running session's per-turn auth gate observes the new method on its next turn.
 /// `None` until the first `authenticate`.
 /// Auth is process-global (one user, one `AuthManager`), so all sessions sharing one cell is correct.
-pub(crate) type SharedAuthMethodId = std::sync::Arc<arc_swap::ArcSwapOption<acp::AuthMethodId>>;
+pub(crate) type SharedAuthMethodId = std::sync::Arc<LiveAuthMethod>;
+
+/// A subscription session may classify its registered process transport as API-key
+/// auth without authenticating the entire agent (or minting a dummy credential).
+/// A later native login still wins through the same live process-wide cell.
+pub(crate) struct LiveAuthMethod {
+    current: std::sync::Arc<arc_swap::ArcSwapOption<acp::AuthMethodId>>,
+    subscription_fallback: Option<std::sync::Arc<acp::AuthMethodId>>,
+}
+impl LiveAuthMethod {
+    pub(crate) fn load(&self) -> Option<std::sync::Arc<acp::AuthMethodId>> {
+        self.current
+            .load_full()
+            .or_else(|| self.subscription_fallback.clone())
+    }
+    pub(crate) fn store(&self, value: Option<std::sync::Arc<acp::AuthMethodId>>) {
+        self.current.store(value);
+    }
+}
+/// Call only after verifying the selected model against the installed bridge catalog.
+pub(crate) fn subscription_session_auth(global: &SharedAuthMethodId) -> SharedAuthMethodId {
+    std::sync::Arc::new(LiveAuthMethod {
+        current: global.current.clone(),
+        subscription_fallback: Some(std::sync::Arc::new(acp::AuthMethodId::new("xai.api_key"))),
+    })
+}
 
 /// Construct a [`SharedAuthMethodId`]. `None` is the pre-`authenticate` state.
 pub(crate) fn new_shared_auth_method_id(initial: Option<acp::AuthMethodId>) -> SharedAuthMethodId {
-    std::sync::Arc::new(arc_swap::ArcSwapOption::new(
-        initial.map(std::sync::Arc::new),
-    ))
+    std::sync::Arc::new(LiveAuthMethod {
+        current: std::sync::Arc::new(arc_swap::ArcSwapOption::new(
+            initial.map(std::sync::Arc::new),
+        )),
+        subscription_fallback: None,
+    })
 }
 
 /// Env var that, when set, advertises `xai.api_key` as a viable auth method.
@@ -75,7 +107,10 @@ where
     if disable_api_key_auth {
         return false;
     }
-    let has_byok = models.into_iter().any(ModelEntry::has_own_credentials);
+    // A registered bridge authorizes its own models, not global/native API-key auth.
+    let has_byok = models
+        .into_iter()
+        .any(|m| !crate::polycode::is_bridge_endpoint(&m.info.base_url) && m.has_own_credentials());
     has_byok || (has_xai_api_key_env() && first_party_env_ok)
 }
 

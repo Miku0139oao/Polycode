@@ -157,6 +157,23 @@ impl MvpAgent {
     pub(super) fn set_auth_method(&self, id: acp::AuthMethodId) {
         self.auth_method_id.store(Some(std::sync::Arc::new(id)));
     }
+    /// Preserve the native auth guard for arbitrary models. Only an exact, signed-in
+    /// bridge catalog entry receives a session-local transport auth classification.
+    pub(crate) fn session_auth_for_model(
+        &self,
+        model_id: &acp::ModelId,
+    ) -> Result<crate::agent::auth_method::SharedAuthMethodId, acp::Error> {
+        let entry = self.resolve_model_id(model_id)?;
+        if crate::polycode::is_ready_model(model_id.0.as_ref(), &entry) {
+            return Ok(crate::agent::auth_method::subscription_session_auth(&self.auth_method_id));
+        }
+        if crate::polycode::is_bridge_endpoint(&entry.info.base_url)
+            || self.auth_method_id.load().is_none()
+        {
+            return Err(acp::Error::auth_required().data("Authenticate the selected model provider before creating or switching a session"));
+        }
+        Ok(std::sync::Arc::clone(&self.auth_method_id))
+    }
     /// Publish model-owned credentials for voice/tools static fallthrough.
     /// Only [`ModelEntry::own_credential`], not `sampling_config.api_key` (which may be a session JWT).
     pub(crate) fn sync_process_static_api_key(&self, preferred_model_id: Option<&str>) {
@@ -4263,10 +4280,8 @@ impl MvpAgent {
         let origin_client = self.origin_client_info_from_meta(init.meta.as_ref());
         let sampling_config = self
             .resolve_sampling_config_for_model(&session_model_id, origin_client.clone());
-        if self.auth_method_id.load().is_none() {
-            return Err(acp::Error::auth_required().data("no auth method id provided"));
-        }
-        let auth_method_id = std::sync::Arc::clone(&self.auth_method_id);
+        // Do not authenticate a default Grok session just to host a provider picker.
+        // Revalidate after profile overrides below, before spawning any sampler.
         tracing::info!(
             session_id = %session_info.id.0,
             ?startup_hints,
@@ -4385,6 +4400,8 @@ impl MvpAgent {
         );
         let compaction_mode = pins.mode;
         let two_pass_enabled = pins.two_pass;
+        let subscription_choice = crate::polycode::is_bridge_endpoint(&sampling_config.base_url)
+            .then(|| session_model_id.clone());
         let (session_model_id, mut sampling_config) = self
             .apply_agent_model_override(
                 pinned_model.as_ref(),
@@ -4392,6 +4409,10 @@ impl MvpAgent {
                 sampling_config,
                 origin_client.clone(),
             );
+        if subscription_choice.is_some_and(|selected| selected != session_model_id) {
+            return Err(acp::Error::invalid_params().data("Agent profile cannot replace the explicitly selected subscription model"));
+        }
+        let auth_method_id = self.session_auth_for_model(&session_model_id)?;
         self.models_manager
             .apply_supported_effort(
                 &mut sampling_config,

@@ -17,6 +17,9 @@ fn polycode_unauthenticated_startup_opens_local_provider_ui_without_authenticati
         Some(LocalQuestionKind::Provider { .. })
     ));
     assert!(q.response_tx.is_none());
+    assert!(app.agents[&id].session.session_id.is_none());
+    assert!(app.agents[&id].mcp_init_progress.is_none());
+    assert!(!app.agents[&id].session.prompt_history_loading);
     assert_eq!(
         q.questions[0]
             .options
@@ -33,11 +36,10 @@ fn polycode_unauthenticated_startup_opens_local_provider_ui_without_authenticati
             ..
         }
     )));
-    assert!(
-        !effects
-            .iter()
-            .any(|e| matches!(e, Effect::Authenticate { .. } | Effect::SwitchModel { .. }))
-    );
+    assert!(!effects.iter().any(|e| matches!(
+        e,
+        Effect::Authenticate { .. } | Effect::SwitchModel { .. } | Effect::CreateSession { .. }
+    )));
 }
 
 #[test]
@@ -50,11 +52,11 @@ fn polycode_switch_preserves_native_session_tools_mcp_and_permissions_and_persis
         acp::ModelInfo::new(model_id.clone(), "ChatGPT Model"),
     );
     let agent = app.agents.get_mut(&target).unwrap();
-    agent.session.available_tools = Some([
-        "Bash".into(),
-        "Read".into(),
-        "mcp__test__search".into(),
-    ].into_iter().collect());
+    agent.session.available_tools = Some(
+        ["Bash".into(), "Read".into(), "mcp__test__search".into()]
+            .into_iter()
+            .collect(),
+    );
     agent.session.yolo_mode = true;
     let session_id = agent.session.session_id.clone();
     let tools = agent.session.available_tools.clone();

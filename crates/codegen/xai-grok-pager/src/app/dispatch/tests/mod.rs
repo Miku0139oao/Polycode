@@ -9,6 +9,7 @@ mod notes;
 mod permissions;
 mod prompt;
 mod provider;
+mod provider_startup;
 mod queue_release;
 mod rewind;
 mod router;

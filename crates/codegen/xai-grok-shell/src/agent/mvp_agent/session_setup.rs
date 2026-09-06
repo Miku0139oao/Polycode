@@ -301,6 +301,16 @@ impl MvpAgent {
             .as_ref()
             .and_then(|m| m.get("modelId").and_then(|v| v.as_str()))
             .filter(|s| !s.is_empty());
+        if crate::polycode::enabled()
+            && let Some(id) =
+                custom_model_id.filter(|id| id.starts_with("codex/") || id.starts_with("cursor/"))
+        {
+            let entry = self.resolve_model_id(&acp::ModelId::new(id))?;
+            if !crate::polycode::is_ready_model(id, &entry) {
+                return Err(acp::Error::auth_required()
+                    .data("Sign in to the selected subscription provider and refresh its models"));
+            }
+        }
         #[cfg(all(feature = "local-workspace", unix))]
         let pending_local_workspace = self
             .start_own_local_workspace_if_needed(&mut session_meta_for_stamp, cwd.as_path())
@@ -466,15 +476,17 @@ impl MvpAgent {
             &session_id,
             EffortTarget::SummaryClient,
         );
-        spawn_sampler_transport_prewarm(&session_sampling.base_url);
-        let (summary_client, summary_model) = self.build_summary_client(&session_sampling)?;
-        let relay_sync = self.start_relay_sync(&session_id, &session_info);
         let model_id = match &session_initial_model {
             Some(chat_model) => acp::ModelId::new(chat_model.clone()),
             None => resolved_custom_model
                 .map(acp::ModelId::new)
                 .unwrap_or_else(|| self.models_manager.current_model_id()),
         };
+        // Fail before prewarm/persistence/MCP when no legitimate model auth exists.
+        let _ = self.session_auth_for_model(&model_id)?;
+        spawn_sampler_transport_prewarm(&session_sampling.base_url);
+        let (summary_client, summary_model) = self.build_summary_client(&session_sampling)?;
+        let relay_sync = self.start_relay_sync(&session_id, &session_info);
         let session_model_id = model_id.clone();
         let persistence = if is_chat_kind {
             crate::session::persistence::PersistenceHandle::noop()

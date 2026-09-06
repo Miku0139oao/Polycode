@@ -25,6 +25,12 @@ pub struct State {
     pub attempt: Option<LoginAttempt>,
     pub catalog: Catalog,
     pub login_menu: bool,
+    /// A local-only view until explicit model choice commits its ACP session.
+    pub local_target: Option<AgentId>,
+    pub creating: bool,
+    pub pending_session_id: Option<String>,
+    /// Prevent late ACP traffic from a cancelled create reaching any new placeholder.
+    pub retired_sessions: std::collections::HashSet<String>,
 }
 impl State {
     pub fn invalidate(&mut self) -> Option<LoginAttempt> {

@@ -64,6 +64,10 @@ pub(super) fn mcp_target_agent<'a>(
             let ActiveView::Agent(id) = app.active_view else {
                 return None;
             };
+            if app.provider.local_target == Some(id) {
+                // Local startup accepts only MCP notifications with its explicit ID.
+                return None;
+            }
             let agent = app.agents.get_mut(&id)?;
             Some((true, agent))
         }
@@ -108,6 +112,13 @@ pub(super) fn find_session_match(
     app: &AppView,
     session_id: &acp::SessionId,
 ) -> Option<SessionMatch> {
+    if app
+        .provider
+        .retired_sessions
+        .contains(session_id.0.as_ref())
+    {
+        return None;
+    }
     // Single pass over `app.agents`, halving the two-pass iteration cost on the hot notification path
     // An exact root match returns immediately (root wins when both could match); the first child match seen is the fallback after the full scan
     //
@@ -133,6 +144,13 @@ pub(super) fn find_session_match(
         && let Some(agent) = app.agents.get(&active_id)
         && agent.session.session_id.is_none()
     {
+        if app.provider.local_target == Some(active_id)
+            && app.provider.pending_session_id.as_deref() != Some(session_id.0.as_ref())
+        {
+            // A local provider card owns no ACP traffic. A committed create owns
+            // only its preallocated session ID, not a stranger's early updates.
+            return None;
+        }
         return Some(SessionMatch::Root(active_id));
     }
     None

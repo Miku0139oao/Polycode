@@ -165,6 +165,24 @@ fn models(app: &mut AppView, provider: Choice) {
         );
     }
 }
+fn cancel(app: &mut AppView) -> Vec<Effect> {
+    close_card(app);
+    let effects = invalidate(app);
+    if let Some(id) = app.provider.local_target.take() {
+        // Retire the unique placeholder, including queued prompts. Late native
+        // creation completions must never attach to a later provider attempt.
+        super::session::modal::remove_agent_and_cleanup(app, id);
+        if app.active_view == ActiveView::Agent(id) {
+            super::ctx::show_welcome(app);
+            app.welcome_prompt_focused = true;
+        }
+    }
+    app.provider.creating = false;
+    if let Some(sid) = app.provider.pending_session_id.take() {
+        app.provider.retired_sessions.insert(sid);
+    }
+    effects
+}
 fn invalidate(app: &mut AppView) -> Vec<Effect> {
     let prior = app.provider.invalidate();
     prior
@@ -177,8 +195,7 @@ pub(super) fn dispatch(app: &mut AppView, command: Command) -> Vec<Effect> {
         return vec![];
     }
     if matches!(command, Command::Cancel) {
-        close_card(app);
-        let effects = invalidate(app);
+        let effects = cancel(app);
         app.show_toast("Provider login cancelled; the current model is unchanged");
         return effects;
     }
@@ -187,13 +204,15 @@ pub(super) fn dispatch(app: &mut AppView, command: Command) -> Vec<Effect> {
 
 pub(super) fn dispatch_enabled(app: &mut AppView, command: Command) -> Vec<Effect> {
     if matches!(command, Command::Cancel) {
-        close_card(app);
-        return invalidate(app);
+        return cancel(app);
     }
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get(&id)
     {
-        if agent.session.state.is_busy() || agent.session.model_switch_pending {
+        if agent.session.state.is_busy()
+            || agent.session.model_switch_pending
+            || (app.provider.local_target == Some(id) && app.provider.creating)
+        {
             app.show_toast(
                 "Wait for the current turn, or cancel it before switching providers/models",
             );
@@ -209,10 +228,22 @@ pub(super) fn dispatch_enabled(app: &mut AppView, command: Command) -> Vec<Effec
         }
     }
     let mut effects = Vec::new();
+    if let Some(local) = app.provider.local_target
+        && app.active_view != ActiveView::Agent(local)
+    {
+        // Navigating to another scope retires the old startup just like Esc.
+        effects.extend(cancel(app));
+    }
     if !matches!(app.active_view, ActiveView::Agent(_)) {
-        effects.extend(super::session::lifecycle::dispatch_new_session_inner(
-            app, None,
-        ));
+        if !app.session_startup_allowed() {
+            app.show_toast("Resolve startup trust and consent before choosing a provider");
+            return effects;
+        }
+        // No auth RPC, MCP startup, persistence or sampling on the picker path.
+        let (id, local_effects) = super::session::lifecycle::create_local_session_view(app);
+        app.provider.local_target = Some(id);
+        app.provider.creating = false;
+        effects.extend(local_effects);
     }
     let ActiveView::Agent(target) = app.active_view else {
         return effects;
@@ -274,6 +305,53 @@ pub(super) fn dispatch_enabled(app: &mut AppView, command: Command) -> Vec<Effec
             }
         }
         Command::Model(model) => {
+            let id = agent_client_protocol::ModelId::new(model);
+            if !app.models.available.contains_key(&id) {
+                app.show_toast("Model no longer available; refresh with /provider");
+                return effects;
+            }
+            if app.provider.local_target == Some(target) {
+                let subscription = id.0.starts_with("codex/") || id.0.starts_with("cursor/");
+                if subscription
+                    && !app.provider.catalog.providers.iter().any(|p| {
+                        p.logged_in
+                            && p.models
+                                .iter()
+                                .any(|m| id.0.as_ref() == format!("{}/{}", p.id.as_str(), m.id))
+                    })
+                {
+                    app.show_toast(
+                        "Sign in and refresh the provider catalog before choosing a model",
+                    );
+                    return effects;
+                }
+                let mut create =
+                    super::session::lifecycle::start_local_session(app, target, Some(id));
+                // Identify pre-SessionCreated ACP notifications without binding the
+                // UI (binding early would let queued prompts sample prematurely).
+                for effect in &mut create {
+                    if let Effect::CreateSession {
+                        preferred_session_id,
+                        ..
+                    } = effect
+                    {
+                        let sid = preferred_session_id
+                            .get_or_insert_with(|| uuid::Uuid::new_v4().to_string());
+                        app.provider.pending_session_id = Some(sid.clone());
+                    }
+                }
+                app.provider.creating = !create.is_empty();
+                // A CLI/deferred model must not replace the explicit picker choice.
+                if app.provider.creating {
+                    app.agents
+                        .get_mut(&target)
+                        .unwrap()
+                        .session
+                        .deferred_model_switch = None;
+                }
+                effects.extend(create);
+                return effects;
+            }
             if app
                 .agents
                 .get(&target)
@@ -282,11 +360,6 @@ pub(super) fn dispatch_enabled(app: &mut AppView, command: Command) -> Vec<Effec
                 app.show_toast(
                     "Native session is still starting; choose the model again with /provider",
                 );
-                return effects;
-            }
-            let id = agent_client_protocol::ModelId::new(model);
-            if !app.models.available.contains_key(&id) {
-                app.show_toast("Model no longer available; refresh with /provider");
                 return effects;
             }
             effects.extend(super::router::dispatch(

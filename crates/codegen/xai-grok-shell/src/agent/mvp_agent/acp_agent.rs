@@ -619,7 +619,7 @@ impl acp::Agent for MvpAgent {
                         .models_manager
                         .models()
                         .values()
-                        .any(|m| m.has_own_credentials())
+                        .any(|m| !crate::polycode::is_bridge_endpoint(&m.info.base_url) && m.has_own_credentials())
                     {
                         emit_login_span(false, "api_key", None, Some("no_credentials"));
                         return Err(

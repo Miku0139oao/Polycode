@@ -2117,7 +2117,10 @@ async fn subscription_summary_client_affinity_uses_the_complete_selected_route()
         };
         let agent = build_minimal_agent_for_tests();
         if native {
-            agent.auth_manager.hot_swap(auth_with_mode(crate::auth::AuthMode::ApiKey, "test-native-session"));
+            agent.auth_manager.hot_swap(auth_with_mode(
+                crate::auth::AuthMode::ApiKey,
+                "test-native-session",
+            ));
             agent.cfg.borrow_mut().endpoints.deployment_key = Some("test-native-deployment".into());
         }
         for provider in ["codex", "cursor"] {
@@ -2948,6 +2951,24 @@ async fn auth_type_session_based_with_current_returns_session_token() {
 async fn auth_type_no_method_id_no_current_returns_api_key() {
     let agent = build_minimal_agent_for_tests();
     assert!(agent.auth_method_id.load().is_none());
+    assert!(
+        agent
+            .session_auth_for_model(&agent.models_manager.current_model_id())
+            .is_err()
+    );
+    assert!(
+        agent
+            .session_auth_for_model(&acp::ModelId::new("codex/unregistered"))
+            .is_err()
+    );
+    // A subscription session's classification must never change the global guard.
+    let scoped = crate::agent::auth_method::subscription_session_auth(&agent.auth_method_id);
+    assert_eq!(scoped.load().unwrap().0.as_ref(), "xai.api_key");
+    assert!(
+        agent
+            .session_auth_for_model(&agent.models_manager.current_model_id())
+            .is_err()
+    );
     assert!(agent.auth_manager.current().is_none());
     assert_eq!(agent.auth_type(), xai_chat_state::AuthType::ApiKey,);
 }

@@ -4327,16 +4327,16 @@ impl ModelEntry {
     /// Static only: never consults auth-provider tokens.
     pub(crate) fn own_credential(&self) -> Option<String> {
         if crate::polycode::is_bridge_endpoint(&self.info.base_url) {
-            // Nonsecret marker for native BYOK gating. The actual token is applied by
-            // the sampler's registered loopback transport, never stored in chat/config.
-            return Some("polycode-process-auth".into());
+            // Transport auth is not a model/API credential. Never synthesize a key
+            // or resolve the secret-bearing launcher environment into chat state.
+            return None;
         }
         first_own_credential(self.api_key.as_deref(), self.env_key.as_ref())
     }
     /// The provider governing this model's bearer: `None` when a static `api_key`/`env_key` resolves.
     /// The turn paths consult this, so a shadowed provider never runs.
     pub(crate) fn effective_auth_provider(&self) -> Option<&crate::auth::AuthProviderRef> {
-        if self.own_credential().is_some() {
+        if self.own_credential().is_some() || crate::polycode::is_ready_model_entry(self) {
             return None;
         }
         self.auth_provider.as_ref()
@@ -4345,7 +4345,9 @@ impl ModelEntry {
     /// Probes `std::env::var` at call time: result is not stable across env changes.
     /// Never executes a provider command.
     pub(crate) fn has_own_credentials(&self) -> bool {
-        self.own_credential().is_some() || self.auth_provider.is_some()
+        crate::polycode::is_ready_model_entry(self)
+            || self.own_credential().is_some()
+            || self.auth_provider.is_some()
     }
 }
 impl std::ops::Deref for ModelEntry {
@@ -4724,7 +4726,15 @@ pub(crate) fn resolve_credentials(
     session_key: Option<&str>,
 ) -> ResolvedCredentials {
     let info = model.info();
-    let (api_key, base_url, auth_type) = if let Some(key) = model.own_credential() {
+    let (api_key, base_url, auth_type) = if crate::polycode::is_bridge_endpoint(&info.base_url) {
+        // The registered sampler stamps the real process bearer at the wire only.
+        // No dummy key, subscription credential, or Grok token enters persistence.
+        (
+            None,
+            info.base_url.clone(),
+            xai_chat_state::AuthType::ApiKey,
+        )
+    } else if let Some(key) = model.own_credential() {
         (
             Some(key),
             info.base_url.clone(),
@@ -4943,7 +4953,10 @@ pub(crate) fn subscription_aux_sampling_config(
         || info.extra_headers != primary.extra_headers
         || info.query_params != primary.query_params
         || info.env_http_headers != primary.env_http_headers
-        || entry.api_base_url.as_ref().is_some_and(|url| url != &primary.base_url)
+        || entry
+            .api_base_url
+            .as_ref()
+            .is_some_and(|url| url != &primary.base_url)
     {
         return primary.clone();
     }
@@ -4977,7 +4990,11 @@ pub(crate) fn resolve_aux_model_sampling_config(
     client_version: Option<String>,
 ) -> Option<SamplerConfig> {
     if is_subscription_sampling(primary) {
-        return Some(subscription_aux_sampling_config(primary, Some(model_id), models));
+        return Some(subscription_aux_sampling_config(
+            primary,
+            Some(model_id),
+            models,
+        ));
     }
     let catalog_entry = find_model_by_id(models, model_id).cloned();
     if let Some(entry) = &catalog_entry {

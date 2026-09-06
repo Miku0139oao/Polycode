@@ -48,6 +48,10 @@ pub(crate) async fn apply(
         .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
     let _config_guard = agent.config_mutation_lock(&session_id).lock_owned().await;
     let handle = agent.resident_handle(&session_id).unwrap_or(handle);
+    // A subscription's session-local classification never authorizes a switch to
+    // an unauthenticated native/arbitrary model. Explicit Grok login still updates
+    // the shared live auth cell used by the existing session.
+    let _ = agent.session_auth_for_model(&model_id)?;
     let model = agent.resolve_model_id(&model_id)?;
     let use_concise = model.info().use_concise;
     let session_default = handle
