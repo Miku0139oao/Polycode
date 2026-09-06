@@ -49,7 +49,6 @@ function validateBody(input) {
   if (Object.keys(body).some(k => !allowed.includes(k))) throw fail('unsupported_option', 'This experimental Cursor transport does not support that completion option.', 400);
   if (body.stream !== undefined && typeof body.stream !== 'boolean') throw invalid();
   if (body.stream_options !== undefined && (!object(body.stream_options) || Object.keys(body.stream_options).some(k => k !== 'include_usage') || ![true, false, undefined].includes(body.stream_options.include_usage))) throw invalid();
-  if (body.tool_choice !== undefined && !['auto', 'none'].includes(body.tool_choice)) throw fail('unsupported_option', 'Forced tool choice is not supported by Cursor MCP transport.', 400);
   if (body.parallel_tool_calls !== undefined && typeof body.parallel_tool_calls !== 'boolean') throw invalid();
   if (!Array.isArray(body.messages) || !body.messages.length || body.messages.length > 10000) throw invalid();
   validateMessages(body.messages);
@@ -63,7 +62,36 @@ function validateBody(input) {
     if (f.strict !== undefined && f.strict !== false) throw fail('unsupported_option', 'Strict function schema enforcement is unavailable in Cursor MCP transport.', 400);
     names.add(f.name);
   }
+  const choice = body.tool_choice;
+  if (choice !== undefined && !['auto', 'none', 'required'].includes(choice)) {
+    if (!object(choice) || Object.keys(choice).some(k => !['type', 'function'].includes(k)) || choice.type !== 'function' ||
+        !object(choice.function) || Object.keys(choice.function).some(k => k !== 'name') ||
+        typeof choice.function.name !== 'string' || !names.has(choice.function.name)) throw invalid();
+  }
+  if (choice === 'required' && !names.size) throw invalid();
   return body;
+}
+const requiresTool = body => body.tool_choice === 'required' || object(body.tool_choice);
+function permittedTools(body) {
+  if (body.tool_choice === 'none') return [];
+  const tools = body.tools ?? [];
+  return object(body.tool_choice) ? tools.filter(t => t.function.name === body.tool_choice.function.name) : tools;
+}
+function remoteBody(body) {
+  // Local enforcement only: no proprietary tool_choice field or restricted headers.
+  const { tool_choice, ...remote } = body;
+  remote.tools = permittedTools(body);
+  if (requiresTool(body)) {
+    const selection = object(tool_choice)
+      ? `request the supplied MCP tool with exact native name ${JSON.stringify(tool_choice.function.name)}`
+      : 'request at least one of the supplied MCP tools';
+    // Existing system/developer mapping encodes this as an ordinary USER rule, not a privileged prompt.
+    // Leave the caller's transcript/config untouched for exact native continuation correlation.
+    const rule = { role: 'system', content: `For each assistant response, including after a native tool result, ${selection} before completing. `
+      + 'Text alone does not satisfy this request. Emit an MCP tool intent; Polycode alone handles execution and permissions.' };
+    remote.messages = [...body.messages.slice(0, -1), rule, body.messages.at(-1)];
+  }
+  return remote;
 }
 function configKey(body) {
   const { messages, stream, stream_options, ...config } = body;
@@ -223,9 +251,8 @@ export function createCursorProvider({
         session.pending = undefined;
         session.expected = undefined;
       } else {
-        // tool_choice:none is enforced at registration AND when receiving an exec.
-        const remoteBody = body.tool_choice === 'none' ? { ...body, tools: [] } : body;
-        session.connection = new Connection({ fetchImpl, token: c.accessToken, body: remoteBody, uuid, now, controller: session.controller });
+        // Apply the same permitted subset at registration and at the incoming exec boundary.
+        session.connection = new Connection({ fetchImpl, token: c.accessToken, body: remoteBody(body), uuid, now, controller: session.controller });
         await session.connection.open();
       }
       checkSignal(session.controller.signal);
@@ -234,7 +261,8 @@ export function createCursorProvider({
   }
   async function* turn(session, body) {
     let content = '';
-    const names = new Set((body.tools ?? []).map(t => t.function.name));
+    const names = new Set(permittedTools(body).map(t => t.function.name));
+    const mustCall = requiresTool(body); // Per completion request, not satisfied by a previous parked call.
     try {
       while (true) {
         checkSignal(session.controller.signal);
@@ -246,20 +274,23 @@ export function createCursorProvider({
         if (event.type === 'text') {
           content += event.text;
           if (Buffer.byteLength(content) > 4 * 1024 * 1024) throw fail('size_limit', 'Cursor completion is too large.');
-          yield { delta: { content: event.text } };
+          // Mandatory choices cannot leak text-only success before a permitted intent is observed.
+          if (!mustCall) yield { delta: { content: event.text } };
         } else if (event.type === 'tool') {
           const exec = event.exec;
-          if (body.tool_choice === 'none' || !names.has(exec.toolName)) throw fail('unregistered_tool', 'Cursor requested a tool not supplied by the native engine; denied.', 502);
+          if (!names.has(exec.toolName)) throw fail('unregistered_tool', 'Cursor requested a tool not permitted by the native engine tool definitions/choice; denied.', 502);
           if (session.seen.has(exec.toolCallId)) throw fail('duplicate_tool_call', 'Cursor reused a tool call ID; denied.');
           if (session.seen.size >= 1024) throw fail('size_limit', 'Cursor tool call limit exceeded.');
           session.seen.add(exec.toolCallId);
           const call = { id: exec.toolCallId, type: 'function', function: { name: exec.toolName, arguments: JSON.stringify(exec.args) } };
           session.pending = exec;
           session.expected = { role: 'assistant', content: content || null, tool_calls: [call] };
+          if (mustCall && content) yield { delta: { content } };
           yield { delta: { tool_calls: [{ index: 0, ...call }] } };
           yield { finish_reason: 'tool_calls' };
           return; // Do not close/return the remote iterator. It remains parked on this exact exec.
         } else if (event.type === 'done') {
+          if (mustCall) throw fail('tool_choice_unfulfilled', 'Cursor completed without the required native tool intent; denied.');
           drop(session);
           yield { finish_reason: 'stop', usage: event.usage };
           return;
@@ -302,8 +333,10 @@ export function createCursorProvider({
           if (terminal) return;
           const emit = value => controller.enqueue(encoder.encode(`data: ${typeof value === 'string' ? value : JSON.stringify(value)}\n\n`));
           try {
-            if (!started) { started = true; emit(chunk({ role: 'assistant' })); return; }
+            // Even the initial role chunk waits for a permitted intent when a tool is mandatory.
+            if (!started && !requiresTool(body)) { started = true; emit(chunk({ role: 'assistant' })); return; }
             const { value, done } = await iterator.next();
+            if (!started) { started = true; emit(chunk({ role: 'assistant' })); }
             if (done) {
               terminal = true;
               release();

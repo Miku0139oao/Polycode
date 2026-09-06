@@ -10,6 +10,8 @@ const B = { accessToken: 'OFFLINE_ACCOUNT_B' };
 const toolName = 'mcp__strange-server__read.path-with-dashes';
 const args = JSON.parse('{"path":"/never/read/this","empty":"","nil":null,"no":false,"zero":0,"nested":[1,{"__proto__":{"safe":true},"":""}]}');
 const tools = [{ type: 'function', function: { name: toolName, description: 'Native tool; NEVER execute in transport.', parameters: { type: 'object', properties: { path: { type: 'string' }, nested: { type: 'array', items: { anyOf: [{ type: 'number' }, { type: 'object' }] } } }, required: ['path'], additionalProperties: false } } }];
+const titleTool = { type: 'function', function: { name: 'session_title', description: 'Set the native session title.', parameters: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'] } } };
+const forcedChoice = name => ({ type: 'function', function: { name } });
 const body = (extra = {}) => ({ model: 'exact-model-id', messages: [{ role: 'system', content: 'Native permissions stay here.', name: 'native' }, { role: 'user', content: [{ type: 'text', text: 'Use my tool.', annotations: { retain: true } }] }], tools, ...extra });
 const textFrame = value => p.envelope(p.bytes(1, p.bytes(1, p.string(1, value))));
 const doneFrame = () => Uint8Array.from([0, 0, 0, 0, 4, 10, 2, 114, 0]); // independent literal: interaction.turn_ended
@@ -304,10 +306,10 @@ test('malformed/truncated/oversized/compressed streams never become successful c
   }
 });
 
-test('no model defaults or ignored sampling/forced/strict/external-image options', async t => {
+test('no model defaults or ignored sampling/strict/external-image options', async t => {
   const mock = { fetchImpl: async () => { assert.fail('network must not be reached'); } };
   const instance = provider(t, mock);
-  for (const input of [body({ model: '' }), body({ model: null }), body({ temperature: 0.1 }), body({ max_tokens: 10 }), body({ max_completion_tokens: 10 }), body({ top_p: 0.9 }), body({ tool_choice: 'required' }), body({ tools: [{ type: 'function', function: { name: 'strict', strict: true } }] }), body({ messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'file:///never' } }] }] })]) {
+  for (const input of [body({ model: '' }), body({ model: null }), body({ temperature: 0.1 }), body({ max_tokens: 10 }), body({ max_completion_tokens: 10 }), body({ top_p: 0.9 }), body({ tools: [{ type: 'function', function: { name: 'strict', strict: true } }] }), body({ messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'file:///never' } }] }] })]) {
     assert.equal((await instance.complete(input, A)).status, 400);
   }
 });
@@ -319,6 +321,260 @@ test('tool_choice:none registers no tools and rejects remote MCP intents', async
   assert.equal((await result.json()).error.code, 'unregistered_tool');
   const run = p.fields(p.one(mock.appends[0].message, 1));
   assert.equal(p.one(run, 4).length, 0);
+});
+
+function assertRegistered(record, expected) {
+  const { run, action } = runAction(record);
+  const context = p.fields(p.one(action, 2));
+  const asHex = data => Buffer.from(data).toString('hex');
+  const registered = p.fields(p.one(run, 4)).map(f => asHex(f.value));
+  assert.deepEqual(registered, expected.map(tool => asHex(p.mcpDefinition(tool))));
+  assert.deepEqual(context.filter(f => f.id === 7).map(f => asHex(f.value)), registered);
+  assert.deepEqual(run.map(f => f.id), [1, 2, 3, 4, 5], 'No fabricated tool_choice or restricted run fields');
+  assert.ok(context.every(f => [2, 4, 7, 14].includes(f.id)), 'Only existing context fields');
+  const rules = context.filter(f => f.id === 2).map(f => p.fields(f.value));
+  assert.ok(rules.every(rule => p.one(rule, 4, 0) === 2n), 'All rules are ordinary USER rules');
+  return { action, rules };
+}
+async function choiceFailure(response, stream, code) {
+  if (stream) {
+    assert.equal(response.status, 200);
+    const events = await sse(response);
+    assert.equal(events.length, 2, 'Only error + DONE: no role, text, tool, finish or successful usage leak');
+    assert.equal(events[0].error.code, code);
+  } else {
+    assert.equal(response.status, 502);
+    const result = await response.json();
+    assert.equal(result.error.code, code);
+    assert.equal(result.choices, undefined);
+    assert.equal(result.usage, undefined);
+  }
+}
+function streamedMessage(events) {
+  const deltas = events.flatMap(e => e.choices?.map(c => c.delta) ?? []);
+  return { role: 'assistant', content: deltas.map(d => d.content ?? '').join('') || null,
+    tool_calls: deltas.flatMap(d => d.tool_calls ?? []).map(({ index, ...call }) => { assert.equal(index, 0); return call; }) };
+}
+
+test('invalid choice shapes, unknown names and required without tools fail before network', async t => {
+  const instance = provider(t, { fetchImpl: () => assert.fail('No network for invalid choice') });
+  const choices = [null, true, 0, [], {}, 'unknown', { type: 'function' }, { type: 'function', function: null },
+    { type: 'other', function: { name: toolName } }, { type: 'function', name: toolName },
+    forcedChoice(''), forcedChoice(123), forcedChoice('unknown-native-tool'), forcedChoice(toolName.toUpperCase()),
+    { ...forcedChoice(toolName), extra: true }, { type: 'function', function: { name: toolName, arguments: '{}' } }];
+  for (const tool_choice of choices) {
+    const response = await instance.complete(body({ tool_choice }), A);
+    assert.equal(response.status, 400, JSON.stringify(tool_choice));
+    assert.equal((await response.json()).error.code, 'invalid_request');
+  }
+  for (const tool_choice of ['required', forcedChoice(toolName)]) {
+    for (const emptyTools of [{ tools: [] }, {}]) {
+      const { tools: omitted, ...request } = body({ tool_choice });
+      assert.equal((await instance.complete({ ...request, ...emptyTools }, A)).status, 400);
+    }
+  }
+});
+
+for (const chosen of [titleTool, tools[0]]) test(`forced named choice ${chosen.function.name} preserves native intent and typed history`, async t => {
+  for (const stream of [false, true]) {
+    const name = chosen.function.name, values = name === 'session_title' ? { title: 'Native title 中文' } : args;
+    const mock = mockProtocol(c => c.send(textFrame('Before '), textFrame('中文.'), execFrame({ name, args: values })));
+    const instance = provider(t, mock);
+    const request = body({ stream, tools: [titleTool, ...tools], tool_choice: forcedChoice(name), messages: [
+      { role: 'system', content: 'Policy' }, ...historical(), { role: 'developer', content: 'Instruction' }, { role: 'user', content: 'Next' },
+    ] });
+    const original = structuredClone(request), response = await instance.complete(request, A);
+    assert.equal(response.status, 200);
+    const events = stream ? await sse(response) : undefined;
+    const completion = stream ? undefined : await response.json();
+    const message = stream ? streamedMessage(events) : completion.choices[0].message;
+    assert.deepEqual(message, { role: 'assistant', content: 'Before 中文.', tool_calls: [
+      { id: 'call_Original-:/123', type: 'function', function: { name, arguments: JSON.stringify(values) } },
+    ] });
+    assert.equal(stream ? events.at(-2).choices[0].finish_reason : completion.choices[0].finish_reason, 'tool_calls');
+    assert.deepEqual(request, original, 'No caller transcript, choice or definitions mutation');
+    const { action, rules } = assertRegistered(mock.appends[0], [chosen]);
+    assert.equal(hex(p.one(action, 7)), historyHex, 'Guidance never becomes fake native history');
+    assert.equal(p.text(p.one(p.fields(p.one(action, 1)), 1)), 'Next', 'Current user is untouched');
+    assert.equal(rules.length, 3);
+    assert.deepEqual(rules.slice(0, 2).map(rule => p.text(p.one(rule, 2))), ['Policy', 'Instruction']);
+    assert.ok(p.text(p.one(rules[2], 2)).includes(`exact native name ${JSON.stringify(name)}`));
+    for (const { options } of mock.requests) assert.ok(!Object.keys(options.headers).some(k => /allowed-tools|exclude-tools|team|harness/i.test(k)));
+    assert.equal(mock.appends.length, 1, 'Intent only: no transport execution, result or close');
+    assert.equal([...mock.connections.values()][0].cancelled, false, 'Original remote exec stays parked');
+  }
+});
+
+test('native initial session_title forced choice works with only its supplied tool', async t => {
+  const mock = mockProtocol(c => c.send(execFrame({ name: 'session_title', args: { title: 'Native title' } })));
+  const result = await (await provider(t, mock).complete(body({ tools: [titleTool], tool_choice: forcedChoice('session_title') }), A)).json();
+  assert.equal(result.choices[0].message.tool_calls[0].function.name, 'session_title');
+  assert.equal(result.choices[0].finish_reason, 'tool_calls');
+  assertRegistered(mock.appends[0], [titleTool]);
+  assert.equal(mock.appends.length, 1);
+});
+
+test('required registers every supplied tool and accepts any one unchanged', async t => {
+  for (const chosen of [titleTool, tools[0]]) {
+    for (const stream of [false, true]) {
+      const mock = mockProtocol(c => c.send(textFrame('Preparing.'), execFrame({ name: chosen.function.name })));
+      const response = await provider(t, mock).complete(body({ stream, tools: [titleTool, ...tools], tool_choice: 'required' }), A);
+      const message = stream ? streamedMessage(await sse(response)) : (await response.json()).choices[0].message;
+      assert.equal(message.tool_calls[0].function.name, chosen.function.name);
+      assert.equal(message.tool_calls[0].id, 'call_Original-:/123');
+      assert.equal(message.tool_calls[0].function.arguments, JSON.stringify(args));
+      assert.equal(message.content, 'Preparing.');
+      const { rules } = assertRegistered(mock.appends[0], [titleTool, ...tools]);
+      assert.ok(p.text(p.one(rules.at(-1), 2)).includes('request at least one of the supplied MCP tools'));
+      assert.equal(mock.appends.length, 1);
+    }
+  }
+});
+
+test('mandatory choice rejects wrong execs and builtins before releasing any buffered SSE output', async t => {
+  const builtin = p.envelope(p.bytes(2, p.concat(p.uint(1, 1), p.bytes(2, p.string(1, 'never execute')))));
+  for (const [tool_choice, frame, code] of [
+    [forcedChoice('session_title'), execFrame(), 'unregistered_tool'], // Supplied, but not the chosen tool.
+    [forcedChoice('session_title'), execFrame({ name: 'unknown' }), 'unregistered_tool'],
+    ['required', execFrame({ name: 'unknown' }), 'unregistered_tool'],
+    [forcedChoice('session_title'), builtin, 'unsupported_builtin'],
+    ['required', builtin, 'unsupported_builtin'],
+    ['required', execFrame({ provider: 'someone-else' }), 'invalid_protocol'],
+  ]) {
+    for (const stream of [false, true]) {
+      const mock = mockProtocol(c => c.send(textFrame('Must not leak.'), frame));
+      await choiceFailure(await provider(t, mock).complete(body({ stream, tools: [titleTool, ...tools], tool_choice }), A), stream, code);
+      assert.equal(mock.appends.length, 1, 'No wrong tool result or fallback');
+      assert.equal([...mock.connections.values()][0].cancelled, true);
+    }
+  }
+});
+
+test('mandatory choice rejects text-only or empty remote completion without successful output or usage', async t => {
+  for (const tool_choice of ['required', forcedChoice(toolName)]) {
+    for (const stream of [false, true]) {
+      for (const finish of [doneFrame(), trailerFrame(0), usageFrame()]) {
+        for (const text of ['', 'NOT A TOOL: must not leak.']) {
+          const mock = mockProtocol(c => c.send(textFrame(text), finish));
+          await choiceFailure(await provider(t, mock).complete(body({ stream, stream_options: { include_usage: true }, tool_choice }), A), stream, 'tool_choice_unfulfilled');
+          assert.equal(mock.appends.length, 1, 'No retry, synthetic intent or fabricated result');
+          assert.equal([...mock.connections.values()][0].cancelled, true);
+        }
+      }
+    }
+  }
+});
+
+test('progress notifications and historical calls never satisfy a required current intent', async t => {
+  const progress = p.envelope(p.bytes(1, p.concat(p.bytes(7, p.empty), p.bytes(13, p.empty))));
+  const mock = mockProtocol(c => c.send(textFrame('Do not leak.'), progress, doneFrame()));
+  await choiceFailure(await provider(t, mock).complete(body({ stream: true, tool_choice: 'required', messages: [
+    ...historical(), { role: 'user', content: 'Next' },
+  ] }), A), true, 'tool_choice_unfulfilled');
+  assert.equal(mock.appends.length, 1);
+});
+
+test('mandatory choices reject reused historical IDs before releasing buffered text', async t => {
+  for (const tool_choice of ['required', forcedChoice(toolName)]) {
+    const mock = mockProtocol(c => c.send(textFrame('Do not leak.'), execFrame({ callId: 'c:1' })));
+    await choiceFailure(await provider(t, mock).complete(body({ stream: true, tool_choice, messages: [
+      ...historical(), { role: 'user', content: 'Next' },
+    ] }), A), true, 'duplicate_tool_call');
+    assert.equal(mock.appends.length, 1);
+  }
+});
+
+test('mandatory continuations keep exact correlation and choice; a previous intent cannot authorize final text', async t => {
+  for (const tool_choice of ['required', forcedChoice(toolName)]) {
+    let results = 0;
+    const secondName = tool_choice === 'required' ? 'session_title' : toolName;
+    const mock = mockProtocol(c => c.send(textFrame('First.'), execFrame({ callId: 'native:1' })), (c, r) => {
+      if (r.message[0].id !== 5) return;
+      if (++results === 1) c.send(textFrame('Second.'), execFrame({ id: 8, execId: 'exact:second', callId: 'native:2', name: secondName }));
+      else c.send(textFrame('Final text must not leak.'), usageFrame());
+    });
+    const instance = provider(t, mock), request = body({ tools: [titleTool, ...tools], tool_choice });
+    const first = (await (await instance.complete(request, A)).json()).choices[0].message;
+    const next = continuation(request, first, [{ type: 'text', text: 'Exact native result', annotations: { priority: 1 } }],
+      { name: toolName, is_error: true, native_metadata: { exit_code: 3 } });
+    for (const changedChoice of ['auto', 'none', tool_choice === 'required' ? forcedChoice(toolName) : 'required', forcedChoice('session_title')]) {
+      assert.equal((await instance.complete({ ...next, tool_choice: changedChoice }, A)).status, 409);
+    }
+    const changedHistory = structuredClone(next); changedHistory.messages[0].content = 'changed';
+    assert.equal((await instance.complete(changedHistory, A)).status, 409);
+    assert.equal((await instance.complete(next, B)).status, 409);
+    assert.equal(mock.appends.length, 1, 'Invalid continuation cannot submit a result or replace a session');
+    const streamingNext = { ...next, stream: true, stream_options: { include_usage: true } };
+    const events = await sse(await instance.complete(streamingNext, A));
+    const second = streamedMessage(events);
+    assert.equal(second.content, 'Second.');
+    assert.deepEqual(second.tool_calls, [{ id: 'native:2', type: 'function', function: { name: secondName, arguments: JSON.stringify(args) } }]);
+    assert.deepEqual(decodeResult(mock.appends[1]), { id: 7, execId: 'original-exec-id', content: JSON.stringify(next.messages.at(-1)), isError: true });
+    const final = continuation(streamingNext, second, 'Second result');
+    await choiceFailure(await instance.complete(final, A), true, 'tool_choice_unfulfilled');
+    assert.deepEqual(decodeResult(mock.appends[3]), { id: 8, execId: 'exact:second', content: 'Second result', isError: false });
+    assert.deepEqual(mock.appends.map(a => a.seq), [0, 1, 2, 3, 4]);
+    assert.equal(mock.connections.size, 1, 'No synthetic continuation run or instruction/result rewriting');
+    assert.equal([...mock.connections.values()][0].cancelled, true);
+    assert.equal((await instance.complete(final, A)).status, 409, 'Failed continuation cannot be replayed');
+  }
+});
+
+test('forced subset enforcement still rejects a different supplied tool after native continuation', async t => {
+  const mock = mockProtocol(c => c.send(execFrame({ name: 'session_title' })), (c, r) => {
+    if (r.message[0].id === 5) c.send(textFrame('Must not leak.'), execFrame({ callId: 'wrong:second' }));
+  });
+  const instance = provider(t, mock), request = body({ tools: [titleTool, ...tools], tool_choice: forcedChoice('session_title') });
+  const message = (await (await instance.complete(request, A)).json()).choices[0].message;
+  await choiceFailure(await instance.complete({ ...continuation(request, message), stream: true }, A), true, 'unregistered_tool');
+  assert.equal(mock.connections.size, 1);
+  assert.equal(mock.appends.length, 3, 'Only the permitted original native result and close were submitted');
+  assert.equal(decodeResult(mock.appends[1]).execId, 'original-exec-id');
+});
+
+test('mandatory buffered streams cancel without invalidating a previous independent auto session', async t => {
+  for (const mode of ['signal', 'reader']) {
+    const mock = mockProtocol((c, r) => {
+      const run = p.fields(p.one(r.message, 1));
+      c.send(p.text(p.one(p.fields(p.one(run, 3)), 1)) === 'parked-auto' ? execFrame() : textFrame('Buffered, not released.'));
+    }, (c, r) => { if (r.message[0].id === 5) c.send(textFrame('Previous session retained.'), doneFrame()); });
+    const instance = provider(t, mock), previous = body({ model: 'parked-auto', tool_choice: 'auto' });
+    const message = (await (await instance.complete(previous, A)).json()).choices[0].message;
+    const abort = new AbortController();
+    const response = await instance.complete(body({ stream: true, tool_choice: mode === 'signal' ? 'required' : forcedChoice(toolName) }), A, { signal: abort.signal });
+    if (mode === 'signal') {
+      const pending = choiceFailure(response, true, 'cancelled');
+      await sleep(0);
+      abort.abort('OFFLINE_SECRET_REASON');
+      await pending;
+    } else {
+      const reader = response.body.getReader(), pending = reader.read();
+      await sleep(0);
+      await reader.cancel();
+      assert.equal((await pending).done, true);
+    }
+    await sleep(0);
+    const [parked, cancelled] = [...mock.connections.values()];
+    assert.equal(cancelled.cancelled, true);
+    assert.equal(parked.cancelled, false);
+    const resumed = await (await instance.complete(continuation(previous, message), A)).json();
+    assert.equal(resumed.choices[0].message.content, 'Previous session retained.');
+    assert.equal(resumed.choices[0].finish_reason, 'stop');
+    assert.equal(mock.connections.size, 2);
+  }
+});
+
+test('auto, none and omitted choice keep ordinary text streaming and original registration/rules', async t => {
+  for (const choice of [{}, { tool_choice: 'auto' }, { tool_choice: 'none' }]) {
+    const mock = mockProtocol(c => c.send(textFrame('Still '), textFrame('streaming.'), doneFrame()));
+    const events = await sse(await provider(t, mock).complete(body({ stream: true, ...choice }), A));
+    assert.equal(events[0].choices[0].delta.role, 'assistant');
+    assert.equal(events[1].choices[0].delta.content, 'Still ');
+    assert.equal(events[2].choices[0].delta.content, 'streaming.');
+    assert.equal(events.at(-2).choices[0].finish_reason, 'stop');
+    const { rules } = assertRegistered(mock.appends[0], choice.tool_choice === 'none' ? [] : tools);
+    assert.equal(rules.length, 1, 'No mandatory guidance for auto or none');
+  }
 });
 
 test('PKCE browser URL only; poll wait validates 200 credentials and does not log', async t => {

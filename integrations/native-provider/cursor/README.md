@@ -46,13 +46,48 @@ cursor.close(); // Idempotent; aborts login/HTTP operations and all remote sessi
   implicit discovery, model/host retry, quota bypass or fallback in `complete()`.
 
 Supported request controls: `model`, `messages`, function `tools`, `stream`,
-`tool_choice: "auto" | "none"`, `parallel_tool_calls` (calls may be serialized),
+`tool_choice: "auto" | "none" | "required" | {type:"function",function:{name:"exact-native-name"}}`,
+`parallel_tool_calls` (calls may be serialized),
 `stream_options.include_usage: true | false`. Tool schemas use protobuf Value,
 including nested arrays, null, empty strings, booleans, schema extensions and
 property names such as `__proto__`. Names are not sanitized, renamed or guessed.
 Unknown completion controls, sampling/length limits (`temperature`, `top_p`,
-`max_tokens`, `max_completion_tokens`, etc.), forced tool selection, and
-`strict:true` return explicit unsupported errors, not ignored settings.
+`max_tokens`, `max_completion_tokens`, etc.) and `strict:true` return explicit
+unsupported errors, not ignored settings.
+
+### Local mandatory tool choice
+
+Named choices require exactly `{type:"function",function:{name}}`, with the
+exact name of a supplied function. Unknown names, malformed/extra choice fields,
+and `required` with no tools return HTTP 400 before network. Named choice
+registers **only that tool** in both existing MCP registration locations;
+`required` registers all supplied tools. An added ordinary `USER` rule requests
+a matching MCP intent for each response, including after native tool results.
+This uses the existing content/rules mapping, not a new backend API field,
+privileged prompt or restricted header. Caller messages/configuration and typed
+history are unchanged; the guidance is not inserted as fake conversation history.
+
+Every incoming exec must match the permitted subset. Wrong tools fail with
+`unregistered_tool`; builtin requests still fail without execution. Mandatory
+choices buffer text (within the existing 4 MiB limit) and withhold even the SSE
+role chunk until a permitted, nonduplicate intent is observed. If the remote
+completes without one, `tool_choice_unfulfilled` returns HTTP 502 for nonstream,
+or an SSE error followed by `[DONE]` for an already-open HTTP 200 stream. No
+buffered text, successful finish or usage is released on this failure. No tool
+intent/result is invented, no retry is attempted, and choice is never downgraded.
+Omitted/`auto` and `none` keep their existing registration and streaming behavior.
+
+This is **local fail-closed enforcement**, not evidence that Cursor natively
+supports `tool_choice` or will obey a USER rule. It requires a new permitted
+intent in **each completion request**, not merely once per remote session;
+historical or previously returned calls do not satisfy a continuation. The
+existing parked-stream configuration match is unchanged: switching choice
+(including forced/required to `auto`) returns 409 without submitting the result.
+A correctly correlated result resumes the same remote stream, without fresh
+instructions or a replacement run. If that stream then only emits final text,
+the continuation fails explicitly rather than relaxing the requirement. Remote
+cooperation, strict argument-schema compliance and privileged rule precedence
+are not guaranteed.
 
 ### Typed messages and inline images
 
@@ -220,6 +255,11 @@ PKCE start/poll/validation/cancel, refresh/catalog validation and no fallbacks.
 SelectedImage and turn-ended usage wire fixtures. Additional tests cover malformed
 history, image validation/size/no-fetch/isolation, live MCP image-result
 correlation, usage presence/zero/partial/overflow/error behavior and SSE ordering.
+Mandatory-choice tests cover the native `session_title` shape, arbitrary exact
+names/JSON, subset registration in both MCP locations, ordinary USER guidance,
+invalid choices before network, wrong/builtin/duplicate exec denial, buffered
+text-only/empty/usage/progress failure, unchanged typed history, exact multi-round
+continuations, cancellation, prior-session isolation and auto/none regression.
 
 See [PROVENANCE.md](./PROVENANCE.md) for MIT notices, source anchors, excluded
 unsafe reference-handler paths and the evidence behind the remaining gaps.
