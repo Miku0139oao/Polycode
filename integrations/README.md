@@ -1,8 +1,8 @@
 # Polycode：同一個原生 TUI，選擇模型來源
 
-**原生整合開發中；v0.2.0 尚待驗證與發佈。** 目標是保留 Grok Build **真正的 agent engine、工具迴圈、MCP、權限、sandbox、原生 sessions 與功能**，只切換 Grok／ChatGPT 訂閱／實驗性 Cursor 訂閱的模型來源。不是只保留畫面，也不是用 Codex／Cursor agent 代替 Grok。
+**Windows 原生候選版驗證中；已發佈的 v0.2.0 WSL 包有已知故障。** 目標是保留 Grok Build **真正的 agent engine、工具迴圈、MCP、權限、sandbox、原生 sessions 與功能**，只切換 Grok／ChatGPT 訂閱／實驗性 Cursor 訂閱的模型來源。不是只保留畫面，也不是用 Codex／Cursor agent 代替 Grok。
 
-舊版 `d549db3` 外部 ACP 原型已被否決為最終架構。它的 Rust／adapter 測試與真實登入紀錄只證明舊路徑；詳見 [VERIFICATION.md](VERIFICATION.md)。目前原生 service 與 Cursor 合計 **55 項離線測試**是開發檢查點，尚未證明真正原生 TUI、瀏覽器 OAuth 或 live endpoints 可用。
+舊版 `d549db3` 外部 ACP 原型已被否決為最終架構。它的 Rust／adapter 測試與真實登入紀錄只證明舊路徑；詳見 [VERIFICATION.md](VERIFICATION.md)。新的 Windows 建置與验收方式見 [WINDOWS_VALIDATION.md](WINDOWS_VALIDATION.md)；離線測試不能代替瀏覽器 OAuth 或真實生成驗收。
 
 ## 安裝與啟動
 

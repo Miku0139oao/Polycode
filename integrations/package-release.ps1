@@ -50,7 +50,7 @@ try {
     $nativeBytes = (Get-Item -LiteralPath $Binary).Length
     $report = $null; $reportHash = $null
     if ($BuildReport) {
-        $report = Get-Content -LiteralPath $BuildReport -Raw | ConvertFrom-Json
+        $report = Get-Content -LiteralPath $BuildReport -Raw -Encoding UTF8 | ConvertFrom-Json
         $reportHash = Get-Sha256 $BuildReport
         if ($report.exit -ne 0 -or $report.timeout -ne $false -or $report.sha256 -ne $nativeHash -or $report.bytes -ne $nativeBytes -or $report.binary -ne $Binary -or
             $report.revision -notmatch '^[a-f0-9]{40}$' -or $null -eq $report.profile.opt_level -or $null -eq $report.profile.debug_assertions -or $report.profile.test -ne $false) { throw 'Build report does not attest these exact successful native executable bytes/profile.' }
@@ -79,7 +79,7 @@ try {
     foreach ($property in $lockPackages) {
         if (-not $property.Name.StartsWith('node_modules/') -or $property.Name -match '(^|/)\.\.(/|$)') { throw 'Unsafe dependency lock path.' }
         $module = Join-Path $provider $property.Name
-        $package = Get-Content -LiteralPath (Join-Path $module 'package.json') -Raw | ConvertFrom-Json
+        $package = Get-Content -LiteralPath (Join-Path $module 'package.json') -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($package.version -ne $property.Value.version) { throw 'Installed dependencies differ from lockfile. Run npm ci --ignore-scripts.' }
         $licenses = @(Get-ChildItem -LiteralPath $module -File | Where-Object { $_.Name -match '^(licen[cs]e|copying|notice)(\.|$)' })
         if (-not $licenses.Count) { throw "Missing dependency license: $($package.name)" }

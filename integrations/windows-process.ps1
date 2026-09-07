@@ -18,7 +18,7 @@ function Invoke-Native([string]$Executable, [string[]]$Arguments, [int]$TimeoutS
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             $process.Kill(); $process.WaitForExit(); throw 'Native executable check timed out.'
         }
-        if ($process.ExitCode -ne 0) { throw ('Native executable check failed: exit ' + $process.ExitCode) }
+        if ($process.ExitCode -ne 0) { throw ('Native executable check failed (' + [IO.Path]::GetFileName($Executable) + '): exit ' + $process.ExitCode) }
         return $stdout.GetAwaiter().GetResult().TrimEnd([char]13, [char]10)
     } finally { $process.Dispose() }
 }

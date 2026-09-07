@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { randomBytes, createHash } from 'node:crypto';
 import { CredentialStore, NativeProviderService } from '../native-provider/service.mjs';
 import { WindowsTerminal, plain } from './windows-terminal.mjs';
+assert.equal(plain('\x1b]8;;file:///fixture\x1b\\link\x1b]8;;\x1b\\ Yes \x1b]0;title\x07 visible'),'link Yes  visible');
 const binary = resolve(process.argv[2]);
 const root = mkdtempSync(join(tmpdir(),'polycode-native-tools-'));
 const workspace = join(root,'workspace'), home=join(root,'home');
@@ -14,7 +15,7 @@ mkdirSync(workspace); mkdirSync(home);
 const nonce=randomBytes(20).toString('hex'), file=join(workspace,'fixture.txt');
 writeFileSync(file,nonce);
 const store=new CredentialStore(join(home,'auth'));
-const requests=[], failures=[];
+const requests=[], failures=[], permissions=[];
 function content(value) { return typeof value==='string'?value:Array.isArray(value)?value.map(v=>v.text||'').join('\n'):''; }
 function completion(body,delta,finish='stop') {
   if (!body.stream) return Response.json({id:'fixture',object:'chat.completion',created:1,model:body.model,choices:[{index:0,message:{role:'assistant',...delta},finish_reason:finish}]});
@@ -33,10 +34,14 @@ for(const provider of ['codex','cursor']) {
     async complete(body) {
       try {
         const last=[...(body.messages||[])].reverse().find(m=>m.role==='user'), prompt=content(last?.content);
+        const auxiliary=prompt.startsWith('<system-reminder>') || prompt.startsWith('CWD:') || !(body.tools||[]).length;
+        const taskPrompt=!auxiliary && (prompt.match(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/)?.[1]
+          || (['Read the isolated fixture.','Write the isolated output.','Run the isolated Windows command.'].includes(prompt.trim())?prompt.trim():null));
         const tools=(body.tools||[]).map(t=>t.function);
-        requests.push({provider,model:body.model,prompt,tools:tools.map(t=>t.name)});
+        requests.push({provider,model:body.model,prompt:taskPrompt||'[auxiliary]',...(!taskPrompt?{promptPrefix:prompt.slice(0,240)}:{}),tools:tools.map(t=>t.name)});
         if(tools.length===1 && tools[0].name==='session_title') return call(body,tools[0],{session_title:'Windows fixture session'},'fixture-title');
-        if(prompt.includes('Read the isolated fixture.')) {
+        if(!taskPrompt)return completion(body,{content:'Windows fixture ready'});
+        if(taskPrompt==='Read the isolated fixture.') {
           const id='read-'+provider;
           const result=body.messages.find(m=>m.role==='tool' && m.tool_call_id===id);
           if(result) {
@@ -57,7 +62,7 @@ for(const provider of ['codex','cursor']) {
           }
           return call(body,definition,args,id);
         }
-        if(prompt.includes('Write the isolated output.')) {
+        if(taskPrompt==='Write the isolated output.') {
           const id='write-'+provider;
           if(body.messages.some(m=>m.role==='tool' && m.tool_call_id===id)) return completion(body,{content:'WINDOWS_WRITE_'+provider.toUpperCase()+'_PASS'});
           const definition=tools.find(t=>['write','write_file'].includes(t.name.toLowerCase()));
@@ -71,7 +76,7 @@ for(const provider of ['codex','cursor']) {
           for(const required of definition.parameters.required||[])if(!(required in args))throw new Error('Unknown required native Write argument: '+required);
           return call(body,definition,args,id);
         }
-        if(prompt.includes('Run the isolated Windows command.')) {
+        if(taskPrompt==='Run the isolated Windows command.') {
           const id='shell-'+provider;
           const result=body.messages.find(m=>m.role==='tool' && m.tool_call_id===id);
           if(result) {
@@ -95,7 +100,17 @@ for(const provider of ['codex','cursor']) {
   };
 }
 const service=new NativeProviderService(providers,store);
+const catalogs=[];
+const originalCatalog=service.catalog.bind(service);
+service.catalog=async (...args)=>{const result=await originalCatalog(...args);catalogs.push(result);return result;};
 const bridge=await service.start();
+const controlRequests=[];
+service.server.on('request',(req,res)=>{
+  const request={method:req.method,path:new URL(req.url,bridge.url).pathname,
+    authenticated:req.headers.authorization==='Bearer '+bridge.token,
+    expectedHost:req.headers.host===new URL(bridge.url).host,hasOrigin:!!req.headers.origin};
+  controlRequests.push(request);res.on('finish',()=>{request.status=res.statusCode;});
+});
 const env={};
 for(const key of ['SystemRoot','SYSTEMROOT','WINDIR','ComSpec','COMSPEC','PATHEXT','PATH','TEMP','TMP'])if(process.env[key])env[key]=process.env[key];
 Object.assign(env,{HOME:home,USERPROFILE:home,LOCALAPPDATA:join(home,'AppData/Local'),APPDATA:join(home,'AppData/Roaming'),
@@ -113,8 +128,8 @@ async function toolTurn(prompt,marker) {
     if(t.exited)throw new Error('Native terminal exited during tool execution');
     if(Date.now()>deadline)throw new Error('Native tool/permission observation timed out');
     const recent=plain(t.output.slice(offset));
-    const match=recent.match(/([1-9])\s+\([○●]\)\s+Yes(?=\s{2,}|\n|$)/);
-    if(match && !approved){t.write(match[1]);approved=true;await pause(800);}
+    const match=recent.match(/([1-9])\s+\([○●•]\)\s+Yes(?:, proceed)?(?=\s{2,}|\n|$|│)/);
+    if(match && recent.includes('No, reject') && !approved){permissions.push({prompt,choice:match[1],scope:'once'});t.write(match[1]);approved=true;await pause(800);}
     else await pause(200);
   }
 }
@@ -143,7 +158,7 @@ finally {
   await t.close();await service.close();
   report.forcedExit=!!t.forcedExit;
   if(t.forcedExit){report.passed=false;process.exitCode=1;}
-  report.requests=requests;report.fixtureErrors=failures;
+  report.requests=requests;report.permissions=permissions;report.controlRequests=controlRequests;report.catalogs=catalogs;report.fixtureErrors=failures;
   writeFileSync(join(root,'terminal.txt'),plain(t.output).replaceAll(bridge.token,'[REDACTED]'));
   writeFileSync('windows-tools-report.json',JSON.stringify(report,null,2)+'\n');
   console.log(JSON.stringify({passed:report.passed,failure:report.failure,root}));

@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 const pty = createRequire(import.meta.url)(process.env.NODE_PTY_MODULE || 'node-pty');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-export const plain = text => text.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
+export const plain = text => text.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, '')
   .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\x1b[()][A-Z0-9]/g, '').replace(/\r/g, '');
 export class WindowsTerminal {
   constructor(executable, args, cwd, env) {
@@ -24,8 +24,8 @@ export class WindowsTerminal {
     }
   }
   async close() {
-    this.write('\x1b'); await delay(150);
-    this.write('\x03'); await delay(250); this.write('\x03');
+    this.write('\x1b'); await delay(500);
+    this.write('\x11'); await delay(250); this.write('\x11');
     const deadline = Date.now() + 10000;
     while (!this.exited && Date.now() < deadline) await delay(100);
     if (!this.exited) {

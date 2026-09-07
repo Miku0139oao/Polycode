@@ -3,7 +3,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, cpSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, cpSync, existsSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -56,7 +56,7 @@ for (const runtime of ['powershell.exe', 'pwsh.exe']) test(runtime + ': install,
   const config = JSON.parse(readFileSync(join(release, 'install-config.json'), 'utf8').replace(/^\uFEFF/, ''));
   assert.equal(config.platform, 'windows');
   assert.equal(config.schemaVersion, 1);
-  assert.equal(config.binary, join(release, 'polycode.exe'));
+  assert.equal(realpathSync.native(config.binary), realpathSync.native(join(release, 'polycode.exe')));
   const native = ['--help', '', 'space 中文', 'quote"inside', 'trail\\', '& $ ; literal', '--'];
   const r = run(runtime, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(release, 'polycode.ps1'),
     '-Project', dest, '-Backend', 'CuRsOr', '--', ...native]);

@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 $options = @{ Backend = 'auto'; Project = (Get-Location).Path; Binary = ''; Runtime = '' }
 $configPath = Join-Path (Split-Path $PSScriptRoot) 'install-config.json'
 if (Test-Path -LiteralPath $configPath) {
-    $installed = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+    $installed = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($installed.schemaVersion -ne 1 -or $installed.platform -cne 'windows') { throw 'Legacy WSL or unsupported install config. Install the Windows native candidate.' }
     foreach ($key in @('Binary', 'Runtime')) {
         if ($installed.$key -isnot [string] -or -not $installed.$key) { throw "Missing installed setting: $key" }

@@ -157,7 +157,7 @@ function Convert-JsonWithoutDateCoercion([string]$Text) {
     } finally { $reader.Close(); $inputText.Dispose() }
 }
 function Read-JsonObject([string]$Path) {
-    $text = Get-Content -LiteralPath $Path -Raw
+    $text = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
     # PS5.1 lacks -NoEnumerate: reject a root array BEFORE ConvertFrom-Json can
     # unwrap a singleton (or discard an empty array). Nested properties are kept
     # as-is and checked directly, never returned through an enumerating pipeline.
@@ -292,7 +292,7 @@ function Invoke-Native([string]$Executable, [string[]]$Arguments, [int]$TimeoutS
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             $process.Kill(); $process.WaitForExit(); throw 'Native executable check timed out.'
         }
-        if ($process.ExitCode -ne 0) { throw ('Native executable check failed: exit ' + $process.ExitCode) }
+        if ($process.ExitCode -ne 0) { throw ('Native executable check failed (' + [IO.Path]::GetFileName($Executable) + '): exit ' + $process.ExitCode) }
         return $stdout.GetAwaiter().GetResult().TrimEnd([char]13, [char]10)
     } finally { $process.Dispose() }
 }
