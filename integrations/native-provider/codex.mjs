@@ -26,6 +26,17 @@ function contentParts(content, output = false) {
   });
 }
 export function toResponses(body) {
+  // The subscription endpoint does not implement the full public API option set.
+  // Never silently discard explicit controls (notably output/spend limits).
+  const unsupported = message => Object.assign(new Error(message), { status: 400 });
+  for (const key of ['temperature', 'top_p', 'max_tokens', 'max_completion_tokens', 'max_output_tokens', 'stop', 'seed', 'frequency_penalty', 'presence_penalty', 'logit_bias', 'logprobs', 'top_logprobs', 'n']) {
+    if (body[key] !== undefined && body[key] !== null) throw unsupported(`ChatGPT subscription transport does not support ${key}; remove this explicit option.`);
+  }
+  const allowed = new Set(['model', 'messages', 'tools', 'stream', 'stream_options', 'tool_choice', 'parallel_tool_calls', 'response_format', 'reasoning_effort', 'reasoning']);
+  if (Object.keys(body).some(key => !allowed.has(key) && body[key] != null)) throw unsupported('Unsupported ChatGPT subscription request option.');
+  if (body.reasoning_effort != null && body.reasoning?.effort != null && body.reasoning_effort !== body.reasoning.effort) throw unsupported('Conflicting ChatGPT reasoning effort options.');
+  if (body.reasoning && Object.keys(body.reasoning).some(key => !['effort', 'summary'].includes(key))) throw unsupported('Unsupported ChatGPT reasoning option.');
+  if (body.stream_options && Object.keys(body.stream_options).some(key => key !== 'include_usage')) throw unsupported('Unsupported ChatGPT stream option.');
   if (!Array.isArray(body.messages) || typeof body.model !== 'string' || !body.model) throw new Error('Model and messages are required');
   const names = new Map(), originals = new Map();
   for (const tool of body.tools ?? []) {
@@ -68,7 +79,7 @@ export function toResponses(body) {
     else throw new Error('Unsupported structured response format');
   }
   const effort = body.reasoning_effort ?? body.reasoning?.effort;
-  if (effort) request.reasoning = { effort, summary: 'auto' };
+  if (effort || body.reasoning?.summary) request.reasoning = { ...(effort ? { effort } : {}), summary: body.reasoning?.summary ?? 'auto' };
   return { request, originals };
 }
 async function* events(stream, signal) {
