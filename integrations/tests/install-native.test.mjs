@@ -28,10 +28,10 @@ function powershell(script, ...args) { return run(ps, ['-NoProfile', '-Execution
 function command(code) { return run(ps, ['-NoProfile', '-Command', code]); }
 function psString(value) { return "'" + value.replaceAll("'", "''") + "'"; }
 function installer(root, artifactDir = assets, ...args) {
-  return powershell(join(source, 'install.ps1'), '-Distro', distro, '-InstallRoot', root, '-LinuxRoot', linux + '/installs', '-ArtifactDirectory', artifactDir, '-NoPath', ...args);
+  return powershell(join(source, 'install.ps1'), '-Distro', distro, '-InstallRoot', root, '-LinuxRoot', linux + '/installs', '-ArtifactDirectory', artifactDir, '-AllowCandidate', '-NoPath', ...args);
 }
 function checksum(dir) {
-  writeFileSync(join(dir, 'SHA256SUMS'), ['polycode-wsl-x64.gz', 'polycode-bun-wsl-x64.gz', 'polycode-runtime.zip'].map(name => sha(readFileSync(join(dir, name))) + '  ' + name).join('\n') + '\n');
+  writeFileSync(join(dir, 'SHA256SUMS'), ['polycode-wsl-x64.gz', 'polycode-bun-wsl-x64.gz', 'polycode-runtime.zip', 'install.ps1', 'manifest.json'].map(name => sha(readFileSync(join(dir, name))) + '  ' + name).join('\n') + '\n');
 }
 function cloneAssets(name) { const dir = join(temp, name); cpSync(assets, dir, { recursive: true }); return dir; }
 function snapshot(path) {
@@ -65,8 +65,8 @@ after(() => {
   }
 });
 
-test('package contains exactly four assets, checksums, bundled dependencies and licenses', () => {
-  assert.deepEqual(readdirSync(assets).sort(), ['SHA256SUMS', 'polycode-bun-wsl-x64.gz', 'polycode-runtime.zip', 'polycode-wsl-x64.gz']);
+test('fixture package contains six assets, checksums, bundled dependencies and licenses', () => {
+  assert.deepEqual(readdirSync(assets).sort(), ['SHA256SUMS', 'install.ps1', 'manifest.json', 'polycode-bun-wsl-x64.gz', 'polycode-runtime.zip', 'polycode-wsl-x64.gz']);
   for (const line of readFileSync(join(assets, 'SHA256SUMS'), 'ascii').trim().split(/\r?\n/)) {
     const [hash, file] = line.split(/\s+/); assert.equal(sha(readFileSync(join(assets, file))), hash);
   }
@@ -163,7 +163,7 @@ test('unsupported binary and corrupt gzip roll back Linux staging', () => {
     const before = linuxReleases();
     const result = installer(root, artifacts);
     assert.notEqual(result.status, 0);
-    if (scenario === 'old fixture') assert.match(result.stderr, /Not a native Polycode binary/);
+    if (scenario === 'old fixture') assert.match(result.stderr, /Decompressed executable integrity mismatch/);
     assertNoRelease(root); assert.deepEqual(linuxReleases(), before);
   }
 });
@@ -201,4 +201,31 @@ test('wrapper forwards ordinary CLI arguments exactly through structured WSL exe
   assert.deepEqual(JSON.parse(ok(unknown)).slice(-2), ['--', '--version']);
   const obsolete = powershell(join(root, 'polycode.ps1'), '-CodexExecutable', 'must-not-run.exe');
   assert.notEqual(obsolete.status, 0); assert.match(obsolete.stderr, /obsolete/);
+});
+
+test('candidate installation requires explicit local opt-in', () => {
+  const root = join(temp, 'no candidate opt-in');
+  const result = powershell(join(source, 'install.ps1'), '-Distro', distro, '-InstallRoot', root, '-LinuxRoot', linux + '/installs', '-ArtifactDirectory', assets, '-NoPath');
+  assert.notEqual(result.status, 0); assert.match(result.stderr, /explicit -AllowCandidate/); assertNoRelease(root);
+});
+
+test('manifest identity and runtime file integrity cannot be bypassed by recomputing transport checksums', () => {
+  for (const scenario of ['wrong native identity', 'unsafe inventory path', 'changed file hash']) {
+    const artifacts = cloneAssets(scenario), root = join(temp, scenario + ' install');
+    const manifestPath = join(artifacts, 'manifest.json'), manifest = JSON.parse(readFileSync(manifestPath, 'utf8').replace(/^\uFEFF/, ''));
+    if (scenario === 'wrong native identity') manifest.native.sha256 = 'f'.repeat(64);
+    if (scenario === 'unsafe inventory path') manifest.files[0].path = '../escaped';
+    if (scenario === 'changed file hash') manifest.files[0].sha256 = 'f'.repeat(64);
+    writeFileSync(manifestPath, JSON.stringify(manifest)); checksum(artifacts);
+    const before = linuxReleases(), result = installer(root, artifacts);
+    assert.notEqual(result.status, 0); assert.match(result.stderr, /identity mismatch|Unsafe or duplicate manifest|integrity mismatch/);
+    assertNoRelease(root); assert.deepEqual(linuxReleases(), before);
+  }
+});
+
+test('build provenance hash mismatch is rejected before producing candidate output', () => {
+  const output = join(temp, 'stale build report output'), report = join(temp, 'stale-build-report.json');
+  writeFileSync(report, JSON.stringify({ exit: 0, timeout: false, binary: linux + '/fixture', sha256: 'f'.repeat(64), bytes: 1, revision: 'a'.repeat(40), profile: { opt_level: '0', debug_assertions: true, test: false } }));
+  const result = powershell(join(source, 'integrations/package-release.ps1'), '-Distro', distro, '-Binary', linux + '/fixture', '-BuildReport', report, '-Output', output);
+  assert.notEqual(result.status, 0); assert.match(result.stderr, /Build report does not attest/); assert.equal(existsSync(output), false);
 });

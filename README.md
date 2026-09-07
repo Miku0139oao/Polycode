@@ -16,7 +16,11 @@ selection in the same TUI**, while retaining Grok's native agent engine, tools,
 MCP, permissions, sessions, and features. It is not an official xAI, OpenAI,
 or Cursor release.
 
-**Native integration is in progress; v0.2.0 is pending verification and release.**
+**Unpublished development candidate only; v0.2.0 is NOT released.**
+Latest user report: **ChatGPT and native Grok work; Cursor OAuth still fails**.
+This is not candidate-hash-bound formal acceptance. Provider-aware `/usage` and
+TUI branding fixes are pending separately; this preparation candidate must be
+rebuilt/retested with a new hash after those native changes.
 The earlier external-ACP prototype (`d549db3`) replaced the agent and does **not**
 meet this architecture. Its passing tests and live logins are historical evidence,
 not proof of native completion.
@@ -53,22 +57,43 @@ integration or release status.
 
 ## Install Polycode (Windows + WSL)
 
-**Planned v0.2.0 installer — not yet verified as a published, working release.**
-Wait for [verification](integrations/VERIFICATION.md) and the
-[release](https://github.com/Miku0139oao/Polycode/releases) to be finalized before
-using this command. It downloads and executes code from this project's repository;
-review the script first if needed.
+**Candidate/unpublished — do not use the public command yet.** Cursor OAuth failure,
+real-provider Task/resume, permissions/billing, browser and integrated installed
+acceptance remain open. The available executable is dev opt0 with debug assertions,
+not release optimized. All necessary gates and parent review must pass before any
+publication; see the [fail-closed procedure](integrations/RELEASE_READINESS.md).
+
+For maintainers with the locally prepared candidate assets, this one command uses
+fresh Windows/WSL roots and changes neither PATH nor existing installations:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/main/install.ps1))) -Version v0.2.0
+$id=[guid]::NewGuid().ToString('N'); & D:/ai-harness/native-release-candidate-18d/install.ps1 -ArtifactDirectory D:/ai-harness/native-release-candidate-18d -AllowCandidate -InstallRoot "D:/ai-harness/polycode-candidate-install-$id" -LinuxRoot "/tmp/polycode-candidate-install-$id" -NoPath
 ```
 
+Use the printed isolated launcher path, not an existing `polycode` from PATH.
+This is local candidate installation, **not OAuth/live acceptance**. Add
+`-StageOnly` to stage without activating even the isolated launcher.
+
+**Deferred public one-command flow (NOT validated; assets are not published):**
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/Miku0139oao/Polycode/releases/download/v0.2.0/install.ps1))) -Version v0.2.0
+```
+
+That command downloads and executes a version-specific installer; review it first.
+Its final public-URL gate is **DEFERRED_UNTIL_PUBLICATION**, not PASS. Do not remove
+this warning until the parent has authorized a release and verified the actual
+public command against the published assets in another fresh install root.
+
 Target: **Windows with an existing WSL Arch Linux x86_64 distribution**, glibc
-2.43 or newer, zlib, libgcc, and Windows interop enabled; default distro name
+2.43 or newer, zlib, libgcc, libstdc++, ICU 78 and Windows interop enabled; default distro name
 `archlinux` (installer override: `-Distro NAME`). This is not an Ubuntu, macOS,
 or native Windows binary support claim. The installer does not install WSL.
-The planned package includes the native binary, Bun runtime, and provider service;
+The local package includes the native binary, Bun runtime, and provider service;
 no Rust build, Codex CLI, Cursor CLI, or prior CLI login should be needed.
+The copied Arch Bun reports `1.3.14` / revision `1.3.14-canary.1+0d9b296af`;
+its system-library dependencies are recorded in `manifest.json`, not bundled as
+portable Linux libraries. See the [actual candidate report](integrations/PACKAGE_CANDIDATE_REPORT.md).
 
 Intended workflow after the native release passes verification:
 
@@ -83,11 +108,16 @@ Browser OAuth must start there, return to the same TUI, and allow model/provider
 switching without restarting. `-Backend` does not select an external agent.
 These are release requirements, **not yet demonstrated end to end**.
 
-The draft installer uses per-user Windows files and WSL binaries, checks release
-SHA-256 sums, and adds `polycode` to PATH. An already-open terminal may need its
-PATH refreshed after installation; authentication and provider switching must
-not require a TUI restart. Planned assets are `polycode-wsl-x64.gz`,
-`polycode-bun-wsl-x64.gz`, `polycode-runtime.zip`, and `SHA256SUMS`.
+The installer uses per-user Windows files and WSL binaries and verifies SHA-256,
+archive paths, inventory, uncompressed ELF hashes and native flags. Normal future
+public installation adds `polycode` to PATH; `-NoPath` does not. An already-open
+terminal may need its PATH refreshed after installation; authentication/provider
+switching must not require a TUI restart. Candidate assets are
+`polycode-wsl-x64.gz`, `polycode-bun-wsl-x64.gz`, `polycode-runtime.zip`,
+`install.ps1`, `manifest.json`, and `SHA256SUMS`. The bundled service is a model
+transport for the native engine, not an external replacement agent. Checksums
+protect against corruption, not a compromised publisher. This WSL package does
+not establish native Windows sandbox parity.
 
 Subscription quotas and provider billing rules still apply; there is no quota
 bypass or automatic metered-API fallback. Cursor uses an undocumented protocol

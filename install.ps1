@@ -1,7 +1,9 @@
 <# Per-user native Polycode installer: Windows PowerShell 5.1+ and existing WSL
 x86_64 with glibc >= 2.43 (currently Arch Linux), zlib, libgcc and Windows interop.
 No provider login, browser, external agent CLI, Rust compiler or administrator needed.
--ArtifactDirectory installs previously downloaded release assets (still hash checked).
+-ArtifactDirectory installs local UNPUBLISHED CANDIDATE assets (still hash checked).
+Requires -AllowCandidate: local preflight never means release/live acceptance.
+Without -ArtifactDirectory, only a published-release manifest is accepted.
 -InstallRoot/-LinuxRoot allow isolated installs; -NoPath never changes either PATH.
 -StageOnly verifies/stages a release without changing the active launcher or PATH.
 Checksums detect corruption, not a compromised release publisher.
@@ -12,13 +14,14 @@ param(
     [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'Polycode'),
     [string]$LinuxRoot,
     [string]$ArtifactDirectory,
+    [switch]$AllowCandidate,
     [switch]$NoPath,
     [switch]$StageOnly
 )
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$assets = @('polycode-wsl-x64.gz', 'polycode-bun-wsl-x64.gz', 'polycode-runtime.zip')
+$assets = @('polycode-wsl-x64.gz', 'polycode-bun-wsl-x64.gz', 'polycode-runtime.zip', 'manifest.json')
 $id = $Version + '-' + [Guid]::NewGuid().ToString('N')
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('polycode-install-' + $id)
 $root = [IO.Path]::GetFullPath($InstallRoot)
@@ -124,6 +127,22 @@ try {
     Expand-SafeZip (Join-Path $temp 'polycode-runtime.zip') $runtimeStage
     $manifest = Get-Content -LiteralPath (Join-Path $runtimeStage 'release-manifest.json') -Raw | ConvertFrom-Json
     if ($manifest.version -ne $Version -or $manifest.architecture -ne 'x86_64' -or $manifest.minimumGlibc -ne '2.43' -or $manifest.protocol -ne 'native-model-bridge') { throw 'Runtime release manifest does not match the requested native release.' }
+    if ($manifest.status -eq 'unpublished-candidate') {
+        if (-not $ArtifactDirectory -or -not $AllowCandidate) { throw 'Unpublished candidate requires local -ArtifactDirectory and explicit -AllowCandidate. No release/live acceptance is implied.' }
+        Write-Warning 'UNPUBLISHED CANDIDATE: OAuth/live gates are not accepted; executable may be development-profile.'
+    } elseif ($manifest.status -ne 'published-release') { throw 'Unknown release status.' }
+    $outer = Get-Content -LiteralPath (Join-Path $temp 'manifest.json') -Raw | ConvertFrom-Json
+    if ($outer.schemaVersion -ne 1 -or $outer.status -ne $manifest.status -or $outer.native.sha256 -ne $manifest.native.sha256 -or $outer.bun.sha256 -ne $manifest.bun.sha256) { throw 'Candidate manifest identity mismatch.' }
+    $runtimeFiles = @(Get-ChildItem -LiteralPath $runtimeStage -Recurse -File)
+    if ($runtimeFiles.Count -ne @($outer.files).Count) { throw 'Runtime file inventory mismatch.' }
+    $inventorySeen = @{}
+    foreach ($file in $outer.files) {
+        if ($file.path -notmatch '^[A-Za-z0-9_./@-]+$' -or $file.path -match '(^|/)(\.|\.\.)(/|$)' -or $file.path.StartsWith('/') -or $inventorySeen.ContainsKey($file.path)) { throw 'Unsafe or duplicate manifest file path.' }
+        $inventorySeen[$file.path] = $true
+        $actual = Join-Path $runtimeStage $file.path
+        if (-not (Test-Path -LiteralPath $actual -PathType Leaf) -or (Get-Sha256 $actual) -ne $file.sha256 -or (Get-Item -LiteralPath $actual).Length -ne $file.bytes) { throw "Runtime file integrity mismatch: $($file.path)" }
+    }
+    Copy-Item -LiteralPath (Join-Path $temp 'manifest.json') -Destination (Join-Path $runtimeStage 'candidate-manifest.json')
     # Never overwrite even the same version: both filesystems use a fresh release ID.
     Wsl @('mkdir', '-p', '--', $LinuxRoot) | Out-Null
     Wsl @('mkdir', '--', $binaryDir) | Out-Null
@@ -131,13 +150,17 @@ try {
     foreach ($item in @(@{ name = 'polycode'; archive = $assets[0] }, @{ name = 'bun'; archive = $assets[1] })) {
         $file = Join-Path $temp $item.name
         Expand-Gzip (Join-Path $temp $item.archive) $file
+        $expected = $(if ($item.name -eq 'polycode') { $manifest.native } else { $manifest.bun })
+        if ($expected.sha256 -notmatch '^[a-f0-9]{64}$' -or (Get-Sha256 $file) -ne $expected.sha256 -or (Get-Item -LiteralPath $file).Length -ne $expected.bytes) { throw "Decompressed executable integrity mismatch: $($item.name)" }
+        $header = [IO.File]::OpenRead($file)
+        try { $magic = New-Object byte[] 20; if ($header.Read($magic, 0, 20) -ne 20 -or [BitConverter]::ToString($magic[0..5]) -ne '7F-45-4C-46-02-01' -or [BitConverter]::ToUInt16($magic, 18) -ne 62) { throw 'Executable must be x86_64 little-endian ELF.' } } finally { $header.Dispose() }
         Wsl @('install', '-m', '755', '--', (LinuxPath $file), "$binaryDir/$($item.name)") | Out-Null
     }
     $help = Wsl @('timeout', '30', "$binaryDir/polycode", '--help')
     foreach ($flag in @('--no-external-acp', '--polycode-native', '--polycode-provider')) {
         if (-not $help.Contains($flag)) { throw "Not a native Polycode binary: missing $flag. The old prototype cannot be installed as v0.2.0." }
     }
-    Wsl @('timeout', '30', "$binaryDir/bun", '--version') | Out-Null
+    if ((Wsl @('timeout', '30', "$binaryDir/bun", '--version')) -ne $manifest.bun.version) { throw 'Installed Bun version mismatch.' }
     # Load the complete bundle with the shipped Bun without starting the service,
     # signing in, launching a browser, or executing the TUI.
     Wsl @('timeout', '30', "$binaryDir/bun", '-e', 'const entry=process.argv[1]; process.argv[1]="polycode-install-check"; await import(entry)', (LinuxPath (Join-Path $runtimeStage 'integrations/native-provider/launch.mjs'))) | Out-Null
@@ -163,7 +186,8 @@ try {
     $committed = $true
     if ($StageOnly) { Write-Host "Verified/staged $Version at $release; active launcher and PATH unchanged." }
     else { Write-Host "Installed $Version at $release. Run polycode; select Grok/ChatGPT/Cursor inside the TUI." }
-    if ($NoPath) { Write-Host "PATH unchanged. Launcher: $shim" }
+    if ($NoPath -and -not $StageOnly) { Write-Host "PATH unchanged. Launcher: $shim" }
+    if ($StageOnly) { Write-Host "Direct staged entrypoint: $(Join-Path $release 'polycode.ps1')" }
 } finally {
     $launcherRestored = $true
     if (-not $committed) {
