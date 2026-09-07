@@ -22,7 +22,7 @@ import termios
 import time
 import unicodedata
 
-from native_mock import MockBridge, PROMPTS, STREAM_MARKER, TOOL_MARKER, WAIT_MARKER
+from native_mock import MockBridge, PROMPTS, RESUME_MARKERS, STREAM_MARKER, TASK_MARKERS, TOOL_MARKER, WAIT_MARKER
 
 
 class Screen:
@@ -267,7 +267,25 @@ def permission_key(screen, label):
     return matches[0].encode() if matches else None
 
 
-def run_scenario(t, bridge, root, default_features=False):
+def approve_task_once(t, bridge, provider, resume=False):
+    heading = f'Allow Native {provider} Task {"resume " if resume else ""}probe?'
+    section = 'native_resumes' if resume else 'native_tasks'
+    t.wait(lambda: heading in t.screen.text() and permission_key(t.screen.text(), 'Yes') is not None,
+           'exact native Task allow-once heading and option')
+    state = bridge.snapshot()[section][provider]
+    assert state['issued'] and state['child_calls'] == 0 and not state['verified'], 'native Task executed while approval pending'
+    # A second painted interval challenges accidental execution before approval.
+    t.pump(.3)
+    assert heading in t.screen.text(), 'native Task permission disappeared without approval'
+    assert bridge.snapshot()[section][provider]['child_calls'] == 0, 'native Task child ran before single-use approval'
+    key = permission_key(t.screen.text(), 'Yes')
+    assert key is not None, 'native Task allow-once option disappeared'
+    bridge.event('task_permission', provider=provider, resume=resume, pending_child_requests=0,
+                 label='Yes', key=key.decode())
+    t.send(key)
+
+
+def run_scenario(t, bridge, root, default_features=False, with_native_tasks=False):
     def events(kind):
         return [e for e in bridge.snapshot()['events'] if e['kind'] == kind]
 
@@ -295,6 +313,8 @@ def run_scenario(t, bridge, root, default_features=False):
         t.wait(lambda: len(events('chat')) > before, case + ' HTTP request')
         request = events('chat')[before]
         assert (request['provider'], request['model'], request['case']) == (provider, model, case), request
+        if default_features and case.startswith(('task_', 'resume_')):
+            approve_task_once(t, bridge, provider, case.startswith('resume_'))
         t.text(marker)
         t.pump(.8)
 
@@ -335,6 +355,11 @@ def run_scenario(t, bridge, root, default_features=False):
     t.text('Choose a model for this native session')
     t.choose(1)
     turn('model', 'codex', 'mock-beta', 'NATIVE_MODEL_OK')
+    if with_native_tasks:
+        turn('task_codex', 'codex', 'mock-beta', TASK_MARKERS['codex'])
+        assert bridge.snapshot()['native_tasks']['codex']['verified'], 'native Codex Task did not round-trip its child response'
+        turn('resume_codex', 'codex', 'mock-beta', RESUME_MARKERS['codex'])
+        assert bridge.snapshot()['native_resumes']['codex']['verified'], 'native Codex child resume failed'
 
     cursor = login('cursor')
     bridge.complete_login(cursor)
@@ -344,6 +369,11 @@ def run_scenario(t, bridge, root, default_features=False):
     turn('cursor', 'cursor', 'mock-cursor', 'NATIVE_CURSOR_OK')
     turn('tool', 'cursor', 'mock-cursor', TOOL_MARKER)
     assert bridge.tool_verified, 'native file tool did not round-trip random fixture bytes'
+    if with_native_tasks:
+        turn('task_cursor', 'cursor', 'mock-cursor', TASK_MARKERS['cursor'])
+        assert bridge.snapshot()['native_tasks']['cursor']['verified'], 'native Cursor Task did not round-trip its child response'
+        turn('resume_cursor', 'cursor', 'mock-cursor', RESUME_MARKERS['cursor'])
+        assert bridge.snapshot()['native_resumes']['cursor']['verified'], 'native Cursor child resume failed'
 
     cancelled_active = login('codex')
     t.escape()
@@ -406,6 +436,19 @@ def run_scenario(t, bridge, root, default_features=False):
             assert request['authenticated'], request
     inference = [r for r in snapshot['requests'] if r['path'].endswith('/chat/completions')]
     chats = [r for r in inference if r.get('purpose') == 'interactive']
+    children = [r for r in inference if r.get('purpose') == 'subagent']
+    if with_native_tasks:
+        assert len(children) == 4, 'native Tasks must invoke exactly one initial and one resumed child per provider'
+        for provider, model in (('codex', 'mock-beta'), ('cursor', 'mock-cursor')):
+            state = snapshot['native_tasks'][provider]
+            assert state['issued'] and state['verified'] and state['child_calls'] == 1, state
+            assert (state['child_provider'], state['child_model'], state['expected_model']) == (provider, model, model), state
+            resumed = snapshot['native_resumes'][provider]
+            assert resumed['issued'] and resumed['verified'] and resumed['child_calls'] == 1 and resumed['history_verified'], resumed
+            assert (resumed['child_provider'], resumed['child_model'], resumed['expected_model']) == (provider, model, model), resumed
+            assert state['subagent_id'] and resumed['subagent_id'] and state['subagent_id'] != resumed['subagent_id'], resumed
+    else:
+        assert not children and not any(s['issued'] for s in snapshot['native_tasks'].values()), 'native Tasks ran without opt-in'
     auxiliary = [r for r in inference if r.get('purpose') == 'auxiliary']
     assert {r['path'].split('/')[1] for r in auxiliary} == {'codex', 'cursor'}, 'native helpers were disabled or misrouted'
     assert all(not any(r['body'].get(k) is not None for k in ('temperature', 'top_p', 'max_tokens', 'max_completion_tokens')) for r in auxiliary), 'unsupported helper defaults reached subscription transport'
@@ -424,6 +467,7 @@ def run_scenario(t, bridge, root, default_features=False):
             assert forbidden not in serialized, 'UI-only auth material leaked into model history'
     return {'pid': t.proc.pid, 'fullscreen': True, 'same_process': True,
             'history_preserved': True, 'mcp_explicit_allow_once': default_features,
+            'with_native_tasks': with_native_tasks, 'task_explicit_allow_once': default_features and with_native_tasks,
             'native_tool_names': sorted(tool_sets[0]), **snapshot}
 
 
@@ -442,6 +486,7 @@ def main():
     parser.add_argument('binary', type=Path, help='absolute path to a newly built native Rust binary')
     parser.add_argument('--with-leader', action='store_true', help='exercise the default private native leader instead of the in-process path')
     parser.add_argument('--default-features', action='store_true', help='retain default tool permissions, memory, web, dashboard and updater policy; fixture workspace remains explicitly trusted')
+    parser.add_argument('--with-native-tasks', action='store_true', help='also verify foreground native spawn_subagent execution and inherited provider/model on both subscriptions')
     parser.add_argument('--artifacts', type=Path, help='new directory for redacted transcript/report; defaults to /tmp/native-e2e-*')
     args = parser.parse_args()
     require_network_isolation()
@@ -452,7 +497,8 @@ def main():
         raise SystemExit('Artifact directory must be empty')
     terminal = None
     report = {'passed': False, 'binary': str(binary), 'with_leader': args.with_leader,
-              'default_features': args.default_features, 'workspace_trusted': True,
+              'default_features': args.default_features, 'with_native_tasks': args.with_native_tasks,
+              'workspace_trusted': True,
               'real_accounts': False, 'browser_suppressed': True, 'telemetry_disabled': True}
     with tempfile.TemporaryDirectory(prefix='native-fixture-') as temp:
         root = Path(temp)
@@ -477,7 +523,7 @@ def main():
                 command = native_command(binary, workspace, args.with_leader, args.default_features)
                 report['command'] = command
                 terminal = Terminal(command, env, workspace)
-                report.update(run_scenario(terminal, bridge, root, args.default_features))
+                report.update(run_scenario(terminal, bridge, root, args.default_features, args.with_native_tasks))
                 report['passed'] = True
             except Exception as error:
                 report['failure'] = (type(error).__name__ + ': ' + str(error)).replace(bridge.token, '[REDACTED]')
@@ -507,7 +553,9 @@ def main():
                 if report['mock']['errors'] or report['mock']['trap_requests'] or terminal_leak:
                     raise AssertionError('Mock/credential isolation failure; inspect the redacted report')
     assert report['passed'], 'Native acceptance did not finish'
-    print('PASS: native fullscreen signed-out startup, login/cancel, same-process model/provider switch, streaming, native file-tool round-trip, turn cancellation, redirect credential isolation')
+    print('PASS (mock-endpoint preflight only): native fullscreen signed-out startup, login/cancel, same-process model/provider switch, streaming, native file-tool round-trip, turn cancellation, redirect credential isolation')
+    if args.with_native_tasks:
+        print('PASS (mock only): both native children inherit/return/resume; real subscription and Session resume gates remain separate')
 
 
 if __name__ == '__main__':

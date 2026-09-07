@@ -2,6 +2,7 @@
 """Deterministic, local-only HTTP control + OpenAI SSE fixture; never an ACP agent."""
 import copy
 import json
+import re
 import secrets
 import threading
 import sys
@@ -15,11 +16,21 @@ CALL_ID = 'native-fixture-read-1'
 STREAM_MARKER = 'NATIVE_STREAM_RENDERED'
 TOOL_MARKER = 'NATIVE_TOOL_ROUNDTRIP_OK'
 WAIT_MARKER = 'NATIVE_CANCEL_STREAM_ACTIVE'
+CHILD_MARKERS = {p: f'NATIVE_CHILD_REQUEST_{p.upper()}' for p in PROVIDERS}
+TASK_CALL_IDS = {p: f'native-fixture-task-{p}-1' for p in PROVIDERS}
+TASK_MARKERS = {p: f'NATIVE_TASK_{p.upper()}_OK' for p in PROVIDERS}
+RESUME_CHILD_MARKERS = {p: f'NATIVE_RESUMED_CHILD_REQUEST_{p.upper()}' for p in PROVIDERS}
+RESUME_CALL_IDS = {p: f'native-fixture-task-{p}-2' for p in PROVIDERS}
+RESUME_MARKERS = {p: f'NATIVE_TASK_RESUME_{p.upper()}_OK' for p in PROVIDERS}
 PROMPTS = {'stream': 'Exercise the initial stream.',
            'model': 'Exercise the second model.',
            'cursor': 'Exercise the other provider.',
            'tool': 'Read the temporary test fixture using your native file tool.',
            'mcp': 'Discover and call the local fixture MCP probe through the native tools.',
+           'task_codex': 'Exercise a foreground native Task on the selected Codex model.',
+           'task_cursor': 'Exercise a foreground native Task on the selected Cursor model.',
+           'resume_codex': 'Resume the completed native Codex child without a model override.',
+           'resume_cursor': 'Resume the completed native Cursor child without a model override.',
            'wait': 'Exercise cancellation of a running response.',
            'cancelled_login': 'Exercise the current model after cancelling sign-in.',
            'redirect': 'Exercise the model redirect boundary.',
@@ -48,6 +59,14 @@ class MockBridge:
         self.tool_verified = False
         self.mcp_value = None
         self.mcp_verified = False
+        self.native_tasks = {p: {'nonce': 'child-response-' + secrets.token_urlsafe(32),
+                                 'expected_model': None, 'arguments': None, 'issued': False,
+                                 'child_provider': None, 'child_model': None,
+                                 'child_calls': 0, 'verified': False, 'subagent_id': None} for p in PROVIDERS}
+        self.native_resumes = copy.deepcopy(self.native_tasks)
+        for state in self.native_resumes.values():
+            state['nonce'] = 'resumed-child-response-' + secrets.token_urlsafe(32)
+            state['history_verified'] = False
         self.server = self.trap = None
         self.threads = []
 
@@ -59,7 +78,13 @@ class MockBridge:
         with self.lock:
             return copy.deepcopy({'events': self.events, 'requests': self.requests,
                                   'trap_requests': self.trap_requests, 'errors': self.errors,
-                                  'tool_verified': self.tool_verified, 'mcp_verified': self.mcp_verified})
+                                  'tool_verified': self.tool_verified, 'mcp_verified': self.mcp_verified,
+                                  'native_tasks': {p: {'provider': p, **{k: v for k, v in state.items()
+                                                   if k not in ('nonce', 'arguments')}}
+                                                   for p, state in self.native_tasks.items()},
+                                  'native_resumes': {p: {'provider': p, **{k: v for k, v in state.items()
+                                                     if k not in ('nonce', 'arguments')}}
+                                                     for p, state in self.native_resumes.items()}})
 
     def catalog(self):
         with self.lock:
@@ -78,6 +103,89 @@ class MockBridge:
                 raise AssertionError('Cannot complete a terminal login attempt')
             attempt['state'] = 'completed'
             self.logged_in[attempt['provider']] = True
+
+    def child_reply(self, child_provider, provider, model, body, resume=False):
+        """Reply to a native-engine child, never create or execute an agent here."""
+        with self.lock:
+            state = (self.native_resumes if resume else self.native_tasks)[child_provider]
+            assert provider == child_provider, 'native Task child provider mismatch'
+            assert state['issued'], 'native Task child arrived before parent invocation'
+            assert model == state['expected_model'], 'native Task child model mismatch'
+            assert state['child_calls'] == 0, 'duplicate native Task child request'
+            assert state['nonce'] not in json.dumps(body), 'child nonce leaked before child response'
+            if resume:
+                prior = self.native_tasks[provider]
+                messages = body.get('messages', [])
+                assert any(m.get('role') == 'user' and CHILD_MARKERS[provider] in content_text(m.get('content'))
+                           for m in messages[:-1]), 'resumed child lost original user history'
+                assert any(m.get('role') == 'assistant' and prior['nonce'] in content_text(m.get('content'))
+                           for m in messages[:-1]), 'resumed child lost original assistant history'
+                state['history_verified'] = True
+            state['child_calls'] += 1
+            state['child_provider'], state['child_model'] = provider, model
+            return {'content': state['nonce']}
+
+    def task_reply(self, task_provider, provider, model, body, resume=False):
+        """Issue one observed wire call, then verify only its correlated tool result."""
+        with self.lock:
+            assert provider == task_provider, 'native Task parent provider mismatch'
+            state = (self.native_resumes if resume else self.native_tasks)[provider]
+            prior = self.native_tasks[provider]
+            if resume:
+                assert prior['verified'] and prior['subagent_id'], 'resume requires verified original child ID'
+                assert model == prior['expected_model'], 'resume parent model changed'
+            messages = body.get('messages', [])
+            call_id = (RESUME_CALL_IDS if resume else TASK_CALL_IDS)[provider]
+            calls = [(index, call) for index, message in enumerate(messages)
+                     if message.get('role') == 'assistant' for call in (message.get('tool_calls') or [])
+                     if call.get('id') == call_id]
+            results = [(index, message) for index, message in enumerate(messages)
+                       if message.get('role') == 'tool' and message.get('tool_call_id') == call_id]
+            last_user_index = max(i for i, m in enumerate(messages) if m.get('role') == 'user')
+            turn_calls = [(index, call) for index, message in enumerate(messages)
+                          if index > last_user_index and message.get('role') == 'assistant'
+                          for call in (message.get('tool_calls') or [])]
+            turn_results = [(index, message) for index, message in enumerate(messages)
+                            if index > last_user_index and message.get('role') == 'tool']
+            if not state['issued']:
+                assert state['nonce'] not in json.dumps(body), 'child nonce leaked before parent invocation'
+                assert not calls and not results and not turn_calls and not turn_results, 'unsolicited native Task call or result'
+                arguments = task_arguments(body.get('tools') or [], provider, prior['subagent_id'] if resume else None)
+                state['expected_model'] = model
+                state['arguments'] = arguments
+                state['issued'] = True
+                self.event('resume_issued' if resume else 'task_issued', provider=provider, model=model, call_id=call_id,
+                           **({'resume_from': prior['subagent_id']} if resume else {}))
+                return {'tool_calls': [{'index': 0, 'id': call_id, 'type': 'function',
+                                       'function': {'name': 'spawn_subagent', 'arguments': json.dumps(arguments)}}]}
+            assert model == state['expected_model'], 'native Task parent model changed'
+            assert not state['verified'], 'duplicate native Task parent completion'
+            assert len(results) == 1, 'native Task requires one correlated tool result'
+            assert len(calls) == 1, 'native Task requires one correlated assistant call'
+            call_index, call = calls[0]
+            result_index, result = results[0]
+            assert last_user_index < call_index < result_index, 'native Task call/result order mismatch'
+            preceding = max(i for i, m in enumerate(messages[:result_index]) if m.get('role') == 'assistant')
+            assert preceding == call_index, 'native Task result follows a different assistant call'
+            assert turn_calls == calls and turn_results == results, 'uncorrelated extra native Task call or result'
+            function = call.get('function') or {}
+            assert call.get('type') == 'function' and function.get('name') == 'spawn_subagent', 'native Task correlated tool name mismatch'
+            try:
+                arguments = json.loads(function.get('arguments', ''))
+            except (ValueError, TypeError):
+                raise AssertionError('native Task correlated arguments invalid') from None
+            assert arguments == state['arguments'], 'native Task correlated arguments changed'
+            assert state['child_calls'] == 1, 'native Task result lacks one observed child request'
+            assert state['nonce'] in json.dumps(result.get('content')), 'native Task result lacks child nonce'
+            subagent_id = returned_subagent_id(result.get('content'))
+            if resume:
+                assert subagent_id != prior['subagent_id'], 'resumed child must return its new run ID'
+                assert state['history_verified'], 'resume history not verified'
+            state['subagent_id'] = subagent_id
+            state['verified'] = True
+            self.event('resume_roundtrip' if resume else 'task_roundtrip', provider=provider, model=model, call_id=call_id,
+                       subagent_id=subagent_id, child_calls=state['child_calls'], verified=True)
+            return {'content': (RESUME_MARKERS if resume else TASK_MARKERS)[provider]}
 
     def start(self):
         owner = self
@@ -129,9 +237,12 @@ class MockBridge:
                     self.json_response(400, {'error': 'invalid JSON'})
                     return
                 with owner.lock:
+                    recorded_body = json.dumps(body).replace(owner.token, '[REDACTED]')
+                    for state in [*owner.native_tasks.values(), *owner.native_resumes.values()]:
+                        recorded_body = recorded_body.replace(state['nonce'], '[CHILD_RESPONSE_REDACTED]')
                     self.request_record = {'method': self.command, 'path': path.replace(owner.token, '[REDACTED]'),
                                            'authenticated': auth_ok, 'secret_elsewhere': secret_elsewhere,
-                                           'body': json.loads(json.dumps(body).replace(owner.token, '[REDACTED]'))}
+                                           'body': json.loads(recorded_body)}
                     owner.requests.append(self.request_record)
                 if not auth_ok or secret_elsewhere:
                     self.json_response(401, {'error': 'invalid process authentication'})
@@ -222,14 +333,33 @@ class MockBridge:
                     auxiliary = 'title'
                 elif isinstance(last_user, str) and last_user.startswith('<system-reminder>Write an ultra-short dashboard line that captures the AGENT\'S REPLY'):
                     auxiliary = 'dashboard'
-                case = auxiliary or next((key for key, prompt in PROMPTS.items() if isinstance(last_user, str) and prompt in last_user), None)
+                # Parent assistant tool arguments also contain the child marker. Only
+                # the last user message can identify a child; helpers take precedence.
+                children = [(p, resumed) for resumed, markers in ((False, CHILD_MARKERS), (True, RESUME_CHILD_MARKERS))
+                            for p, marker in markers.items()
+                            if not auxiliary and isinstance(last_user, str) and marker in last_user]
+                assert len(children) <= 1, 'ambiguous native Task child marker'
+                child_provider, resumed = children[0] if children else (None, False)
+                case = auxiliary or (f'child_{child_provider}' if child_provider else next(
+                    (key for key, prompt in PROMPTS.items() if isinstance(last_user, str) and prompt in last_user), None))
                 assert case is not None, 'unexpected model prompt (background sampler?)'
-                self.request_record['purpose'] = 'auxiliary' if auxiliary else 'interactive'
-                owner.event('auxiliary' if auxiliary else 'chat', provider=provider, model=model, case=case)
+                purpose = 'auxiliary' if auxiliary else 'subagent' if child_provider else 'interactive'
+                self.request_record['purpose'] = purpose
+                owner.event('auxiliary' if auxiliary else 'child_chat' if child_provider else 'chat',
+                            provider=provider, model=model, case=case)
                 if case == 'redirect':
                     owner.event('model_redirect')
                     self.redirect()
                     return
+                # Validate Task contracts before sending SSE headers, so rejected
+                # calls are genuine HTTP failures and cannot resemble success streams.
+                task_delta = None
+                if child_provider:
+                    task_delta = owner.child_reply(child_provider, provider, model, body, resumed)
+                elif case in ('task_codex', 'task_cursor'):
+                    task_delta = owner.task_reply(case.removeprefix('task_'), provider, model, body)
+                elif case in ('resume_codex', 'resume_cursor'):
+                    task_delta = owner.task_reply(case.removeprefix('resume_'), provider, model, body, True)
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/event-stream')
                 self.send_header('Cache-Control', 'no-cache')
@@ -237,6 +367,10 @@ class MockBridge:
                 self.end_headers()
                 self.close_connection = True
                 self.chunk(model, {'role': 'assistant'})
+                if task_delta is not None:
+                    self.chunk(model, task_delta)
+                    self.finish_sse(model, 'tool_calls' if 'tool_calls' in task_delta else 'stop')
+                    return
                 if auxiliary:
                     if auxiliary == 'title_function':
                         self.chunk(model, {'tool_calls': [{'index': 0, 'id': 'native-title-call', 'type': 'function', 'function': {'name': 'session_title', 'arguments': json.dumps({'session_title': 'Native subscription test session with original tools'})}}]})
@@ -344,6 +478,39 @@ class MockBridge:
 
     def __exit__(self, *_):
         self.close()
+
+
+def content_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return '\n'.join(b.get('text', '') for b in content if isinstance(b, dict) and b.get('type') == 'text')
+    return ''
+
+
+def returned_subagent_id(content):
+    text = content_text(content)
+    footers = re.findall(r'<subagent_result>\s*subagent_id: ([A-Za-z0-9_-]+)\s*subagent_type: general-purpose\s*'
+                         r'To continue this subagent\'s conversation, use resume_from="\1"\.\s*</subagent_result>', text)
+    assert len(footers) == 1, 'native Task result lacks unique typed resume footer'
+    return footers[0]
+
+
+def task_arguments(tools, provider, resume_from=None):
+    """Use the observed spawn_subagent wire schema, not generic TaskToolInput."""
+    definitions = [t.get('function', {}) for t in tools
+                   if t.get('type') == 'function' and t.get('function', {}).get('name') == 'spawn_subagent']
+    assert len(definitions) == 1, 'native spawn_subagent tool absent or ambiguous'
+    arguments = {'prompt': CHILD_MARKERS[provider] + '\nReturn a brief plain-text reply; do not call tools.',
+                 'description': f'Native {provider} Task probe',
+                 'subagent_type': 'general-purpose', 'background': False}
+    if resume_from is not None:
+        arguments.update(prompt=RESUME_CHILD_MARKERS[provider] + '\nContinue your prior conversation; reply briefly without tools.',
+                         description=f'Native {provider} Task resume probe', resume_from=resume_from)
+    schema = definitions[0].get('parameters', {})
+    assert set(schema.get('required', [])) <= arguments.keys(), 'unsupported required native Task argument'
+    assert arguments.keys() <= schema.get('properties', {}).keys(), 'unsupported supplied native Task argument'
+    return arguments
 
 
 def read_tool(tools, fixture_path):
