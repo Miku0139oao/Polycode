@@ -16,16 +16,14 @@ selection in the same TUI**, while retaining Grok's native agent engine, tools,
 MCP, permissions, sessions, and features. It is not an official xAI, OpenAI,
 or Cursor release.
 
-**Unpublished development candidate only; v0.2.0 is NOT released.**
-Latest user report: **ChatGPT and native Grok work; Cursor OAuth still fails**.
-This is not candidate-hash-bound formal acceptance. Provider-aware `/usage` and
-TUI branding fixes are pending separately; this preparation candidate must be
-rebuilt/retested with a new hash after those native changes.
-The earlier external-ACP prototype (`d549db3`) replaced the agent and does **not**
-meet this architecture. Its passing tests and live logins are historical evidence,
-not proof of native completion.
+**The v0.2.0 Windows installation recommendation is withdrawn.**
+The published [v0.2.0 prerelease](https://github.com/Miku0139oao/Polycode/releases/tag/v0.2.0)
+launches through WSL and has user-reported failures across Grok, ChatGPT and Cursor.
+Do not treat it as a working Windows-native release. A Windows-native replacement
+is under validation in [PR #1](https://github.com/Miku0139oao/Polycode/pull/1);
+real-provider and clean-Windows acceptance is not complete.
 
-[Install](#install-polycode-windows--wsl) ·
+[Install](#installation-status) ·
 [Provider selection and limitations](integrations/README.md) ·
 [Verification status](integrations/VERIFICATION.md)
 
@@ -35,7 +33,7 @@ commands, searches the web, and manages long-running tasks — interactively,
 headlessly for scripting/CI, or embedded in editors via the Agent Client
 Protocol (ACP).
 
-[Install Polycode](#install-polycode-windows--wsl) ·
+[Install Polycode](#installation-status) ·
 [Building from source](#building-from-source) ·
 [Documentation](#documentation) ·
 [Repository layout](#repository-layout) ·
@@ -55,100 +53,22 @@ integration or release status.
 
 ---
 
-## Install Polycode (Windows + WSL)
+## Installation status
 
-**Unpublished candidate.** Cursor live OAuth, real-provider Task/resume, paid
-billing and authorized public distribution remain open. GitHub Actions can
-build and attach candidate assets; that is not live acceptance. See the
-[fail-closed procedure](integrations/RELEASE_READINESS.md).
+**There is currently no supported public Windows installation command.**
+The previous one-command installer selects the historical WSL-based v0.2.0
+candidate. Its Windows installation recommendation is withdrawn because that
+package requires WSL and users have reported failures with every provider.
 
-### One-command from GitHub (candidate)
+Windows-native Polycode is the replacement target: a Windows x64 executable
+and Windows runtime, with no WSL requirement. The candidate is being validated
+in [PR #1](https://github.com/Miku0139oao/Polycode/pull/1). Local build or mock-test
+success does not establish real login, generation, or clean-Windows acceptance.
+An install command will be restored after the replacement is accepted.
 
-Windows PowerShell 5.1 or 7, with an existing WSL Arch distro:
-
-```powershell
-irm https://raw.githubusercontent.com/Miku0139oao/Polycode/main/install.ps1 | iex
-```
-
-That downloads hash-checked release assets. It does **not** require authorization
-sidecars and does **not** claim a finished release. Isolated install:
-
-```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/main/install.ps1))) -NoPath
-```
-
-Rebuilds are published by [the candidate-release workflow](.github/workflows/candidate-release.yml)
-(`workflow_dispatch` or a `vX.Y.Z` tag).
-
-### Local candidate folder
-
-If `install.ps1` already sits next to the six candidate files, run that file
-with `-AllowCandidate`. `-ArtifactDirectory` is optional in that case:
-
-```powershell
-$id=[guid]::NewGuid().ToString('N'); & D:/ai-harness/native-release-candidate-18d/install.ps1 -AllowCandidate -InstallRoot "D:/ai-harness/polycode-candidate-install-$id" -LinuxRoot "/tmp/polycode-candidate-install-$id" -NoPath
-```
-
-That historical schema1 18d/e8 folder remains untouched and is not promotable.
-
-**Authorized public command (sidecars required, not enabled yet):**
-
-```powershell
-& { $ErrorActionPreference='Stop'; $p=Join-Path $env:TEMP ('polycode-install-'+[guid]::NewGuid().ToString('N')+'.ps1'); iwr -UseBasicParsing https://github.com/Miku0139oao/Polycode/releases/download/v0.2.0/install.ps1 -OutFile $p; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $p -Version v0.2.0 }
-```
-
-That path still needs matching parent authorization and complete PASS
-readiness sidecars. Its public-URL gate is **DEFERRED_UNTIL_PUBLICATION**.
-
-Target: **Windows with an existing WSL Arch Linux x86_64 distribution**, glibc
-2.43 or newer, zlib, libgcc, libstdc++, ICU 78 and Windows interop enabled; default distro name
-`archlinux` (installer override: `-Distro NAME`). This is not an Ubuntu, macOS,
-or native Windows binary support claim. The installer does not install WSL.
-The local package includes the native binary, Bun runtime, and provider service;
-no Rust build, Codex CLI, Cursor CLI, or prior CLI login should be needed.
-The copied Arch Bun reports `1.3.14` / revision `1.3.14-canary.1+0d9b296af`;
-its system-library dependencies are recorded in `manifest.json`, not bundled as
-portable Linux libraries. See the [actual candidate report](integrations/PACKAGE_CANDIDATE_REPORT.md).
-
-Intended workflow after the native release passes verification:
-
-```powershell
-polycode                                  # enter the native provider UI
-polycode -Project D:\my-project
-polycode -Backend codex -Project D:\my-project  # optional initial preference only
-```
-
-Choose Grok, ChatGPT subscription, or experimental Cursor **inside the TUI**.
-Browser OAuth must start there, return to the same TUI, and allow model/provider
-switching without restarting. `-Backend` does not select an external agent.
-These are release requirements, **not yet demonstrated end to end**.
-
-The installer uses per-user Windows files and WSL binaries and verifies SHA-256,
-archive paths, inventory, uncompressed ELF hashes and native flags. Normal future
-public installation adds `polycode` to PATH; `-NoPath` does not. An already-open
-terminal may need its PATH refreshed after installation; authentication/provider
-switching must not require a TUI restart. Candidate assets are
-`polycode-wsl-x64.gz`, `polycode-bun-wsl-x64.gz`, `polycode-runtime.zip`,
-`install.ps1`, `manifest.json`, and `SHA256SUMS`. New schema2 packages have immutable
-classification, not publication status. After all actual acceptance and separate
-parent permission, promotion may add `release-readiness.json` and
-`release-authorization.json` **without changing any of those six accepted files**.
-Nothing has been promoted or published here. Parent session resume (distinct from
-child Task resume), prompt identity for all three providers, native reasoning
-effort capability/UI/wire/inheritance/resume and busy queued model-switch safe
-commit are now explicit required gates in the [procedure](integrations/RELEASE_READINESS.md).
-The bundled service is a model transport for the native engine, not an external
-replacement agent. Checksums
-protect against corruption, not a compromised publisher. This WSL package does
-not establish native Windows sandbox parity.
-
-Subscription quotas and provider billing rules still apply; there is no quota
-bypass or automatic metered-API fallback. Cursor uses an undocumented protocol
-with account/terms risks; parity remains unproven. See the
-[security and compatibility boundaries](integrations/README.md).
-
-Upstream installers at [x.ai/cli](https://x.ai/cli) install **Grok Build**, not
-Polycode. Upstream changes are listed in the [Grok changelog](https://x.ai/build/changelog).
+Existing v0.2.0 assets and older integration documents are historical development
+material, not a current installation recommendation. See the
+[known issues in the v0.2.0 release notes](https://github.com/Miku0139oao/Polycode/releases/tag/v0.2.0).
 
 ## Building from source
 
