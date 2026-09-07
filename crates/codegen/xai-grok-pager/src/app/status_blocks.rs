@@ -208,9 +208,10 @@ pub(crate) fn session_usage_block_text(
         group_thousands(t.model_calls),
         format_duration(std::time::Duration::from_millis(t.api_duration_ms)),
     ));
-    rows.push(format!("  Cost:           {}", format_cost(t)));
+    rows.push(format!("  Reported cost:  {}", format_cost(t)));
+    rows.push("  Model API costs, not subscription balances.".to_string());
 
-    if usage.model_usage.len() > 1 {
+    if !usage.model_usage.is_empty() {
         rows.push("  By model:".to_string());
         for (model, m) in &usage.model_usage {
             rows.push(format!(
@@ -220,6 +221,8 @@ pub(crate) fn session_usage_block_text(
                 format_cost(m),
             ));
         }
+    } else {
+        rows.push("  Model attribution: unavailable (not reported).".to_string());
     }
 
     if usage.usage_is_incomplete {
@@ -227,7 +230,7 @@ pub(crate) fn session_usage_block_text(
     }
 
     join_header_rows(
-        "Session usage (since start or last resume):".to_string(),
+        "Session usage (all models; since start/resume):".to_string(),
         rows,
     )
 }
@@ -320,7 +323,7 @@ mod tests {
             ..Default::default()
         };
         let text = session_usage_block_text(&usage);
-        // Snapshot pins content and column alignment together; single-model sessions must skip the redundant by-model breakdown
+        // Snapshot pins content, cost provenance, missing model attribution, and alignment.
         insta::assert_snapshot!("session_usage_block_full", text);
     }
 
@@ -340,6 +343,63 @@ mod tests {
         assert!(text.contains("By model:"), "{text}");
         assert!(text.contains("grok-build: 100 in / 10 out"), "{text}");
         assert!(text.contains("grok-4: 50 in / 5 out"), "{text}");
+    }
+
+    #[test]
+    fn session_usage_identifies_a_single_reported_model() {
+        let mut usage = PromptUsage {
+            totals: model_row(321, 45, None),
+            ..Default::default()
+        };
+        usage
+            .model_usage
+            .insert("reported-chatgpt-model".into(), usage.totals.clone());
+        let text = session_usage_block_text(&usage);
+        assert!(
+            text.contains("reported-chatgpt-model: 321 in / 45 out"),
+            "{text}"
+        );
+        assert!(text.contains("not available (not reported)"), "{text}");
+        assert!(!text.contains("$0"), "{text}");
+    }
+
+    #[test]
+    fn mixed_provider_session_keeps_each_reported_model_cost_separate() {
+        let mut usage = PromptUsage {
+            totals: model_row(900, 90, None),
+            ..Default::default()
+        };
+        usage.totals.cost_is_partial = true;
+        usage
+            .model_usage
+            .insert("grok-4.5".into(), model_row(100, 10, Some(10_000_000_000)));
+        usage
+            .model_usage
+            .insert("reported-chatgpt-model".into(), model_row(300, 30, None));
+        usage
+            .model_usage
+            .insert("reported-cursor-model".into(), model_row(500, 50, None));
+        let text = session_usage_block_text(&usage);
+        assert!(
+            text.contains("grok-4.5: 100 in / 10 out · $1.0000"),
+            "{text}"
+        );
+        assert!(
+            text.contains("reported-chatgpt-model: 300 in / 30 out · not available"),
+            "{text}"
+        );
+        assert!(
+            text.contains("reported-cursor-model: 500 in / 50 out · not available"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Reported cost:  not available (not reported for some calls)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Model API costs, not subscription balances."),
+            "{text}"
+        );
     }
 
     #[test]

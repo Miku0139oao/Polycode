@@ -340,19 +340,25 @@ pub(super) fn handle_billing_fetched(
         // The open usage modal renders from the mirrors updated above
         // Only its own fetch generation may settle the loading/error flags (background refreshes carry nonce 0)
         if let Some(state) = super::status::usage_modal_state_mut(agent)
+            && state.ctx.provider.permits_native_billing()
             && state.fetch_nonce == nonce
         {
             state.billing_loading = false;
             state.billing_error = None;
             state.ctx.subscription_tier = tier_now;
         }
-        if !silent && !agent.chat_kind {
-            let msg = match &balance {
+        if !silent
+            && !agent.chat_kind
+            && crate::views::usage_modal::UsageProvider::for_models(&agent.session.models)
+                .permits_native_billing()
+        {
+            let summary = match &balance {
                 Some(bal) => {
                     crate::views::credit_bar::format_usage_summary(bal, summary_topup.as_ref())
                 }
                 None => "No billing data available.".to_string(),
             };
+            let msg = format!("Native xAI billing (not a ChatGPT/Cursor balance)\n{summary}");
             agent.scrollback.push_block(RenderBlock::System(
                 crate::scrollback::blocks::SystemMessageBlock::new(msg),
             ));

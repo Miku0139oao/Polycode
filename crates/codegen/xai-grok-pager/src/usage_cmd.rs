@@ -1,4 +1,6 @@
-//! `grok usage <session-id> [turn]`: persisted token/cost usage.
+//! `polycode usage <session-id> [turn]`: persisted, reported token/cost usage.
+//! This is a historical session ledger, not a provider subscription quota or balance.
+//! Preserve the wire format (including absent costs and per-model rows); no billing API is queried.
 
 use std::io::Write;
 
@@ -114,6 +116,56 @@ mod tests {
         assert_eq!(value["turns"].as_array().unwrap().len(), 1);
         assert_eq!(value["turns"][0]["turnNumber"], 2);
         assert_eq!(value["turns"][0]["inputTokens"], 15);
+    }
+
+    #[test]
+    fn persisted_usage_keeps_model_cost_provenance_and_unknown_costs() {
+        let mut summary = UsageSummary {
+            input_tokens: 30,
+            output_tokens: 3,
+            total_tokens: 33,
+            model_calls: 2,
+            cost_is_partial: true,
+            ..Default::default()
+        };
+        summary.model_usage.insert(
+            "grok-4.5".into(),
+            UsageSummary {
+                input_tokens: 10,
+                output_tokens: 1,
+                total_tokens: 11,
+                model_calls: 1,
+                cost_usd_ticks: Some(10_000_000_000),
+                ..Default::default()
+            },
+        );
+        summary.model_usage.insert(
+            "reported-subscription-model".into(),
+            UsageSummary {
+                input_tokens: 20,
+                output_tokens: 2,
+                total_tokens: 22,
+                model_calls: 1,
+                ..Default::default()
+            },
+        );
+        let mut file = SessionUsageFile::new("mixed-session");
+        file.apply_turn(1, "t1", &summary, None);
+        for turn in [None, Some(1)] {
+            let value = select_payload(&file, turn, "mixed-session").unwrap();
+            let models = &value["session"]["modelUsage"];
+            assert_eq!(models["grok-4.5"]["costUsdTicks"], 10_000_000_000_i64);
+            assert!(
+                models["reported-subscription-model"]
+                    .get("costUsdTicks")
+                    .is_none()
+            );
+            assert_eq!(models["reported-subscription-model"]["inputTokens"], 20);
+            assert_eq!(value["session"]["costIsPartial"], true);
+            assert!(value["session"].get("costUsdTicks").is_none());
+            assert!(value.get("subscriptionBalance").is_none());
+            assert!(value.get("subscriptionQuota").is_none());
+        }
     }
 
     #[test]

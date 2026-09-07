@@ -11,6 +11,7 @@ use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::notifications::{NotificationEvent, NotificationEventKind};
 use crate::scrollback::block::RenderBlock;
+use crate::views::usage_modal::UsageProvider;
 
 /// Temporary kill switch: client share links are disabled.
 pub(super) fn dispatch_share_session(app: &mut AppView) -> Vec<Effect> {
@@ -44,6 +45,23 @@ pub(super) fn open_usage_info_modal(
     app: &mut AppView,
     tab: crate::views::usage_modal::UsageInfoTab,
 ) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get(&id) else {
+        return vec![];
+    };
+    let provider = UsageProvider::for_models(&agent.session.models);
+    open_usage_info_modal_for_provider(app, tab, provider)
+}
+
+/// Typed boundary for the registered-provider decision; useful for dispatch tests
+/// without mutating the process-global bridge or making network requests.
+pub(super) fn open_usage_info_modal_for_provider(
+    app: &mut AppView,
+    tab: crate::views::usage_modal::UsageInfoTab,
+    provider: UsageProvider,
+) -> Vec<Effect> {
     use crate::views::modal::ActiveModal;
     use crate::views::usage_modal::{UsageInfoContext, UsageInfoModalState};
 
@@ -58,22 +76,38 @@ pub(super) fn open_usage_info_modal(
         return vec![];
     };
     let session_id = agent.session.session_id.clone();
+    let active_model = agent
+        .session
+        .models
+        .current_model_id_str()
+        .map(str::to_owned);
 
-    if let Some(state) = usage_modal_state_mut(agent) {
+    if let Some(state) = usage_modal_state_mut(agent)
+        && state.ctx.provider == provider
+        && state.ctx.active_model == active_model
+    {
         state.set_tab(tab);
         return vec![];
     }
 
-    let billing_reachable = usage_visible && !agent.chat_kind && redirect_url.is_none();
+    let billing_reachable = provider.permits_native_billing()
+        && usage_visible
+        && !agent.chat_kind
+        && redirect_url.is_none();
     let nonce = next_usage_fetch_nonce();
     let mut state = UsageInfoModalState::new(
         tab,
         UsageInfoContext {
             session_id: session_id.as_ref().map(|s| s.0.to_string()),
+            provider,
+            active_model,
             usage_visible,
             chat_kind: agent.chat_kind,
-            billing_redirect_url: redirect_url,
-            subscription_tier: tier,
+            billing_redirect_url: provider
+                .permits_native_billing()
+                .then_some(redirect_url)
+                .flatten(),
+            subscription_tier: provider.permits_native_billing().then_some(tier).flatten(),
         },
     );
     state.fetch_nonce = nonce;
@@ -97,7 +131,7 @@ pub(super) fn open_usage_info_modal(
             nonce,
         });
     }
-    // Silently refresh the cached billing mirrors the modal renders from
+    // Native-only: subscription pages never query the xAI billing service.
     if billing_reachable {
         state.billing_loading = true;
         effects.push(Effect::FetchBilling {
@@ -350,12 +384,11 @@ pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
         }],
         None => {
             if let Some(agent) = app.agents.get_mut(&id) {
-                push_and_page_flip(
-                    &mut agent.scrollback,
-                    RenderBlock::system(
-                        "Session usage is unavailable until the session starts.".to_string(),
-                    ),
-                );
+                let provider = UsageProvider::for_models(&agent.session.models);
+                let mut rows = provider.heading(agent.session.models.current_model_id_str());
+                rows.extend(provider.unavailable_lines());
+                rows.push("Session usage is unavailable until the session starts.".into());
+                push_and_page_flip(&mut agent.scrollback, RenderBlock::system(rows.join("\n")));
             }
             append_consumer_billing_surface(app, id)
         }
@@ -400,13 +433,33 @@ pub(super) fn commit_session_usage_block(
     if agent.session.session_id.as_ref() != Some(session_id) {
         return vec![];
     }
-    push_and_page_flip(&mut agent.scrollback, RenderBlock::system(text));
+    let provider = UsageProvider::for_models(&agent.session.models);
+    let mut rows = provider.heading(agent.session.models.current_model_id_str());
+    rows.extend(provider.unavailable_lines());
+    rows.push(String::new());
+    rows.push(text);
+    push_and_page_flip(&mut agent.scrollback, RenderBlock::system(rows.join("\n")));
     append_consumer_billing_surface(app, agent_id)
 }
 
 /// Consumer credit follow-up for `/usage` (redirect or non-silent billing fetch).
 pub(super) fn append_consumer_billing_surface(app: &mut AppView, agent_id: AgentId) -> Vec<Effect> {
-    if !app.usage_visible {
+    let Some(agent) = app.agents.get(&agent_id) else {
+        return vec![];
+    };
+    let provider = UsageProvider::for_models(&agent.session.models);
+    append_consumer_billing_surface_for_provider(app, agent_id, provider)
+}
+
+pub(super) fn append_consumer_billing_surface_for_provider(
+    app: &mut AppView,
+    agent_id: AgentId,
+    provider: UsageProvider,
+) -> Vec<Effect> {
+    let Some(agent) = app.agents.get(&agent_id) else {
+        return vec![];
+    };
+    if !provider.permits_native_billing() || agent.chat_kind || !app.usage_visible {
         return vec![];
     }
     // Remote-settings kill switch (`grok_build_usage_redirect_url`): link out instead of fetching billing from the backend
@@ -414,7 +467,7 @@ pub(super) fn append_consumer_billing_surface(app: &mut AppView, agent_id: Agent
         if let Some(agent) = app.agents.get_mut(&agent_id) {
             agent.scrollback.push_block(RenderBlock::System(
                 crate::scrollback::blocks::SystemMessageBlock::new(format!(
-                    "Please check your usage on {url}"
+                    "Native xAI usage: {url}"
                 )),
             ));
         }
@@ -431,8 +484,20 @@ pub(super) fn append_consumer_billing_surface(app: &mut AppView, agent_id: Agent
     }]
 }
 
-/// `/usage manage`: open consumer billing. No-op when the surface is hidden.
+/// `/usage manage`: only native Grok may open native xAI consumer billing.
 pub(super) fn dispatch_manage_billing(app: &mut AppView) -> Vec<Effect> {
+    let native_billing = match app.active_view {
+        ActiveView::Agent(id) => app.agents.get(&id).is_some_and(|agent| {
+            !agent.chat_kind
+                && UsageProvider::for_models(&agent.session.models).permits_native_billing()
+        }),
+        // Preserve standalone native startup. Polycode's welcome has no active provider.
+        _ => !xai_grok_shell::polycode::enabled(),
+    };
+    if !native_billing {
+        app.show_toast("Native xAI billing is separate; choose an active native Grok session");
+        return vec![];
+    }
     if !app.usage_visible {
         return vec![];
     }
@@ -523,7 +588,7 @@ pub(super) fn notify_session_ready(
 ) {
     notification_service.notify(NotificationEvent {
         kind: NotificationEventKind::SessionReady,
-        title: "Grok".into(),
+        title: "Polycode".into(),
         body: NotificationEventKind::SessionReady.as_str().into(),
         session_id: agent.session.session_id.as_ref().map(|s| s.0.to_string()),
     });

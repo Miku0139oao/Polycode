@@ -1,12 +1,15 @@
 # Your First Prompt
 
-Grok Build is a conversation with an agent that can read your code, run
+Polycode is a conversation with an agent that can read your code, run
 commands, and edit files — right here in your terminal.
 
-Type what you want and press `Enter`. Grok streams its work into the
+Type what you want and press `Enter`. The active agent streams its work into the
 **scrollback** above the prompt: responses, shell commands, file edits.
 
-## Keep typing while Grok works
+Use `/provider` to choose ChatGPT, Cursor, or native Grok, and `/login` to
+sign in. Changing providers keeps the native tools and permission controls.
+
+## Keep typing while the agent works
 
 While a turn is running, `Enter` **queues** your next message instead of
 interrupting. Change your mind? Press `Enter` on the empty prompt to stop

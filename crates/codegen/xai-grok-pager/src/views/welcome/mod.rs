@@ -417,11 +417,11 @@ impl WelcomeLayout {
 
 /// Controls what the version badge renders.
 pub(super) enum VersionBadgeMode<'a> {
-    /// Full badge: team | tier | api_key | **Grok Build** VERSION+channel (right-aligned).
+    /// Full badge: team | tier | api_key | **Polycode** VERSION+channel (right-aligned).
     Full { subscription_tier: Option<&'a str> },
     /// Hero footer: team | api_key | channel (right-aligned, gray).
     HeroFooter,
-    /// Hero inline: **Grok Build**  VERSION (left-aligned).
+    /// Hero inline: **Polycode**  VERSION (left-aligned).
     HeroInline,
 }
 
@@ -478,7 +478,7 @@ pub(super) fn render_version_badge(
     match &mode {
         VersionBadgeMode::Full { .. } => {
             spans.push(Span::styled(
-                "Grok Build  ",
+                "Polycode  ",
                 Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD),
@@ -498,7 +498,7 @@ pub(super) fn render_version_badge(
         }
         VersionBadgeMode::HeroInline => {
             spans.push(Span::styled(
-                "Grok Build  ",
+                "Polycode  ",
                 Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD),
@@ -926,7 +926,7 @@ fn render_welcome_blocked(
 
 /// Render the folder-trust question.
 /// Mirrors [`render_welcome_blocked`]'s stacked layout (logo, message, menu, version badge).
-/// Here the message is a multi-line block showing the workspace path and the warning that Grok Build may run or modify contents in this directory.
+/// Here the message is a multi-line block showing the workspace path and the warning that Polycode may run or modify contents in this directory.
 /// The y/N answer is handled by the welcome input interceptor, so this only paints; `menu_rects` are returned for parity with the other welcome arms.
 fn render_welcome_trust(
     content_area: Rect,
@@ -952,7 +952,7 @@ fn render_welcome_trust(
         Line::default(),
         // Two lines so the warning never clips at narrow / compact widths (a single ~78-char line would truncate "...posing security risks")
         Line::from(Span::styled(
-            "Grok Build may run or modify contents in this directory,",
+            "Polycode may run or modify contents in this directory,",
             Style::default().fg(theme.gray),
         ))
         .alignment(Alignment::Center),
@@ -2688,8 +2688,15 @@ mod tests {
                 "badge must not label the product: {rendered:?}"
             );
         }
-        assert!(full.contains("Grok Build"), "full badge: {full:?}");
-        assert!(inline.contains("Grok Build"), "inline badge: {inline:?}");
+        assert!(full.contains("Polycode"), "full badge: {full:?}");
+        assert!(inline.contains("Polycode"), "inline badge: {inline:?}");
+        for rendered in [&full, &inline] {
+            assert!(
+                !rendered.contains("Grok Build"),
+                "old harness badge: {rendered:?}"
+            );
+            assert!(rendered.contains(xai_grok_version::VERSION));
+        }
         assert!(footer.contains("acme"), "footer keeps the team: {footer:?}");
         assert!(
             !footer.ends_with('\u{2502}'),

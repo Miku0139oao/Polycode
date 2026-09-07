@@ -5,6 +5,9 @@
 //! `c` and `y` stay as programmatic copy.
 //! The modal opens with loading placeholders; the task-result handlers fill the slots in as the fetches land.
 
+mod provider;
+pub(crate) use provider::UsageProvider;
+
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -65,6 +68,9 @@ impl UsageInfoTab {
 pub struct UsageInfoContext {
     /// Session ID for the copy shortcut (`None` before the session starts).
     pub session_id: Option<String>,
+    /// Identity of the active registered model, not the provider-picker selection.
+    pub(crate) provider: UsageProvider,
+    pub(crate) active_model: Option<String>,
     /// False for team/enterprise accounts, which have no consumer billing.
     pub usage_visible: bool,
     /// True for gateway chat sessions, which have no Build coding credits.
@@ -799,22 +805,46 @@ fn usage_limit_lines(
     balance: Option<&CreditBalance>,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut lines: Vec<Line<'static>> = state
+        .ctx
+        .provider
+        .heading(state.ctx.active_model.as_deref())
+        .into_iter()
+        .map(|row| plain(theme, row))
+        .collect();
+    lines.push(Line::default());
 
-    if state.ctx.chat_kind {
+    if !state.ctx.provider.permits_native_billing() {
+        // Never render cached xAI credits, native plan tiers, redirects, loading,
+        // or billing errors as a subscription provider's allowance.
+        lines.extend(
+            state
+                .ctx
+                .provider
+                .unavailable_lines()
+                .into_iter()
+                .map(|row| muted_line(theme, row)),
+        );
+    } else if state.ctx.chat_kind {
         // Gateway chat sessions have no Build coding credits to show.
     } else if !state.ctx.usage_visible {
-        lines.push(muted_line(theme, "Usage limits are managed by your team."));
+        lines.push(muted_line(
+            theme,
+            "Native xAI limits are managed by your team.",
+        ));
     } else if let Some(url) = &state.ctx.billing_redirect_url {
-        lines.push(plain(theme, format!("Please check your usage on {url}")));
+        lines.push(plain(theme, format!("Native xAI usage: {url}")));
     } else if let Some(bal) = balance {
         lines.extend(allowance_lines(state, bal, theme));
     } else if let Some(error) = &state.billing_error {
-        lines.push(muted_line(theme, format!("Couldn't load usage: {error}")));
+        lines.push(muted_line(
+            theme,
+            format!("Couldn't load native xAI usage: {error}"),
+        ));
     } else if state.billing_loading {
-        lines.push(muted_line(theme, "Loading usage\u{2026}"));
+        lines.push(muted_line(theme, "Loading native xAI usage\u{2026}"));
     } else {
-        lines.push(muted_line(theme, "No billing data available."));
+        lines.push(muted_line(theme, "Native xAI billing data: unavailable."));
     }
 
     if let Some(usage_text) = &state.session_usage_text {
@@ -846,8 +876,8 @@ fn allowance_lines(
 
     // "Weekly limit", "Monthly limit", or "Usage", plus the plan name
     let header = match &state.ctx.subscription_tier {
-        Some(tier) => format!("{} ({tier})", bal.usage_label()),
-        None => bal.usage_label().to_string(),
+        Some(tier) => format!("Native xAI · {} ({tier})", bal.usage_label()),
+        None => format!("Native xAI · {}", bal.usage_label()),
     };
     lines.push(Line::styled(header, header_style(theme)));
     lines.push(Line::default());
@@ -1001,6 +1031,8 @@ mod tests {
             UsageInfoTab::UsageLimit,
             UsageInfoContext {
                 session_id: Some("sid-123".to_string()),
+                provider: UsageProvider::NativeGrok,
+                active_model: Some("grok-4.5".to_string()),
                 usage_visible: true,
                 chat_kind: false,
                 billing_redirect_url: None,
@@ -1056,8 +1088,10 @@ mod tests {
         let theme = Theme::current();
         let lines = usage_limit_lines(&state, Some(&bal), &theme);
         let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-        assert_eq!(text[0], "Weekly limit (SuperGrok)");
-        assert!(text[2].ends_with("50%"), "bar row: {:?}", text[2]);
+        assert_eq!(text[0], "Active provider: Grok (native xAI)");
+        assert_eq!(text[1], "Active model: grok-4.5");
+        assert_eq!(text[3], "Native xAI · Weekly limit (SuperGrok)");
+        assert!(text[5].ends_with("50%"), "bar row: {:?}", text[5]);
         assert!(text.iter().any(|l| l.contains("Resets: May 29, 00:00")));
         assert!(text.iter().any(|l| l == "Pay as you go: Enabled"));
         assert!(
@@ -1076,20 +1110,125 @@ mod tests {
         let mut state = state_with_session();
         state.billing_loading = true;
         let lines = usage_limit_lines(&state, None, &theme);
-        assert!(lines[0].to_string().contains("Loading usage"));
+        assert!(lines[3].to_string().contains("Loading native xAI usage"));
 
         state.ctx.billing_redirect_url = Some("https://x.example/usage".to_string());
         let lines = usage_limit_lines(&state, None, &theme);
-        assert!(lines[0].to_string().contains("https://x.example/usage"));
+        assert!(lines[3].to_string().contains("https://x.example/usage"));
 
         state.ctx.usage_visible = false;
         let lines = usage_limit_lines(&state, None, &theme);
-        assert!(lines[0].to_string().contains("managed by your team"));
+        assert!(lines[3].to_string().contains("managed by your team"));
 
         // Gateway chat sessions show no billing at all
         state.ctx.chat_kind = true;
         let lines = usage_limit_lines(&state, None, &theme);
-        assert!(lines[0].to_string().contains("Loading session usage"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.to_string().contains("Loading session usage"))
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.to_string().contains("Weekly limit"))
+        );
+    }
+
+    #[test]
+    fn subscription_render_never_relabels_cached_native_billing() {
+        use xai_grok_shell::polycode::ProviderId;
+        let theme = Theme::current();
+        let balance = CreditBalance {
+            usage_pct: 88.0,
+            effective_usage_pct: 88.0,
+            period_end_display: Some("NATIVE RESET".into()),
+            pay_as_you_go: true,
+            on_demand_cap_cents: Some(10_000),
+            on_demand_used_cents: Some(5_000),
+            prepaid_balance_cents: Some(-12_345),
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            is_unified_billing_user: None,
+        };
+        for (provider, label, model) in [
+            (ProviderId::Codex, "ChatGPT", "codex/reported-model"),
+            (ProviderId::Cursor, "Cursor", "cursor/reported-model"),
+        ] {
+            for (width, height) in [(80, 24), (120, 40)] {
+                let area = Rect::new(0, 0, width, height);
+                let mut buf = Buffer::empty(area);
+                let mut state = state_with_session();
+                state.ctx.provider = UsageProvider::Subscription(provider);
+                state.ctx.active_model = Some(model.into());
+                // Deliberately contaminate all native mirrors; none may leak into this page.
+                state.ctx.billing_redirect_url = Some("https://native.example/billing".into());
+                state.billing_error = Some("NATIVE ERROR".into());
+                state.billing_loading = true;
+                state.session_usage_text = Some("Session usage: no model calls yet.".into());
+                render_usage_modal(&mut buf, area, &mut state, Some(&balance), false, &theme);
+                let text: String = (0..area.height)
+                    .map(|y| {
+                        (0..area.width)
+                            .map(|x| buf[(x, y)].symbol())
+                            .collect::<String>()
+                            + "\n"
+                    })
+                    .collect();
+                for needle in [
+                    format!("Active provider: {label}"),
+                    format!("Active model: {model}"),
+                    "Subscription quota: unavailable".into(),
+                    "Remaining balance: unavailable".into(),
+                    "Not provided by a supported provider API.".into(),
+                ] {
+                    assert!(text.contains(&needle), "missing {needle:?}:\n{text}");
+                }
+                for forbidden in [
+                    "SuperGrok",
+                    "88%",
+                    "$123.45",
+                    "Weekly limit",
+                    "NATIVE RESET",
+                    "NATIVE ERROR",
+                    "native.example",
+                    "Pay as you go",
+                    "$0",
+                ] {
+                    assert!(
+                        !text.contains(forbidden),
+                        "native billing leaked {forbidden:?}:\n{text}"
+                    );
+                }
+                assert_eq!(
+                    state.window.tab_rects.len(),
+                    3,
+                    "native modal navigation remains"
+                );
+                assert!(state.window.close_button_rect.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_provider_fails_closed_without_fake_allowance() {
+        let mut state = state_with_session();
+        state.ctx.provider = UsageProvider::Unavailable;
+        state.billing_loading = true;
+        let text = usage_limit_lines(&state, None, &Theme::current())
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("Provider quota and balance: unavailable"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Native xAI billing was not queried."),
+            "{text}"
+        );
+        assert!(!text.contains("Loading native"), "{text}");
+        assert!(!text.contains("0%"), "{text}");
     }
 
     #[test]

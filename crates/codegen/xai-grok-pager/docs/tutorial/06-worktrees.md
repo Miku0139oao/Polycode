@@ -1,6 +1,6 @@
 # Parallel Work: Worktrees
 
-Want Grok working on a feature while you (or another Grok session) work on
+Want Polycode working on a feature while you (or another Polycode session) work on
 something else in the same repo? **Git worktrees** give each session its own
 isolated checkout — no stepping on each other's changes, no stashing.
 
@@ -20,7 +20,7 @@ isolated checkout — no stepping on each other's changes, no stashing.
 
 ## Why this is great
 
-- Run two or three Grok sessions on the same repo simultaneously.
+- Run two or three Polycode sessions on the same repo simultaneously.
 - Experiments stay isolated — if a change doesn't work out, your main
   checkout is untouched.
 - When the work is done, apply the changes back like any git branch.

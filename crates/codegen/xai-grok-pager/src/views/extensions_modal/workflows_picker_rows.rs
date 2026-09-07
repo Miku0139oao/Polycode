@@ -2,7 +2,7 @@ use super::{TabDataState, WorkflowInfo, cmp_str_ci, fuzzy_matches};
 
 /// Placeholder row when the catalog comes back empty (also what a disabled workflows feature looks like on the wire, hence the hedged phrasing).
 pub(super) const WORKFLOWS_EMPTY_PLACEHOLDER: &str =
-    "No workflows available. Ask Grok to help make you one!";
+    "No workflows available. Ask Polycode to help make one.";
 
 /// One picker row for the Workflows tab (flat, browse-only catalog).
 #[derive(Debug)]

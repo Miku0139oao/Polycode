@@ -404,7 +404,7 @@ pub struct LeaderArgs {
 #[command(
     name = "grok",
     version = xai_grok_version::full_version(),
-    about = "Polycode — Grok Build TUI with Codex and Cursor backends",
+    about = "Polycode — native workspace for ChatGPT, Cursor and Grok",
     disable_version_flag = true,
     next_display_order = None,
     help_template = "\

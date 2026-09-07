@@ -1622,6 +1622,108 @@ fn show_usage_opens_modal_on_usage_limit_tab_with_fetches() {
 }
 
 #[test]
+fn subscription_usage_tabs_fetch_only_local_session_data() {
+    use crate::views::usage_modal::{UsageInfoTab, UsageProvider};
+    use xai_grok_shell::polycode::ProviderId;
+    for provider in [
+        UsageProvider::Subscription(ProviderId::Codex),
+        UsageProvider::Subscription(ProviderId::Cursor),
+        UsageProvider::Unavailable,
+    ] {
+        for tab in UsageInfoTab::ALL {
+            let mut app = test_app_with_agent();
+            app.usage_visible = true;
+            app.subscription_tier = Some("SuperGrok".into());
+            app.agents
+                .get_mut(&AgentId(0))
+                .unwrap()
+                .session
+                .models
+                .current = Some("opaque-active-id".into());
+            let effects =
+                super::super::status::open_usage_info_modal_for_provider(&mut app, tab, provider);
+            assert!(
+                matches!(
+                    effects.as_slice(),
+                    [
+                        Effect::ShowContextInfo { .. },
+                        Effect::ShowSessionInfo { .. },
+                        Effect::FetchSessionUsage { .. },
+                    ]
+                ),
+                "subscription/unknown page must never fetch billing: {effects:?}"
+            );
+            let state = usage_modal_state(&app);
+            assert_eq!(state.ctx.provider, provider);
+            assert_eq!(state.ctx.active_model.as_deref(), Some("opaque-active-id"));
+            assert!(state.ctx.subscription_tier.is_none());
+            assert!(state.ctx.billing_redirect_url.is_none());
+            assert!(!state.billing_loading);
+        }
+    }
+}
+
+#[test]
+fn subscription_minimal_usage_never_fetches_or_links_native_billing() {
+    use crate::views::usage_modal::UsageProvider;
+    use xai_grok_shell::polycode::ProviderId;
+    for provider in [
+        UsageProvider::Subscription(ProviderId::Codex),
+        UsageProvider::Subscription(ProviderId::Cursor),
+        UsageProvider::Unavailable,
+    ] {
+        for redirect in [None, Some("https://native.example/billing".into())] {
+            let mut app = test_app_with_agent();
+            app.screen_mode = crate::app::ScreenMode::Minimal;
+            app.usage_visible = true;
+            app.usage_billing_redirect_url = redirect;
+            let before = agent_scrollback_len(&app);
+            let effects = super::super::status::append_consumer_billing_surface_for_provider(
+                &mut app,
+                AgentId(0),
+                provider,
+            );
+            assert!(
+                effects.is_empty(),
+                "no subscription billing side effects: {effects:?}"
+            );
+            assert_eq!(
+                agent_scrollback_len(&app),
+                before,
+                "no native billing redirect"
+            );
+        }
+    }
+}
+
+#[test]
+fn changing_usage_provider_reopens_with_a_new_generation_and_drops_old_result() {
+    use crate::views::usage_modal::{UsageInfoTab, UsageProvider};
+    use xai_grok_shell::polycode::ProviderId;
+    let mut app = test_app_with_agent();
+    dispatch(Action::ShowUsage, &mut app);
+    let old_nonce = current_usage_nonce(&app);
+    let effects = super::super::status::open_usage_info_modal_for_provider(
+        &mut app,
+        UsageInfoTab::UsageLimit,
+        UsageProvider::Subscription(ProviderId::Cursor),
+    );
+    assert_eq!(effects.len(), 3, "only local session fetches");
+    assert_ne!(old_nonce, current_usage_nonce(&app));
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionUsageFailed {
+            agent_id: AgentId(0),
+            session_id: "test-session".into(),
+            error: "stale native result".into(),
+            nonce: old_nonce,
+        }),
+        &mut app,
+    );
+    assert!(usage_modal_state(&app).session_usage_text.is_none());
+    assert!(!usage_modal_state(&app).billing_loading);
+}
+
+#[test]
 fn show_context_info_retabs_open_modal_without_refetching() {
     let mut app = test_app_with_agent();
     dispatch(Action::ShowUsage, &mut app);

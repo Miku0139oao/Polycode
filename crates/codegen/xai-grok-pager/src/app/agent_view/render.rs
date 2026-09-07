@@ -2621,7 +2621,9 @@ impl AgentView {
             crate::views::credit_bar::usage_warning_for_session(
                 bal,
                 self.auto_topup.as_ref(),
-                self.billing_surface_visible,
+                self.billing_surface_visible
+                    && crate::views::usage_modal::UsageProvider::for_models(&self.session.models)
+                        .permits_native_billing(),
                 self.chat_kind,
             )
         });
