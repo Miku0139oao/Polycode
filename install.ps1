@@ -1,9 +1,11 @@
 <# Per-user native Polycode installer: Windows PowerShell 5.1+ and existing WSL
-x86_64 with glibc >= 2.43 (currently Arch Linux), zlib, libgcc and Windows interop.
+x86_64 with glibc >= 2.43 (Arch Linux), zlib, libgcc, libstdc++, ICU78 and Windows interop.
 No provider login, browser, external agent CLI, Rust compiler or administrator needed.
 -ArtifactDirectory installs local UNPUBLISHED CANDIDATE assets (still hash checked).
 Requires -AllowCandidate: local preflight never means release/live acceptance.
-Without -ArtifactDirectory, only a published-release manifest is accepted.
+Without -ArtifactDirectory, an immutable candidate requires separate parent
+release authorization + PASS readiness, both bound to the exact accepted bytes.
+Classification never means published. Sidecars do not repack the runtime.
 -InstallRoot/-LinuxRoot allow isolated installs; -NoPath never changes either PATH.
 -StageOnly verifies/stages a release without changing the active launcher or PATH.
 Checksums detect corruption, not a compromised release publisher.
@@ -21,7 +23,23 @@ param(
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$assets = @('polycode-wsl-x64.gz', 'polycode-bun-wsl-x64.gz', 'polycode-runtime.zip', 'manifest.json')
+$assets = @('polycode-wsl-x64.gz', 'polycode-bun-wsl-x64.gz', 'polycode-runtime.zip', 'manifest.json', 'install.ps1')
+# Kept in lockstep with release-readiness.mjs by a contract test. Self-contained
+# installer: never trusts a downloaded policy to remove a necessary gate.
+$releasePolicyVersion = '2026-09-07.2'
+$requiredReleaseGates = @(
+    'oauth-chatgpt', 'oauth-cursor',
+    'task-inherit-chatgpt', 'task-result-chatgpt', 'task-resume-chatgpt',
+    'task-inherit-cursor', 'task-result-cursor', 'task-resume-cursor',
+    'session-resume-chatgpt', 'session-resume-cursor',
+    'prompt-identity-native', 'prompt-identity-chatgpt', 'prompt-identity-cursor',
+    'native-reasoning-effort-capability', 'native-reasoning-effort-ui',
+    'native-reasoning-effort-wire', 'native-reasoning-effort-inheritance', 'native-reasoning-effort-resume',
+    'busy-queued-model-switch-safe-commit',
+    'tool-reject', 'tool-allow-once', 'native-billing-deny', 'native-billing-allow',
+    'browser-handoff', 'installed-entrypoint', 'provider-aware-usage', 'tui-branding',
+    'regression', 'hash-provenance', 'final-binary-profile'
+)
 $id = $Version + '-' + [Guid]::NewGuid().ToString('N')
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('polycode-install-' + $id)
 $root = [IO.Path]::GetFullPath($InstallRoot)
@@ -38,6 +56,44 @@ function Get-Sha256([string]$Path) {
     $stream = [IO.File]::OpenRead($Path); $hash = [Security.Cryptography.SHA256]::Create()
     try { return [BitConverter]::ToString($hash.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
     finally { $hash.Dispose(); $stream.Dispose() }
+}
+function Assert-DistributionAuthorization($Manifest, [string]$CandidateHash) {
+    $authorization = Get-Content -LiteralPath (Join-Path $temp 'release-authorization.json') -Raw | ConvertFrom-Json
+    $ready = Get-Content -LiteralPath (Join-Path $temp 'release-readiness.json') -Raw | ConvertFrom-Json
+    if ($Manifest.schemaVersion -ne 2 -or $Manifest.classification -cne 'immutable-candidate' -or $Manifest.PSObject.Properties.Name -contains 'status' -or $Manifest.provenance -cne 'build-report') { throw 'Remote installation requires a provenance-attested immutable candidate; legacy or relabeled manifests cannot be promoted.' }
+    if ($authorization.schemaVersion -ne 1 -or $authorization.kind -cne 'polycode-distribution-authorization' -or $authorization.decision -cne 'AUTHORIZED' -or $authorization.scope -cne 'public-distribution' -or
+        $authorization.parent.role -cne 'parent' -or [string]::IsNullOrWhiteSpace($authorization.parent.reviewer) -or $authorization.version -cne $Version -or
+        $authorization.candidateSha256 -cne $CandidateHash -or $authorization.nativeSha256 -cne $Manifest.native.sha256 -or
+        $authorization.checksumsSha256 -cne (Get-Sha256 (Join-Path $temp 'SHA256SUMS')) -or
+        $authorization.readinessSha256 -cne (Get-Sha256 (Join-Path $temp 'release-readiness.json'))) { throw 'Missing, FAIL or stale release authorization; no installation is authorized.' }
+    if ($ready.schemaVersion -ne 2 -or $ready.kind -cne 'polycode-readiness' -or $ready.policyVersion -cne $releasePolicyVersion -or $ready.status -cne 'PASS' -or @($ready.errors).Count -ne 0 -or
+        $ready.publicationAuthorized -isnot [bool] -or $ready.publicationAuthorized -ne $false -or $ready.publicUrlGate -cne 'DEFERRED_UNTIL_PUBLICATION' -or
+        $ready.candidateSha256 -cne $CandidateHash -or $ready.nativeSha256 -cne $Manifest.native.sha256 -or
+        $ready.acceptanceSha256 -cnotmatch '^[a-f0-9]{64}$' -or $ready.parentAttestationSha256 -cnotmatch '^[a-f0-9]{64}$' -or
+        $authorization.acceptanceSha256 -cne $ready.acceptanceSha256 -or $authorization.parentAttestationSha256 -cne $ready.parentAttestationSha256) { throw 'Missing, FAIL or stale acceptance readiness in release authorization.' }
+    $seenGates = @{}
+    if (@($ready.gates).Count -ne $requiredReleaseGates.Count) { throw 'Incomplete required release acceptance gates.' }
+    foreach ($gate in $ready.gates) {
+        if ($requiredReleaseGates -cnotcontains $gate.id -or $seenGates.ContainsKey($gate.id) -or $gate.status -cne 'PASS' -or $gate.verified -isnot [bool] -or $gate.verified -ne $true) { throw 'Missing, FAIL or duplicate required release acceptance gate.' }
+        $seenGates[$gate.id] = $true
+    }
+    $profile = $Manifest.native.profile
+    if (@('2', '3', 's', 'z') -cnotcontains [string]$profile.opt_level -or $profile.debug_assertions -isnot [bool] -or $profile.debug_assertions -ne $false -or $profile.test -isnot [bool] -or $profile.test -ne $false -or $Manifest.native.transformed -isnot [bool] -or $Manifest.native.transformed -ne $false) { throw 'Development or transformed binary is not authorized for remote release installation.' }
+    $checkedAt = [DateTimeOffset]::Parse($ready.checkedAt, [Globalization.CultureInfo]::InvariantCulture)
+    $authorizedAt = [DateTimeOffset]::Parse($authorization.parent.authorizedAt, [Globalization.CultureInfo]::InvariantCulture)
+    if ($checkedAt -gt [DateTimeOffset]::UtcNow.AddMinutes(1) -or $authorizedAt -gt [DateTimeOffset]::UtcNow.AddMinutes(1) -or $authorizedAt -lt $checkedAt -or $authorizedAt -gt $checkedAt.AddDays(7)) { throw 'Stale or invalid release authorization timeline.' }
+    # Authorization must be timely at promotion; an already authorized immutable
+    # release does not expire seven days after publication.
+    $expectedAssets = @('install.ps1', 'polycode-bun-wsl-x64.gz', 'polycode-runtime.zip', 'polycode-wsl-x64.gz')
+    $seenAssets = @{}
+    if (@($Manifest.artifacts).Count -ne $expectedAssets.Count) { throw 'Incomplete authorized asset inventory.' }
+    foreach ($asset in $Manifest.artifacts) {
+        if ($expectedAssets -cnotcontains $asset.path -or $seenAssets.ContainsKey($asset.path)) { throw 'Unsafe or duplicate authorized asset path.' }
+        $seenAssets[$asset.path] = $true
+        $file = Join-Path $temp $asset.path
+        if ($asset.sha256 -cne (Get-Sha256 $file) -or $asset.bytes -ne (Get-Item -LiteralPath $file).Length) { throw 'Authorized asset bytes changed; repacking is forbidden.' }
+    }
+    if (-not $PSCommandPath -or (Get-Sha256 $PSCommandPath) -cne (Get-Sha256 (Join-Path $temp 'install.ps1'))) { throw 'Run the exact accepted install.ps1 file, not an inline or modified installer.' }
 }
 function Quote-Argument([string]$Value) {
     if ($Value -and $Value -notmatch '[\s"]') { return $Value }
@@ -106,6 +162,13 @@ try {
     $binaryDir = $LinuxRoot.TrimEnd('/') + '/' + $id
     New-Item -ItemType Directory -Path $temp | Out-Null
     $base = "https://github.com/Miku0139oao/Polycode/releases/download/$Version"
+    if (-not $ArtifactDirectory) {
+        # Same version-specific trusted publisher origin as the assets. These are
+        # separate metadata, never inserted into ZIP/SHA256SUMS after acceptance.
+        foreach ($sidecar in @('release-readiness.json', 'release-authorization.json')) {
+            Invoke-WebRequest -UseBasicParsing "$base/$sidecar" -OutFile (Join-Path $temp $sidecar)
+        }
+    }
     foreach ($asset in @('SHA256SUMS') + $assets) {
         $destination = Join-Path $temp $asset
         if ($ArtifactDirectory) { Copy-Item -LiteralPath (Join-Path $ArtifactDirectory $asset) -Destination $destination }
@@ -127,12 +190,17 @@ try {
     Expand-SafeZip (Join-Path $temp 'polycode-runtime.zip') $runtimeStage
     $manifest = Get-Content -LiteralPath (Join-Path $runtimeStage 'release-manifest.json') -Raw | ConvertFrom-Json
     if ($manifest.version -ne $Version -or $manifest.architecture -ne 'x86_64' -or $manifest.minimumGlibc -ne '2.43' -or $manifest.protocol -ne 'native-model-bridge') { throw 'Runtime release manifest does not match the requested native release.' }
-    if ($manifest.status -eq 'unpublished-candidate') {
-        if (-not $ArtifactDirectory -or -not $AllowCandidate) { throw 'Unpublished candidate requires local -ArtifactDirectory and explicit -AllowCandidate. No release/live acceptance is implied.' }
-        Write-Warning 'UNPUBLISHED CANDIDATE: OAuth/live gates are not accepted; executable may be development-profile.'
-    } elseif ($manifest.status -ne 'published-release') { throw 'Unknown release status.' }
     $outer = Get-Content -LiteralPath (Join-Path $temp 'manifest.json') -Raw | ConvertFrom-Json
-    if ($outer.schemaVersion -ne 1 -or $outer.status -ne $manifest.status -or $outer.native.sha256 -ne $manifest.native.sha256 -or $outer.bun.sha256 -ne $manifest.bun.sha256) { throw 'Candidate manifest identity mismatch.' }
+    $immutable = $manifest.schemaVersion -eq 2 -and $manifest.classification -ceq 'immutable-candidate' -and $manifest.PSObject.Properties.Name -notcontains 'status'
+    $legacyLocal = $ArtifactDirectory -and $manifest.schemaVersion -eq 1 -and $manifest.status -ceq 'unpublished-candidate'
+    if (-not $immutable -and -not $legacyLocal) { throw 'Unknown or relabeled candidate classification.' }
+    if ($outer.schemaVersion -ne $manifest.schemaVersion -or $outer.classification -cne $manifest.classification -or $outer.status -cne $manifest.status -or $outer.native.sha256 -cne $manifest.native.sha256 -or $outer.bun.sha256 -cne $manifest.bun.sha256) { throw 'Candidate manifest identity mismatch.' }
+    if ($ArtifactDirectory) {
+        if (-not $AllowCandidate) { throw 'Local candidate requires explicit -AllowCandidate. Sidecars cannot bypass local opt-in; no release/live acceptance is implied.' }
+        Write-Warning 'LOCAL CANDIDATE PREFLIGHT: publication and OAuth/live acceptance are not implied.'
+    } else {
+        Assert-DistributionAuthorization $outer (Get-Sha256 (Join-Path $temp 'manifest.json'))
+    }
     $runtimeFiles = @(Get-ChildItem -LiteralPath $runtimeStage -Recurse -File)
     if ($runtimeFiles.Count -ne @($outer.files).Count) { throw 'Runtime file inventory mismatch.' }
     $inventorySeen = @{}
@@ -143,6 +211,12 @@ try {
         if (-not (Test-Path -LiteralPath $actual -PathType Leaf) -or (Get-Sha256 $actual) -ne $file.sha256 -or (Get-Item -LiteralPath $actual).Length -ne $file.bytes) { throw "Runtime file integrity mismatch: $($file.path)" }
     }
     Copy-Item -LiteralPath (Join-Path $temp 'manifest.json') -Destination (Join-Path $runtimeStage 'candidate-manifest.json')
+    if (-not $ArtifactDirectory) {
+        foreach ($sidecar in @('release-readiness.json', 'release-authorization.json')) {
+            if (Test-Path -LiteralPath (Join-Path $runtimeStage $sidecar)) { throw 'Distribution metadata must not be embedded inside the accepted runtime ZIP.' }
+            Copy-Item -LiteralPath (Join-Path $temp $sidecar) -Destination (Join-Path $runtimeStage $sidecar)
+        }
+    }
     # Never overwrite even the same version: both filesystems use a fresh release ID.
     Wsl @('mkdir', '-p', '--', $LinuxRoot) | Out-Null
     Wsl @('mkdir', '--', $binaryDir) | Out-Null

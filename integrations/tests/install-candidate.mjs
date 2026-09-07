@@ -48,7 +48,8 @@ try {
   oldWindows = snapshot(protectedWindows); oldLinux = linuxSnapshot();
   const manifest = load(join(candidate, 'manifest.json'));
   report.candidateSha256 = sha(readFileSync(join(candidate, 'manifest.json'))); report.nativeSha256 = manifest.native.sha256;
-  assert.equal(manifest.provenance, 'build-report'); assert.equal(manifest.status, 'unpublished-candidate');
+  assert.equal(manifest.provenance, 'build-report');
+  assert.ok((manifest.schemaVersion === 2 && manifest.classification === 'immutable-candidate' && !Object.hasOwn(manifest, 'status')) || (manifest.schemaVersion === 1 && manifest.status === 'unpublished-candidate'), 'Only immutable or legacy local preparation candidates are accepted');
   const sums = new Map();
   for (const line of readFileSync(join(candidate, 'SHA256SUMS'), 'ascii').trim().split(/\r?\n/)) {
     const match = /^([a-f0-9]{64})  ([A-Za-z0-9._-]+)$/.exec(line); assert.ok(match); assert.ok(!sums.has(match[2])); sums.set(match[2], match[1]);

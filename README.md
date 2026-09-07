@@ -63,8 +63,10 @@ acceptance remain open. The available executable is dev opt0 with debug assertio
 not release optimized. All necessary gates and parent review must pass before any
 publication; see the [fail-closed procedure](integrations/RELEASE_READINESS.md).
 
-For maintainers with the locally prepared candidate assets, this one command uses
-fresh Windows/WSL roots and changes neither PATH nor existing installations:
+For maintainers with the historical c037/e8 preparation assets, this command uses
+fresh Windows/WSL roots and changes neither PATH nor existing installations.
+**That schema1 candidate remains untouched and is not promotable**; final Rust/JS
+changes require a new package and acceptance:
 
 ```powershell
 $id=[guid]::NewGuid().ToString('N'); & D:/ai-harness/native-release-candidate-18d/install.ps1 -ArtifactDirectory D:/ai-harness/native-release-candidate-18d -AllowCandidate -InstallRoot "D:/ai-harness/polycode-candidate-install-$id" -LinuxRoot "/tmp/polycode-candidate-install-$id" -NoPath
@@ -77,10 +79,12 @@ This is local candidate installation, **not OAuth/live acceptance**. Add
 **Deferred public one-command flow (NOT validated; assets are not published):**
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/Miku0139oao/Polycode/releases/download/v0.2.0/install.ps1))) -Version v0.2.0
+& { $ErrorActionPreference='Stop'; $p=Join-Path $env:TEMP ('polycode-install-'+[guid]::NewGuid().ToString('N')+'.ps1'); iwr -UseBasicParsing https://github.com/Miku0139oao/Polycode/releases/download/v0.2.0/install.ps1 -OutFile $p; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $p -Version v0.2.0 }
 ```
 
-That command downloads and executes a version-specific installer; review it first.
+That command downloads and executes the exact version-specific installer file;
+review it first. Remote installation also requires matching parent authorization
+and complete PASS readiness sidecars. It cannot be enabled with `-AllowCandidate`.
 Its final public-URL gate is **DEFERRED_UNTIL_PUBLICATION**, not PASS. Do not remove
 this warning until the parent has authorized a release and verified the actual
 public command against the published assets in another fresh install root.
@@ -114,8 +118,16 @@ public installation adds `polycode` to PATH; `-NoPath` does not. An already-open
 terminal may need its PATH refreshed after installation; authentication/provider
 switching must not require a TUI restart. Candidate assets are
 `polycode-wsl-x64.gz`, `polycode-bun-wsl-x64.gz`, `polycode-runtime.zip`,
-`install.ps1`, `manifest.json`, and `SHA256SUMS`. The bundled service is a model
-transport for the native engine, not an external replacement agent. Checksums
+`install.ps1`, `manifest.json`, and `SHA256SUMS`. New schema2 packages have immutable
+classification, not publication status. After all actual acceptance and separate
+parent permission, promotion may add `release-readiness.json` and
+`release-authorization.json` **without changing any of those six accepted files**.
+Nothing has been promoted or published here. Parent session resume (distinct from
+child Task resume), prompt identity for all three providers, native reasoning
+effort capability/UI/wire/inheritance/resume and busy queued model-switch safe
+commit are now explicit required gates in the [procedure](integrations/RELEASE_READINESS.md).
+The bundled service is a model transport for the native engine, not an external
+replacement agent. Checksums
 protect against corruption, not a compromised publisher. This WSL package does
 not establish native Windows sandbox parity.
 

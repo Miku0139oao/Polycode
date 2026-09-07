@@ -1,5 +1,12 @@
 # Actual 18d preparation candidate — NOT a release
 
+**Historical c0371e3/schema1 evidence below, not current final acceptance.** The
+candidate directory and its six files remain untouched. The followup adds required
+behavioral gates and a schema2 immutable-promotion contract; schema1 cannot be
+promoted by relabeling. See [current procedure](RELEASE_READINESS.md) and
+[followup report](PACKAGE_PROMOTION_FOLLOWUP.md). No new actual application package
+or 552MB binary rebuild/recompression was performed for the followup.
+
 Local packaging/installation evidence only. No release, draft, upload, push, tag,
 remote mutation, Rust compilation, agent delegation, PATH/registry change or
 existing-install replacement was performed by this work.

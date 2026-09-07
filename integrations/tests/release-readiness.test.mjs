@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { verifyReadiness, REQUIRED_GATES } from '../release-readiness.mjs';
+import { verifyReadiness, REQUIRED_GATES, POLICY_VERSION } from '../release-readiness.mjs';
 const root = mkdtempSync(join(tmpdir(), 'polycode-readiness-policy-'));
 after(() => rmSync(root, { recursive: true, force: true }));
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -16,7 +16,7 @@ function fixture() {
   const report = join(candidate, 'build-report.json'); put(report, { fixture: true });
   const raw = join(candidate, 'observation.txt'); writeFileSync(raw, 'SYNTHETIC POLICY FIXTURE, NOT LIVE EVIDENCE');
   const evidence = [{ path: raw, sha256: sha(readFileSync(raw)) }];
-  const manifest = { schemaVersion: 1, status: 'unpublished-candidate', provenance: 'build-report', native: { sha256: 'a'.repeat(64), revision: 'b'.repeat(40), transformed: false, buildReportSha256: sha(readFileSync(report)), profile: { opt_level: '3', debug_assertions: false, test: false } }, artifacts: [] };
+  const manifest = { schemaVersion: 2, classification: 'immutable-candidate', provenance: 'build-report', native: { sha256: 'a'.repeat(64), revision: 'b'.repeat(40), transformed: false, buildReportSha256: sha(readFileSync(report)), profile: { opt_level: '3', debug_assertions: false, test: false } }, artifacts: [] };
   for (const path of ['polycode-wsl-x64.gz', 'polycode-bun-wsl-x64.gz', 'polycode-runtime.zip', 'install.ps1']) {
     const bytes = Buffer.from('synthetic ' + path); writeFileSync(join(candidate, path), bytes);
     manifest.artifacts.push({ path, bytes: bytes.length, sha256: sha(bytes) });
@@ -89,4 +89,28 @@ test('development profile is rejected even when a claimed gate says PASS', () =>
 });
 test('fixture-unattested manifests cannot pass', () => {
   const f = fixture(); f.manifest.provenance = 'fixture-unattested'; f.save(); blocked(f, /provenance-attested/);
+});
+test('parent session resume, prompt identity, native effort and queued commit are independent required gates', () => {
+  const added = ['session-resume-chatgpt', 'session-resume-cursor',
+    'prompt-identity-native', 'prompt-identity-chatgpt', 'prompt-identity-cursor',
+    'native-reasoning-effort-capability', 'native-reasoning-effort-ui', 'native-reasoning-effort-wire',
+    'native-reasoning-effort-inheritance', 'native-reasoning-effort-resume', 'busy-queued-model-switch-safe-commit'];
+  for (const id of added) {
+    assert.ok(REQUIRED_GATES.includes(id), id);
+    const f = fixture(); f.document.gates = f.document.gates.filter(g => g.id !== id); f.save(); blocked(f, /partial/);
+    const g = fixture(); g.document.gates.find(gate => gate.id === id).mode = 'mock'; g.save(); blocked(g, /mocks\/fixtures/);
+  }
+  assert.ok(REQUIRED_GATES.includes('task-resume-chatgpt'));
+  assert.ok(REQUIRED_GATES.includes('task-resume-cursor'));
+});
+test('installer embeds the same complete required policy, never trusts a downloaded reduced policy', () => {
+  const installer = readFileSync(new URL('../../install.ps1', import.meta.url), 'utf8');
+  const block = /\$requiredReleaseGates = @\(([\s\S]*?)\n\)/.exec(installer); assert.ok(block);
+  assert.deepEqual([...block[1].matchAll(/'([^']+)'/g)].map(m => m[1]), [...REQUIRED_GATES]);
+  assert.ok(installer.includes(`$releasePolicyVersion = '${POLICY_VERSION}'`));
+});
+test('legacy publication-state manifests cannot be relabeled into immutable acceptance', () => {
+  for (const status of ['unpublished-candidate', 'published-release']) {
+    const f = fixture(); f.manifest.schemaVersion = 1; f.manifest.status = status; delete f.manifest.classification; f.save(); blocked(f, /legacy v1/);
+  }
 });

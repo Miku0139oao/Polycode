@@ -4,10 +4,16 @@ import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import { resolve, dirname, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
+export const POLICY_VERSION = '2026-09-07.2';
 export const REQUIRED_GATES = Object.freeze([
   'oauth-chatgpt', 'oauth-cursor',
   'task-inherit-chatgpt', 'task-result-chatgpt', 'task-resume-chatgpt',
   'task-inherit-cursor', 'task-result-cursor', 'task-resume-cursor',
+  'session-resume-chatgpt', 'session-resume-cursor',
+  'prompt-identity-native', 'prompt-identity-chatgpt', 'prompt-identity-cursor',
+  'native-reasoning-effort-capability', 'native-reasoning-effort-ui',
+  'native-reasoning-effort-wire', 'native-reasoning-effort-inheritance', 'native-reasoning-effort-resume',
+  'busy-queued-model-switch-safe-commit',
   'tool-reject', 'tool-allow-once', 'native-billing-deny', 'native-billing-allow',
   'browser-handoff', 'installed-entrypoint', 'provider-aware-usage', 'tui-branding',
   'regression', 'hash-provenance', 'final-binary-profile',
@@ -29,14 +35,17 @@ function evidenceFiles(evidence, base) {
   }
 }
 export function verifyReadiness({ candidate, acceptance, attestation, now = Date.now() }) {
-  const output = { status: 'BLOCKED', publicationAuthorized: false, publicUrlGate: 'DEFERRED_UNTIL_PUBLICATION', errors: [], gates: [] };
+  const output = { schemaVersion: 2, kind: 'polycode-readiness', policyVersion: POLICY_VERSION, checkedAt: new Date(now).toISOString(), status: 'BLOCKED', publicationAuthorized: false, publicUrlGate: 'DEFERRED_UNTIL_PUBLICATION', errors: [], gates: [] };
   try {
     requireThat(candidate && acceptance && attestation, 'Candidate, acceptance and parent attestation paths are all required');
     const manifestPath = resolve(candidate, 'manifest.json');
     const candidateSha256 = sha(readFileSync(manifestPath));
     output.candidateSha256 = candidateSha256;
     const manifest = json(manifestPath);
-    requireThat(manifest.schemaVersion === 1 && manifest.status === 'unpublished-candidate' && manifest.provenance === 'build-report', 'Not a provenance-attested unpublished candidate');
+    requireThat(manifest.schemaVersion === 2 && manifest.classification === 'immutable-candidate' && !Object.hasOwn(manifest, 'status') && manifest.provenance === 'build-report', 'Not a provenance-attested immutable candidate (legacy v1 preparation is not promotable)');
+    output.nativeSha256 = manifest.native?.sha256;
+    output.acceptanceSha256 = sha(readFileSync(acceptance));
+    output.parentAttestationSha256 = sha(readFileSync(attestation));
     requireThat(/^[a-f0-9]{64}$/.test(manifest.native?.sha256) && /^[a-f0-9]{40}$/.test(manifest.native?.revision) && manifest.native?.transformed === false, 'Missing exact native provenance');
     const assets = ['install.ps1', 'polycode-bun-wsl-x64.gz', 'polycode-runtime.zip', 'polycode-wsl-x64.gz'];
     requireThat(Array.isArray(manifest.artifacts) && JSON.stringify(manifest.artifacts.map(a => a.path).sort()) === JSON.stringify(assets), 'Incomplete/duplicate/unsafe asset inventory');

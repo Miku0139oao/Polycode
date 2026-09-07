@@ -11,6 +11,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { gunzipSync, gzipSync } from 'node:zlib';
+import { verifyReadiness, REQUIRED_GATES } from '../release-readiness.mjs';
 const source = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const ps = process.env.POLYCODE_TEST_POWERSHELL || 'powershell.exe';
 const distro = process.env.POLYCODE_TEST_DISTRO || 'archlinux';
@@ -51,9 +52,13 @@ before(() => {
   wsl('mkdir', '--', linux);
   const c = join(temp, 'fixture.c');
   writeFileSync(c, `#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\nint main(int argc, char** argv) {\n if (argc == 2 && strcmp(argv[1], "--help") == 0) { puts("TEST FIXTURE ONLY --no-external-acp --polycode-native --polycode-provider"); return 0; }\n for (int i = 1; i < argc; i++) { printf("ARG:"); for (unsigned char* c=(unsigned char*)argv[i]; *c; c++) printf("%02x", *c); puts(""); }\n const char* url = getenv("POLYCODE_BRIDGE_URL"); const char* token = getenv("POLYCODE_BRIDGE_TOKEN");\n printf("BRIDGE:%d:%d\\n", url && strncmp(url,"http://127.0.0.1:",17)==0, token && strlen(token)>=32);\n return 23;\n}\n`);
-  wsl('cc', linuxPath(c), '-o', linux + '/fixture');
+  wsl('cc', '-O2', '-DNDEBUG', linuxPath(c), '-o', linux + '/fixture');
+  const report = join(temp, 'SYNTHETIC-C-FIXTURE-build-report.json');
+  writeFileSync(report, JSON.stringify({ fixture: 'C compiler fixture only; NOT Rust/application acceptance', exit: 0, timeout: false,
+    binary: linux + '/fixture', sha256: wsl('sha256sum', linux + '/fixture').split(' ')[0], bytes: Number(wsl('stat', '-c', '%s', linux + '/fixture')),
+    revision: 'f'.repeat(40), profile: { opt_level: '2', debug_assertions: false, test: false } }));
   assets = join(temp, 'release assets');
-  ok(powershell(join(source, 'integrations/package-release.ps1'), '-Distro', distro, '-Binary', linux + '/fixture', '-Output', assets));
+  ok(powershell(join(source, 'integrations/package-release.ps1'), '-Distro', distro, '-Binary', linux + '/fixture', '-BuildReport', report, '-Output', assets));
 });
 after(() => {
   try {
@@ -228,4 +233,114 @@ test('build provenance hash mismatch is rejected before producing candidate outp
   writeFileSync(report, JSON.stringify({ exit: 0, timeout: false, binary: linux + '/fixture', sha256: 'f'.repeat(64), bytes: 1, revision: 'a'.repeat(40), profile: { opt_level: '0', debug_assertions: true, test: false } }));
   const result = powershell(join(source, 'integrations/package-release.ps1'), '-Distro', distro, '-Binary', linux + '/fixture', '-BuildReport', report, '-Output', output);
   assert.notEqual(result.status, 0); assert.match(result.stderr, /Build report does not attest/); assert.equal(existsSync(output), false);
+});
+
+// The transport is replaced with local byte copies, NOT an HTTP fixture server.
+// No request ever reaches GitHub (or any network). Production installer code and
+// the full remote authorization branch run unchanged on PS5.1/7.
+function remoteInstaller(root, directory, runtime = ps, extra = '') {
+  const stub = `function Invoke-WebRequest {
+    param([string]$Uri, [string]$OutFile, [switch]$UseBasicParsing)
+    if ($Uri -notmatch '^https://github\\.com/Miku0139oao/Polycode/releases/download/v0\\.2\\.0/([A-Za-z0-9._-]+)$') { throw 'Unexpected fixture URL; network is forbidden' }
+    $asset = Join-Path ${psString(directory)} $Matches[1]
+    if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) { throw 'Missing fixture release authorization or asset' }
+    Copy-Item -LiteralPath $asset -Destination $OutFile
+  }
+  & ${psString(join(source, 'install.ps1'))} -Distro ${psString(distro)} -InstallRoot ${psString(root)} -LinuxRoot ${psString(linux + '/installs')} -NoPath ${extra}`;
+  return run(runtime, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', stub]);
+}
+function authorizedFixture(name) {
+  const directory = cloneAssets(name), manifest = JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf8').replace(/^\uFEFF/, ''));
+  const review = join(temp, name + '-SYNTHETIC-review'); mkdirSync(review);
+  const original = join(temp, 'SYNTHETIC-C-FIXTURE-build-report.json');
+  const observation = join(review, 'SYNTHETIC-NOT-LIVE.txt'); writeFileSync(observation, 'Synthetic policy/transport fixture only. Not parent authorization for any Polycode candidate.');
+  const ref = path => ({ path, sha256: sha(readFileSync(path)) });
+  const candidateSha256 = sha(readFileSync(join(directory, 'manifest.json'))), nativeSha256 = manifest.native.sha256;
+  const observedAt = new Date().toISOString(), acceptance = join(review, 'acceptance.json'), attestation = join(review, 'parent.json');
+  writeFileSync(acceptance, JSON.stringify({ schemaVersion: 1, candidateSha256, nativeSha256, gates: REQUIRED_GATES.map(id => ({
+    id, status: 'PASS', candidateSha256, nativeSha256, observedAt,
+    mode: ['regression', 'hash-provenance', 'final-binary-profile'].includes(id) ? 'offline' : 'real',
+    evidence: [ref(id === 'hash-provenance' ? original : observation)],
+  })) }));
+  writeFileSync(attestation, JSON.stringify({ schemaVersion: 1, role: 'parent', reviewer: 'SYNTHETIC TEST PARENT; NOT LIVE AUTHORIZATION',
+    candidateSha256, acceptanceSha256: sha(readFileSync(acceptance)), reviewedAt: observedAt, reviewedAllRequiredGates: true, publicationAuthorized: false, evidence: [ref(observation)] }));
+  const readiness = verifyReadiness({ candidate: directory, acceptance, attestation });
+  assert.equal(readiness.status, 'PASS', readiness.errors.join('\n'));
+  const readinessPath = join(directory, 'release-readiness.json'), authorizationPath = join(directory, 'release-authorization.json');
+  writeFileSync(readinessPath, JSON.stringify(readiness));
+  const authorization = { schemaVersion: 1, kind: 'polycode-distribution-authorization', scope: 'public-distribution', decision: 'AUTHORIZED',
+    version: 'v0.2.0', candidateSha256, nativeSha256, checksumsSha256: sha(readFileSync(join(directory, 'SHA256SUMS'))),
+    readinessSha256: sha(readFileSync(readinessPath)), acceptanceSha256: readiness.acceptanceSha256, parentAttestationSha256: readiness.parentAttestationSha256,
+    parent: { role: 'parent', reviewer: 'SYNTHETIC TEST PARENT; NOT LIVE AUTHORIZATION', authorizedAt: new Date().toISOString() } };
+  const save = () => { writeFileSync(readinessPath, JSON.stringify(readiness)); authorization.readinessSha256 = sha(readFileSync(readinessPath)); writeFileSync(authorizationPath, JSON.stringify(authorization)); };
+  save(); return { directory, readiness, authorization, save, readinessPath, authorizationPath, manifest };
+}
+
+test('remote path rejects absent/FAIL/stale authorization even with AllowCandidate', () => {
+  for (const scenario of ['absent', 'FAIL', 'stale candidate', 'stale checksums', 'stale readiness', 'stale acceptance', 'stale parent', 'stale native', 'stale timeline', 'late authorization', 'wrong version', 'wrong parent']) {
+    const f = authorizedFixture('remote rejection ' + scenario), root = join(temp, 'remote reject install ' + scenario);
+    if (scenario === 'FAIL') f.authorization.decision = 'FAIL';
+    if (scenario === 'stale candidate') f.authorization.candidateSha256 = 'e'.repeat(64);
+    if (scenario === 'stale checksums') f.authorization.checksumsSha256 = 'e'.repeat(64);
+    if (scenario === 'stale acceptance') f.authorization.acceptanceSha256 = 'e'.repeat(64);
+    if (scenario === 'stale parent') f.authorization.parentAttestationSha256 = 'e'.repeat(64);
+    if (scenario === 'stale native') f.authorization.nativeSha256 = 'e'.repeat(64);
+    if (scenario === 'stale timeline') f.authorization.parent.authorizedAt = '2000-01-01T00:00:00Z';
+    if (scenario === 'late authorization') f.readiness.checkedAt = new Date(Date.now() - 8 * 86400000).toISOString();
+    if (scenario === 'wrong version') f.authorization.version = 'v0.3.0';
+    if (scenario === 'wrong parent') f.authorization.parent.role = 'child';
+    f.save();
+    if (scenario === 'absent') rmSync(f.authorizationPath);
+    if (scenario === 'stale readiness') writeFileSync(f.readinessPath, readFileSync(f.readinessPath, 'utf8') + ' ');
+    const before = linuxReleases(), result = remoteInstaller(root, f.directory, ps, '-AllowCandidate');
+    assert.notEqual(result.status, 0, scenario); assert.match(result.stderr, /authorization/); assertNoRelease(root); assert.deepEqual(linuxReleases(), before);
+  }
+});
+
+test('remote authorization cannot hide missing/FAIL/new gates or an old policy', () => {
+  for (const scenario of ['missing session', 'FAIL effort', 'unverified queued switch', 'old policy', 'BLOCKED readiness']) {
+    const f = authorizedFixture('remote policy ' + scenario), root = join(temp, 'remote policy install ' + scenario);
+    if (scenario === 'missing session') f.readiness.gates = f.readiness.gates.filter(g => g.id !== 'session-resume-chatgpt');
+    if (scenario === 'FAIL effort') f.readiness.gates.find(g => g.id === 'native-reasoning-effort-wire').status = 'FAIL';
+    if (scenario === 'unverified queued switch') f.readiness.gates.find(g => g.id === 'busy-queued-model-switch-safe-commit').verified = false;
+    if (scenario === 'old policy') f.readiness.policyVersion = 'old';
+    if (scenario === 'BLOCKED readiness') f.readiness.status = 'BLOCKED';
+    f.save();
+    const before = linuxReleases(), result = remoteInstaller(root, f.directory);
+    assert.notEqual(result.status, 0); assert.match(result.stderr, /acceptance/); assertNoRelease(root); assert.deepEqual(linuxReleases(), before);
+  }
+});
+
+test('post-acceptance asset mutations are rejected even if transport sums and their authorization hash are updated', () => {
+  const f = authorizedFixture('changed accepted gzip'), root = join(temp, 'changed gzip remote install');
+  const path = join(f.directory, 'polycode-wsl-x64.gz');
+  writeFileSync(path, Buffer.concat([readFileSync(path), Buffer.from('not accepted bytes')]));
+  checksum(f.directory); f.authorization.checksumsSha256 = sha(readFileSync(join(f.directory, 'SHA256SUMS'))); f.save();
+  const before = linuxReleases(), result = remoteInstaller(root, f.directory);
+  assert.notEqual(result.status, 0); assert.match(result.stderr, /Authorized asset bytes changed/);
+  assertNoRelease(root); assert.deepEqual(linuxReleases(), before);
+});
+
+test('matching fixture authorization installs exact accepted bytes on PS5.1/7 without repack or reclassification', () => {
+  const f = authorizedFixture('immutable promotion'), before = snapshot(assets);
+  for (const runtime of [ps, 'pwsh.exe']) {
+    const root = join(temp, 'authorized immutable install ' + runtime);
+    ok(remoteInstaller(root, f.directory, runtime));
+    const release = join(root, 'releases', releaseDirs(root)[0]);
+    const config = JSON.parse(readFileSync(join(release, 'install-config.json'), 'utf8').replace(/^\uFEFF/, ''));
+    assert.equal(wsl('sha256sum', config.binary).split(' ')[0], f.manifest.native.sha256);
+    assert.equal(wsl('sha256sum', config.runtime).split(' ')[0], f.manifest.bun.sha256);
+    assert.equal(sha(readFileSync(join(release, 'candidate-manifest.json'))), f.authorization.candidateSha256);
+    const inner = JSON.parse(readFileSync(join(release, 'release-manifest.json'), 'utf8').replace(/^\uFEFF/, ''));
+    assert.equal(inner.classification, 'immutable-candidate'); assert.equal(Object.hasOwn(inner, 'status'), false);
+    for (const file of f.manifest.files) assert.equal(sha(readFileSync(join(release, file.path))), file.sha256);
+    for (const sidecar of ['release-readiness.json', 'release-authorization.json']) assert.deepEqual(readFileSync(join(release, sidecar)), readFileSync(join(f.directory, sidecar)));
+  }
+  // Every one of the six original package files, including ZIP, manifest, sums
+  // and installer, is identical before/after the ONLY change: two added sidecars.
+  assert.deepEqual(snapshot(assets), before);
+  for (const name of readdirSync(assets)) assert.deepEqual(readFileSync(join(f.directory, name)), readFileSync(join(assets, name)), name);
+  const local = join(temp, 'authorized but local still requires opt in');
+  const result = powershell(join(source, 'install.ps1'), '-Distro', distro, '-InstallRoot', local, '-LinuxRoot', linux + '/installs', '-ArtifactDirectory', f.directory, '-NoPath');
+  assert.notEqual(result.status, 0); assert.match(result.stderr, /explicit -AllowCandidate/); assertNoRelease(local);
 });

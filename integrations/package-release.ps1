@@ -125,7 +125,9 @@ try {
     if ((Get-Sha256 $nativeCopy) -ne $nativeHash -or (Get-Sha256 $bun) -ne $bunHash) { throw 'Executable changed during packaging.' }
     if ($BuildReport) { Copy-Staged $BuildReport 'provenance/build-report.json' }
     $manifest = [ordered]@{
-        schemaVersion = 1; status = 'unpublished-candidate'; version = $Version
+        # Classification is immutable, not a publication state. Authorization is
+        # a separate sidecar added ONLY by the parent after acceptance.
+        schemaVersion = 2; classification = 'immutable-candidate'; version = $Version
         provenance = $(if ($BuildReport) { 'build-report' } else { 'fixture-unattested' })
         architecture = 'x86_64'; minimumGlibc = '2.43'; platform = 'Windows PowerShell 5.1+/7 + Arch WSL Linux'; protocol = 'native-model-bridge'
         binarySourceSha256 = $nativeHash
@@ -134,10 +136,10 @@ try {
         packagingScriptSha256 = (Get-Sha256 $PSCommandPath)
         acceptance = @{
             oauthChatGPT = 'USER_REPORTED_WORKING; candidate-bound formal acceptance still required'
-            oauthCursor = 'FAIL_USER_REPORTED; exact candidate reproduction pending'
+            oauthCursor = 'FAIL_USER_REPORTED_WEB_SUCCESS_TUI_LOGIN_FAILURE; not fixed or accepted'
             liveGates = 'NOT_ACCEPTED'; installedIntegrated = 'NOT_ACCEPTED'
             publicationAuthorized = $false; publicUrl = 'DEFERRED_UNTIL_PUBLICATION'
-            pendingSourceChanges = 'Cursor OAuth, provider-aware /usage and TUI branding; final rebuild/retest/hash update required'
+            pendingSourceChanges = 'Final Rust/JS changes including OAuth, usage/branding, prompt identity, reasoning effort, session resume and queued model switching require new build/package/hash-bound acceptance'
         }
     }
     $manifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $stage 'release-manifest.json') -Encoding UTF8
