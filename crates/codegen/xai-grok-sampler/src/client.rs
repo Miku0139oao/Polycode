@@ -722,7 +722,9 @@ impl SamplingClient {
                 x_api_key_prefix = x_api_key_prefix.as_deref().unwrap_or("none"),
             );
         }
-        let sent_bearer = if crate::local_transport::is_local(&self.base_url) { None } else {
+        let sent_bearer = if crate::local_transport::is_local(&self.base_url) {
+            None
+        } else {
             Self::sent_fragment_from_headers(&headers, &self.defaults.auth_scheme)
         };
         if let Some(injector) = &self.header_injector {
@@ -755,7 +757,9 @@ impl SamplingClient {
     /// For request-start diagnostics ([`Self::auth_info`]) only.
     /// 401 attribution must use the fragment captured by [`Self::post`], which cannot race a recovery.
     fn current_sent_bearer_suffix(&self) -> Option<String> {
-        if crate::local_transport::is_local(&self.base_url) { return None; }
+        if crate::local_transport::is_local(&self.base_url) {
+            return None;
+        }
         if self.bearer_resolver.is_some() {
             return self
                 .bearer_resolver
@@ -2230,6 +2234,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(unregistered.local_subscription_provider(), None);
+        assert_eq!(
+            crate::local_transport::subscription_provider(&unregistered.base_url),
+            None
+        );
         crate::local_transport::register(&origin, "private-process-token").unwrap();
         assert_eq!(unregistered.local_subscription_provider(), Some("cursor"));
         for provider in ["codex", "cursor"] {
@@ -2244,6 +2252,10 @@ mod tests {
             })
             .unwrap();
             assert_eq!(registered.local_subscription_provider(), Some(provider));
+            assert_eq!(
+                crate::local_transport::subscription_provider(&endpoint),
+                Some(provider)
+            );
             // Detection must not change explicitly configured client defaults.
             assert_eq!(registered.defaults.temperature, Some(0.2));
             assert_eq!(registered.defaults.max_completion_tokens, Some(64));
@@ -2283,34 +2295,60 @@ mod tests {
         }
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
-            socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
             let mut request = Vec::new();
             loop {
                 let mut byte = [0];
                 socket.read_exact(&mut byte).unwrap();
                 request.push(byte[0]);
-                if request.ends_with(b"\r\n\r\n") { break; }
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
             }
             socket.write_all(b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/must-not-follow\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
             String::from_utf8(request).unwrap()
         });
-        let cfg = SamplerConfig { base_url: format!("{origin}/codex/v1"), api_key: Some("polycode-process-auth".into()), ..minimal_config() };
+        let cfg = SamplerConfig {
+            base_url: format!("{origin}/codex/v1"),
+            api_key: Some("polycode-process-auth".into()),
+            ..minimal_config()
+        };
         assert!(!format!("{cfg:?}").contains("private-process-token"));
-        assert!(!serde_json::to_string(&cfg).unwrap().contains("private-process-token"));
+        assert!(
+            !serde_json::to_string(&cfg)
+                .unwrap()
+                .contains("private-process-token")
+        );
         let client = SamplingClient::new(cfg).unwrap();
         assert_eq!(client.current_sent_bearer_suffix(), None);
         let request = client.post(client.endpoint("chat/completions"));
         assert!(request.sent_bearer.is_none());
         let request = request.builder.build().unwrap();
         assert!(!format!("{request:?}").contains("private-process-token"));
-        assert_eq!(request.headers()[AUTHORIZATION], "Bearer private-process-token");
+        assert_eq!(
+            request.headers()[AUTHORIZATION],
+            "Bearer private-process-token"
+        );
         let response = client.http.execute(request).await.unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::FOUND);
         let wire = server.join().unwrap();
-        assert!(wire.to_ascii_lowercase().contains("authorization: bearer private-process-token\r\n"));
+        assert!(
+            wire.to_ascii_lowercase()
+                .contains("authorization: bearer private-process-token\r\n")
+        );
         assert!(!wire.contains("polycode-process-auth"));
-        let native = SamplingClient::new(SamplerConfig { api_key: Some("native-only-key".into()), ..minimal_config() }).unwrap();
-        let request = native.post(native.endpoint("chat/completions")).builder.build().unwrap();
+        let native = SamplingClient::new(SamplerConfig {
+            api_key: Some("native-only-key".into()),
+            ..minimal_config()
+        })
+        .unwrap();
+        let request = native
+            .post(native.endpoint("chat/completions"))
+            .builder
+            .build()
+            .unwrap();
         assert_eq!(request.headers()[AUTHORIZATION], "Bearer native-only-key");
         assert!(!format!("{request:?}").contains("private-process-token"));
     }

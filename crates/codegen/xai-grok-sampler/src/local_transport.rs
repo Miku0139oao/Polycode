@@ -53,7 +53,7 @@ pub(crate) fn is_local(base: &str) -> bool {
 }
 /// Only endpoints in the process-local registration identify a subscription.
 /// Return a provider label, never the transport's bearer or endpoint.
-pub(crate) fn subscription_provider(base: &str) -> Option<&'static str> {
+pub fn subscription_provider(base: &str) -> Option<&'static str> {
     let t = transport(base)?;
     t.endpoints
         .iter()
