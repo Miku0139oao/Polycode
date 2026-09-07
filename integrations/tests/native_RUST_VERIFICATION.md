@@ -51,14 +51,28 @@ Current observations (not universal benchmarks):
   This does not measure peak compilation memory or establish a bottleneck.
 - Warm synthetic 512-file probe: ext4 stat/read medians 1.74/5.79 ms;
   `/mnt/d` medians 1345.06/1964.21 ms. This is not a whole-build speed ratio.
-- An unchanged-source Cargo probe hit its 30s deadline before any Fresh or
-  Compiling status. Cache effectiveness remains **unverified**; no cache was cleared.
+- An initial unchanged-source Cargo probe hit its 30s deadline before any Fresh
+  or Compiling status. A longer bounded follow-up completed in **110.683s**:
+  **1,052 Fresh units**, exit 0, no Dirty or compilation observed, for the same
+  WSL pager/shell/sampler test graph. Cache reuse is verified, but Cargo's
+  unchanged-source verification itself has substantial overhead. This is why
+  direct executable reruns are preferable for diagnosing individual failures.
+  No cache was cleared. Windows' narrower graph is not an apples-to-apples
+  whole-build performance comparison.
 
 ## 3. Windows is a separate validation target
 
-Native Windows Rust 1.94/MSVC tooling is installed on the current machine, and
-Windows Cargo metadata passed. Use a separate target directory and a scoped
-background check before considering a full Windows build. Existing Linux ELF
+Native Windows Rust 1.94/MSVC tooling is installed on the current machine.
+The sampler `--lib --tests` check passed after supplying Windows protoc 29.3
+and fixing the dependency manifest's hardcoded Unix stdout device. It took
+477.974s; the identical unchanged-source verbose check took 18.443s with **616
+Fresh units and zero compilation**. This verifies reuse for that Windows graph,
+not the separate WSL cache. The protobuf helper's three tests subsequently passed
+(35.692s including compilation; 0.82s execution). Running its new regression
+straight from the compiled executable took 0.079s, with no Cargo invocation.
+
+Use a separate target directory and a scoped background check before considering
+a full Windows build. Existing Linux ELF
 artifacts/cache cannot stand in for Windows executable verification. Conversely,
 Windows checks cannot replace Linux sandbox tests: the current non-Unix sandbox
 path does not apply enforcement.

@@ -146,14 +146,16 @@ impl XaiProtoBuilder {
         // so relative proto/include paths retain their meaning.
         let scratch = tempfile::TempDir::new().context("create dependency scratch directory")?;
         let dependencies = scratch.path().join("dependencies.d");
-        let descriptor_sink = if cfg!(windows) { "NUL" } else { "/dev/null" };
+        // Avoid device names entirely: Windows protoc can expand NUL to an
+        // extended-length path, creating a literal reserved-name source file.
+        let descriptor_sink = scratch.path().join("descriptor.pbbin");
 
         // Can only process one input file when using --dependency_out=FILE.
         for proto in protos {
             let mut command = Command::new(protoc.unwrap_or(Path::new("protoc")));
             command
                 .arg(format!("--dependency_out={}", dependencies.display()))
-                .arg(format!("--descriptor_set_out={descriptor_sink}"));
+                .arg(format!("--descriptor_set_out={}", descriptor_sink.display()));
 
             // Add protoc's well-known types include directory first (if found).
             // This is needed for Bazel sandboxed builds where protoc and its
@@ -184,7 +186,7 @@ impl XaiProtoBuilder {
 
             let mut lines = output.lines();
             let first_line = lines.next().context("protoc dependency manifest is empty")?;
-            let prefix = format!("{descriptor_sink}:");
+            let prefix = format!("{}:", descriptor_sink.display());
             let rem = first_line.strip_prefix(prefix.as_str()).with_context(|| {
                 format!("protoc dependency manifest must start with {prefix}: {output:?}")
             })?;
@@ -344,6 +346,13 @@ mod dependency_tests {
 
     #[test]
     fn reads_dependencies_without_unix_stdout_device() {
+        let source_entries = || {
+            fs::read_dir(".")
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let before = source_entries();
         let protoc = find_protoc::find_protoc().expect("protoc must be installed for build tests");
         let include = find_protoc_include_dir(protoc.as_deref());
         XaiProtoBuilder::emit_rerun_if_changed(
@@ -353,6 +362,11 @@ mod dependency_tests {
             [Path::new("test_data")],
         )
         .expect("dependency manifests work on the host platform");
+        assert_eq!(
+            source_entries(),
+            before,
+            "protoc must not create source artifacts"
+        );
     }
 }
 
