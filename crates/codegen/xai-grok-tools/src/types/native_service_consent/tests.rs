@@ -73,10 +73,18 @@ fn search_client(
     provider: Option<SharedApiKeyProvider>,
     extra: IndexMap<String, String>,
 ) -> WebSearchClient {
+    search_client_at(server.uri(), provider, extra)
+}
+
+fn search_client_at(
+    base_url: String,
+    provider: Option<SharedApiKeyProvider>,
+    extra: IndexMap<String, String>,
+) -> WebSearchClient {
     WebSearchClient::new(
         &WebSearchConfig::Enabled {
             api_key: "static-secret".into(),
-            base_url: server.uri(),
+            base_url,
             model: "search-model".into(),
             extra_headers: extra,
             alpha_test_key: None,
@@ -147,6 +155,22 @@ fn selection_is_shared_ephemeral_and_same_label_invalidates() {
     let mut resources = Resources::new();
     resources.insert(policy);
     assert_eq!(resources.serialize(), serde_json::json!({}));
+}
+
+#[test]
+fn subscription_accessor_uses_the_captured_route() {
+    let policy = NativeServiceConsent::new(Some("codex"));
+    let mut resources = Resources::new();
+    resources.insert(policy.clone());
+    let ctx = ToolCallContext::default();
+    let subscription = NativeServiceCall::from_resources(&ctx, &resources);
+    policy.set_provider(None);
+    let native = NativeServiceCall::from_resources(&ctx, &resources);
+    assert!(subscription.is_subscription());
+    assert!(!native.is_subscription());
+    policy.set_provider(Some("cursor"));
+    assert!(!native.is_subscription());
+    assert!(NativeServiceCall::from_resources(&ctx, &resources).is_subscription());
 }
 
 #[tokio::test]
@@ -264,7 +288,10 @@ async fn both_search_paths_send_zero_http_until_explicit_allow_and_cache_exact_i
             );
             assert_eq!(request.questions[0].options[0].label, DENY);
             assert!(!format!("{request:?}").contains("static-secret"));
-            assert!(!format!("{request:?}").contains(&server.uri()));
+            assert!(request.questions[0].question.contains(&format!(
+                "Endpoint origin: {}. Model: search-model. Opaque target #1",
+                server.uri()
+            )));
             assert!(server.received_requests().await.unwrap().is_empty());
             allow(request);
         });
@@ -281,6 +308,126 @@ async fn both_search_paths_send_zero_http_until_explicit_allow_and_cache_exact_i
             "Bearer static-secret"
         );
     }
+}
+
+#[tokio::test]
+async fn context_aware_search_cancels_while_response_body_is_held_after_headers() {
+    use std::task::{Context, Wake, Waker};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::Notify;
+
+    struct ResponseWake(Notify);
+    impl Wake for ResponseWake {
+        fn wake(self: Arc<Self>) {
+            self.0.notify_one();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.notify_one();
+        }
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = search_client_at(
+        format!("http://{}", listener.local_addr().unwrap()),
+        None,
+        IndexMap::new(),
+    );
+    let (_, resources, mut rx) = fixture();
+    let cancellation = CancellationToken::new();
+    let mut ctx = test_ctx_with_call_id(resources, "cancel-response-body");
+    ctx.insert(xai_tool_runtime::Cancellation(cancellation.clone()));
+    let (request_received_tx, request_received_rx) = oneshot::channel();
+    let (send_headers_tx, send_headers_rx) = oneshot::channel();
+    let (release_body_tx, release_body_rx) = oneshot::channel();
+    let server = async {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut input = Vec::new();
+        let mut buffer = [0u8; 4096];
+        let header_end = loop {
+            let read = socket.read(&mut buffer).await.unwrap();
+            assert!(read > 0);
+            input.extend_from_slice(&buffer[..read]);
+            if let Some(end) = input.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                break end + 4;
+            }
+            assert!(input.len() < 64 * 1024);
+        };
+        let headers = std::str::from_utf8(&input[..header_end]).unwrap();
+        assert!(headers.starts_with("POST /responses HTTP/1.1\r\n"));
+        let length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .expect("JSON request has a content length");
+        while input.len() < header_end + length {
+            let read = socket.read(&mut buffer).await.unwrap();
+            assert!(read > 0);
+            input.extend_from_slice(&buffer[..read]);
+        }
+        request_received_tx.send(()).unwrap();
+        send_headers_rx.await.unwrap();
+        socket
+            .write_all(concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Type: application/json\r\n",
+                "Content-Length: 2\r\nConnection: close\r\n\r\n{"
+            ).as_bytes())
+            .await
+            .unwrap();
+        // Headers and one body byte are available, but body completion is held
+        // until AFTER the caller's bounded cancellation result is captured.
+        release_body_rx.await.unwrap();
+        let _ = socket.write_all(b"}").await;
+    };
+    let exercise = async {
+        let mut pending = Box::pin(client.search_with_context(&ctx, "q", None));
+        let request = tokio::select! {
+            request = rx.recv() => request.unwrap(),
+            _ = &mut pending => panic!("must wait for consent"),
+        };
+        allow(request);
+        tokio::select! {
+            received = request_received_rx => received.unwrap(),
+            _ = &mut pending => panic!("must wait for response headers"),
+        };
+        // The server has drained the entire request. Register a fresh waker
+        // while execute is awaiting headers, then release just those headers.
+        // Their delivery wakes this future; polling it again reaches the body
+        // wait before cancellation. No timing sleeps or spawned call races.
+        let wake = Arc::new(ResponseWake(Notify::new()));
+        let waker = Waker::from(wake.clone());
+        assert!(
+            pending.as_mut().poll(&mut Context::from_waker(&waker)).is_pending()
+        );
+        send_headers_tx.send(()).unwrap();
+        wake.0.notified().await;
+        assert!(
+            pending.as_mut().poll(&mut Context::from_waker(&waker)).is_pending()
+        );
+        cancellation.cancel();
+        let outcome = tokio::time::timeout(Duration::from_secs(5), pending.as_mut()).await;
+        let body_still_held = !release_body_tx.is_closed();
+        drop(pending);
+        let _ = release_body_tx.send(());
+        (outcome, body_still_held)
+    };
+    // Scoped futures: even a failed handshake drops the socket and the request.
+    // On the expected regression failure, release/cleanup happens before assert.
+    let ((), (outcome, body_still_held)) = tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(server, exercise)
+    })
+    .await
+    .expect("local response-body test and cleanup must finish within the bound");
+    assert!(body_still_held);
+    let error = outcome
+        .expect("cancellation must finish without releasing the response body")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("tool call cancelled"), "{error}");
 }
 
 #[tokio::test]
@@ -501,15 +648,84 @@ async fn timeout_is_fail_closed_and_no_detached_approval_writer_survives() {
     assert!(policy.0.lock().approvals.is_empty());
 }
 
+#[tokio::test(start_paused = true)]
+async fn ready_allow_after_deadline_is_denied_before_http_or_cache_write() {
+    let server = MockServer::start().await;
+    let client = search_client(&server, None, IndexMap::new());
+    let (policy, resources, mut rx) = fixture();
+    resources.lock().await.insert(Params(AskUserQuestionParams {
+        timeout_secs: Some(1),
+        ..Default::default()
+    }));
+    let ctx = test_ctx_with_call_id(resources, "expired-ready-allow");
+    let mut pending = Box::pin(search(&client, &ctx, false));
+    let request = tokio::select! {
+        r = rx.recv() => r.unwrap(),
+        _ = &mut pending => panic!("must wait for consent"),
+    };
+    // Keep the unspawned future unpolled: both the expired timer and the Allow
+    // must be ready together on its next poll (timeout alone can accept Allow).
+    tokio::time::advance(Duration::from_secs(2)).await;
+    allow(request);
+    let error = pending.await.unwrap_err().to_string();
+    assert!(error.contains("approval timed out"));
+    assert!(policy.0.lock().approvals.is_empty());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn timely_allow_cannot_be_cached_after_slow_credential_revalidation() {
+    struct SlowRevalidation(AtomicUsize);
+    impl crate::types::ApiKeyProvider for SlowRevalidation {
+        fn current_api_key(&self) -> Option<String> {
+            Some("unchanged-key".into())
+        }
+
+        fn current_api_key_async(
+            &self,
+        ) -> std::pin::Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
+            Box::pin(async {
+                if self.0.fetch_add(1, Ordering::SeqCst) > 0 {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                self.current_api_key()
+            })
+        }
+    }
+    let (policy, resources, mut rx) = fixture();
+    resources.lock().await.insert(Params(AskUserQuestionParams {
+        timeout_secs: Some(1),
+        ..Default::default()
+    }));
+    let ctx = test_ctx_with_call_id(resources, "slow-revalidation");
+    let call = NativeServiceCall::from_context(&ctx).await;
+    let provider: SharedApiKeyProvider = Arc::new(SlowRevalidation(AtomicUsize::new(0)));
+    let defaults = HeaderMap::new();
+    let (result, ()) = tokio::join!(
+        call.authorize(
+            NativeService::WebSearch,
+            "https://api.example.test",
+            "model",
+            &defaults,
+            Some(&provider)
+        ),
+        async { allow(rx.recv().await.unwrap()) }
+    );
+    assert!(
+        result.err().unwrap().to_string().contains("approval timed out")
+    );
+    assert!(policy.0.lock().approvals.is_empty());
+}
+
 #[tokio::test]
-async fn parallel_calls_keep_distinct_ids_on_shared_client() {
+async fn parallel_calls_route_out_of_order_allow_and_deny_to_their_own_ids() {
     let server = MockServer::start().await;
     mount_search(&server).await;
     let client = search_client(&server, None, IndexMap::new());
     let (_, resources, mut rx) = fixture();
     let first_ctx = test_ctx_with_call_id(resources.clone(), "parallel-one");
     let second_ctx = test_ctx_with_call_id(resources, "parallel-two");
-    let (first, second, ()) = tokio::join!(
+    let (first, second, allowed_id) = tokio::join!(
         search(&client, &first_ctx, false),
         search(&client, &second_ctx, true),
         async {
@@ -519,13 +735,16 @@ async fn parallel_calls_keep_distinct_ids_on_shared_client() {
             ids.sort();
             assert_eq!(ids, ["parallel-one", "parallel-two"]);
             assert!(server.received_requests().await.unwrap().is_empty());
+            let allowed_id = second.tool_call_id.clone();
             allow(second);
-            allow(first);
+            let deny = answer(&first, DENY);
+            first.result_tx.send(Ok(deny)).unwrap();
+            allowed_id
         }
     );
-    first.unwrap();
-    second.unwrap();
-    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    assert_eq!(first.is_ok(), allowed_id == "parallel-one");
+    assert_eq!(second.is_ok(), allowed_id == "parallel-two");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -586,7 +805,133 @@ async fn cached_consent_is_bound_to_service_base_model_and_all_header_bytes() {
     assert_eq!(policy.0.lock().approvals.len(), 5);
     assert_eq!(resources.lock().await.serialize(), serde_json::json!({}));
     policy.set_provider(Some("codex"));
+    let state = policy.0.lock();
+    assert!(state.approvals.is_empty());
+    assert!(state.credentials.is_empty());
+    assert!(state.targets.is_empty());
+}
+
+#[tokio::test]
+async fn questions_distinguish_private_targets_without_disclosing_secrets() {
+    let (policy, resources, mut rx) = fixture();
+    let ctx = test_ctx_with_call_id(resources, "visible-scope");
+    let call = NativeServiceCall::from_context(&ctx).await;
+    let mut defaults = headers("Bearer bearer-secret");
+    defaults.insert("x-gateway-key", HeaderValue::from_static("gateway-secret"));
+    defaults.insert(
+        "x-custom-auth",
+        HeaderValue::from_static("bEaReR custom-secret"),
+    );
+    const FIRST: &str =
+        "https://url-user:url-password@api.example.test:8443/private-one?key=query-secret#fragment-secret";
+    const SECOND: &str =
+        "https://url-user:url-password@api.example.test:8443/private-two?key=query-secret#fragment-secret";
+    const OTHER_ORIGIN: &str =
+        "https://url-user:url-password@other.example.test:8443/private-one?key=query-secret#fragment-secret";
+    const SECRET_MODEL: &str = "https://model-user:model-password@model.example.test/private-model?key=model-query#model-fragment";
+    let mut questions = Vec::new();
+    for (base, model, target, safe_model) in [
+        (FIRST, "grok-4.1", 1, "grok-4.1"),
+        (SECOND, "grok-4.1", 2, "grok-4.1"),
+        (SECOND, "grok-4.2", 3, "grok-4.2"),
+        // Denial doesn't discard opaque identity: the same target stays #1.
+        (FIRST, "grok-4.1", 1, "grok-4.1"),
+        (OTHER_ORIGIN, "grok-4.1", 4, "grok-4.1"),
+        (FIRST, SECRET_MODEL, 5, "[redacted]"),
+        (FIRST, "grok-bearer-secret-model", 6, "[redacted]"),
+        (FIRST, "grok-gateway-secret-model", 7, "[redacted]"),
+        (FIRST, "grok-custom-secret-model", 8, "[redacted]"),
+        (FIRST, "grok-\x1b[31munsafe", 9, "[redacted]"),
+        (FIRST, "grok/image", 10, "[redacted]"),
+        (FIRST, SECRET_MODEL, 5, "[redacted]"),
+    ] {
+        let (result, ()) = tokio::join!(
+            call.authorize(NativeService::WebSearch, base, model, &defaults, None),
+            async {
+                let request = rx.recv().await.unwrap();
+                let question = &request.questions[0];
+                assert_eq!(question.options[0].label, DENY);
+                assert_eq!(question.options[1].label, ALLOW);
+                assert!(question.question.contains("credential #1"));
+                assert!(question.question.contains(&format!(
+                    "Model: {safe_model}. Opaque target #{target} "
+                )));
+                let host = if base == OTHER_ORIGIN { "other" } else { "api" };
+                assert!(question.question.contains(&format!(
+                    "Endpoint origin: https://{host}.example.test:8443."
+                )));
+                let rendered = format!("{request:?}");
+                for hidden in [
+                    "url-user",
+                    "url-password",
+                    "private-one",
+                    "private-two",
+                    "query-secret",
+                    "fragment-secret",
+                    "bearer-secret",
+                    "gateway-secret",
+                    "custom-secret",
+                    "x-gateway-key",
+                    "x-custom-auth",
+                    "model-user",
+                    "model-password",
+                    "private-model",
+                    "model-query",
+                    "model-fragment",
+                    "unsafe",
+                    "grok/image",
+                ] {
+                    assert!(!rendered.contains(hidden), "leaked {hidden}");
+                }
+                questions.push(question.question.clone());
+                let deny = answer(&request, DENY);
+                request.result_tx.send(Ok(deny)).unwrap();
+            }
+        );
+        assert!(result.is_err());
+    }
+    assert_ne!(questions[0], questions[1], "path-only changes must be visible");
+    assert_ne!(questions[1], questions[2], "model changes must be visible");
+    assert_eq!(questions[0], questions[3], "opaque target IDs must be stable");
+    assert_ne!(questions[0], questions[4], "origins must be distinguishable");
+    assert_ne!(questions[5], questions[6], "redacted models need distinct IDs");
+    assert_eq!(questions[5], questions[11]);
+    assert_eq!(policy.0.lock().targets.len(), 10);
     assert!(policy.0.lock().approvals.is_empty());
+    policy.set_provider(Some("codex"));
+    assert!(policy.0.lock().targets.is_empty());
+    assert!(policy.0.lock().credentials.is_empty());
+}
+
+#[test]
+fn target_labels_redact_invalid_origins_and_overridden_header_credentials() {
+    let configured = headers("Bearer fallback-secret");
+    let mut key = ApprovalKey {
+        service: NativeService::WebSearch,
+        base: "https://CURRENT-SECRET.example.test/private?hidden#fragment".into(),
+        model: "grok-fallback-secret".into(),
+        headers: headers("Bearer current-secret"),
+    };
+    assert_eq!(
+        key.safe_labels(&configured),
+        ("[redacted]".to_owned(), "[redacted]")
+    );
+    for base in ["not a URL", "file:///private", "mailto:private@example.test"] {
+        key.base = base.into();
+        assert_eq!(key.safe_labels(&configured).0, "[redacted]");
+    }
+    key.base = "https://user:password@[::1]:8443/private?hidden#fragment".into();
+    for model in ["", "grok/model", "grok?key=private", "grok model", "模型"] {
+        key.model = model.into();
+        assert_eq!(
+            key.safe_labels(&configured),
+            ("https://[::1]:8443".to_owned(), "[redacted]")
+        );
+    }
+    key.model = "m".repeat(129);
+    assert_eq!(key.safe_labels(&configured).1, "[redacted]");
+    key.model = "grok-4.1_fast".into();
+    assert_eq!(key.safe_labels(&configured).1, "grok-4.1_fast");
 }
 
 fn image_client(server: &MockServer) -> ImageGenClient {

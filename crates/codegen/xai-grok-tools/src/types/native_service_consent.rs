@@ -12,6 +12,7 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use tokio::sync::oneshot;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use xai_tool_runtime::{ToolCallContext, ToolError};
 
@@ -33,6 +34,7 @@ struct Selection {
     changed: CancellationToken,
     approvals: Vec<ApprovalKey>,
     credentials: Vec<HeaderMap>,
+    targets: Vec<ApprovalKey>,
 }
 
 impl NativeServiceConsent {
@@ -43,6 +45,7 @@ impl NativeServiceConsent {
             changed: CancellationToken::new(),
             approvals: Vec::new(),
             credentials: Vec::new(),
+            targets: Vec::new(),
         })))
     }
 
@@ -64,6 +67,7 @@ impl NativeServiceConsent {
         state.provider = provider;
         state.approvals.clear();
         state.credentials.clear();
+        state.targets.clear();
     }
 }
 
@@ -111,6 +115,51 @@ struct ApprovalKey {
     headers: HeaderMap,
 }
 
+impl ApprovalKey {
+    /// Render only an HTTP(S) origin and a conservative plain model ID. The
+    /// exact private target is represented separately by a session-local ID.
+    fn safe_labels(&self, configured_headers: &HeaderMap) -> (String, &str) {
+        let contains_credential = |label: &str| {
+            [&self.headers, configured_headers].into_iter().any(|headers| {
+                headers.values().any(|value| {
+                    // All headers are potentially credentials. Check whitespace
+                    // tokens too, so "Bearer token" also suppresses "token" in
+                    // a model/origin; never expose a credential suffix or hash.
+                    value
+                        .as_bytes()
+                        .split(u8::is_ascii_whitespace)
+                        .filter(|part| !part.is_empty())
+                        .any(|part| {
+                            label
+                                .as_bytes()
+                                .windows(part.len())
+                                .any(|window| window.eq_ignore_ascii_case(part))
+                        })
+                })
+            })
+        };
+        let origin = url::Url::parse(&self.base)
+            .ok()
+            .filter(|url| matches!(url.scheme(), "http" | "https"))
+            .map(|url| url.origin().ascii_serialization())
+            .filter(|origin| !contains_credential(origin))
+            .unwrap_or_else(|| "[redacted]".into());
+        let plain_model = !self.model.is_empty()
+            && self.model.len() <= 128
+            && self.model.as_bytes()[0].is_ascii_alphanumeric()
+            && self
+                .model
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+        let model = if plain_model && !contains_credential(&self.model) {
+            self.model.as_str()
+        } else {
+            "[redacted]"
+        };
+        (origin, model)
+    }
+}
+
 pub(crate) struct ApprovedHeaders(HeaderMap);
 
 impl ApprovedHeaders {
@@ -153,6 +202,13 @@ fn denied(reason: &str) -> ToolError {
             "Native xAI service request stopped: {reason}. ChatGPT/Cursor subscription billing does not cover this service. Already dispatched requests cannot be undone."
         ),
     )
+}
+
+fn check_approval_deadline(deadline: Instant) -> Result<(), ToolError> {
+    if Instant::now() >= deadline {
+        return Err(denied("approval timed out"));
+    }
+    Ok(())
 }
 
 impl NativeServiceCall {
@@ -199,6 +255,11 @@ impl NativeServiceCall {
     /// tools/adapters must use their context-aware variants instead.
     pub(crate) fn native() -> Self {
         Self::from_resources(&ToolCallContext::default(), &Resources::new())
+    }
+
+    /// Captured route only; in-flight calls never adopt a later selection.
+    pub(crate) fn is_subscription(&self) -> bool {
+        self.subscription
     }
 
     /// Mirror reqwest's request-over-default precedence before resolving the
@@ -267,7 +328,7 @@ impl NativeServiceCall {
                 model: model.to_owned(),
                 headers: headers.clone(),
             };
-            let credential_label = {
+            let (credential_label, target_label) = {
                 let mut state = self.policy.0.lock();
                 if state.generation != self.generation {
                     return Err(denied("provider/model selection changed"));
@@ -282,10 +343,18 @@ impl NativeServiceCall {
                     state.credentials.push(headers.clone());
                     state.credentials.len() - 1
                 });
-                index + 1
+                let target = state.targets.iter().position(|target| target == &key);
+                let target = target.unwrap_or_else(|| {
+                    state.targets.push(key.clone());
+                    state.targets.len() - 1
+                });
+                (index + 1, target + 1)
             };
-            self.ask(service, credential_label).await?;
+            let deadline = self
+                .ask(&key, credential_label, target_label, defaults)
+                .await?;
             let refreshed = self.resolve_headers(defaults, provider).await?;
+            check_approval_deadline(deadline)?;
             if refreshed != headers {
                 headers = refreshed;
                 continue;
@@ -295,6 +364,9 @@ impl NativeServiceCall {
             if state.generation != self.generation || self.cancellation.is_cancelled() {
                 return Err(denied("call or provider/model decision cancelled"));
             }
+            // Re-resolution and lock acquisition may consume the remaining
+            // approval window. Never cache an answer after its deadline.
+            check_approval_deadline(deadline)?;
             if !state.approvals.contains(&key) {
                 state.approvals.push(key);
             }
@@ -322,11 +394,20 @@ impl NativeServiceCall {
         Ok(headers)
     }
 
-    async fn ask(&self, service: NativeService, credential_label: usize) -> Result<(), ToolError> {
+    async fn ask(
+        &self,
+        key: &ApprovalKey,
+        credential_label: usize,
+        target_label: usize,
+        configured_headers: &HeaderMap,
+    ) -> Result<Instant, ToolError> {
         self.check_current()?;
+        // Record before queueing, not when the receiver is next polled.
+        let deadline = Instant::now() + self.timeout;
+        let (origin, model) = key.safe_labels(configured_headers);
         let question = format!(
-            "Allow native xAI {} outside ChatGPT/Cursor subscription billing? This may use native xAI quota or incur charges using configured credential #{credential_label}. Approval is in-memory for this service's exact configured endpoint, model and credential only, until the provider/model selection changes.",
-            service.label()
+            "Allow native xAI {} outside ChatGPT/Cursor subscription billing? This may use native xAI quota or incur charges using configured credential #{credential_label}. Endpoint origin: {origin}. Model: {model}. Opaque target #{target_label} distinguishes the exact private endpoint/model/credential scope, including redacted parts. Approval is in-memory for this service's exact configured endpoint, model and credential only, until the provider/model selection changes.",
+            key.service.label()
         );
         let (result_tx, result_rx) = oneshot::channel();
         let request = UserQuestionRequest {
@@ -361,7 +442,7 @@ impl NativeServiceCall {
             .send(request)
             .map_err(|_| denied("question UI closed"))?;
         let response = self
-            .wait(tokio::time::timeout(self.timeout, result_rx))
+            .wait(tokio::time::timeout_at(deadline, result_rx))
             .await?
             .map_err(|_| denied("approval timed out"))?
             .map_err(|_| denied("approval cancelled"))?
@@ -383,7 +464,10 @@ impl NativeServiceCall {
                 })
             });
             if exact_answer && plain_selection {
-                return Ok(());
+                // Tokio timeouts may return an already-ready answer even when
+                // the timer has expired; the explicit deadline is authoritative.
+                check_approval_deadline(deadline)?;
+                return Ok(deadline);
             }
         }
         Err(denied("explicit affirmative approval was not received"))
