@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { codexReasoningMetadata } from './model-settings.mjs';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 // Public Codex OAuth flow, also used by OpenCode/Pi. No CLI credential extraction.
@@ -232,7 +233,7 @@ export function createCodexProvider({ fetchImpl = fetch, httpFactory = createSer
       if (!r.ok) throw new Error(`ChatGPT model discovery failed (HTTP ${r.status})`);
       const data = await r.json(), models = data.models ?? data.data;
       if (!Array.isArray(models)) throw new Error('Invalid ChatGPT model catalog');
-      return models.filter(m => m.visibility !== 'hide').map(m => ({ id: m.slug ?? m.id ?? m.model, name: m.display_name ?? m.displayName ?? m.slug ?? m.id, contextWindow: m.context_window ?? m.contextWindow ?? 128000 }));
+      return models.filter(m => m.visibility !== 'hide').map(m => ({ id: m.slug ?? m.id ?? m.model, name: m.display_name ?? m.displayName ?? m.slug ?? m.id, contextWindow: m.context_window ?? m.contextWindow ?? 128000, ...codexReasoningMetadata(m) }));
     },
     async complete(body, c, { signal } = {}) {
       const { request, originals } = toResponses(body);

@@ -13,7 +13,10 @@ fn polycode_unauthenticated_startup_opens_local_provider_ui_without_authenticati
     };
     // Refresh/replacement must not leave the newly drawn provider card parked.
     let _ = dispatch_enabled(&mut app, Command::Menu { login: false });
-    assert_eq!(app.agents[&id].active_pane, crate::app::agent_view::ActivePane::Prompt);
+    assert_eq!(
+        app.agents[&id].active_pane,
+        crate::app::agent_view::ActivePane::Prompt
+    );
     let q = app.agents[&id].question_view.as_ref().unwrap();
     assert!(matches!(
         q.local_kind,
@@ -67,17 +70,17 @@ fn polycode_switch_preserves_native_session_tools_mcp_and_permissions_and_persis
     let tx = agent.session.acp_tx.clone();
     let effects = dispatch_enabled(&mut app, Command::Model(model_id.0.to_string()));
     assert_eq!(effects.len(), 1);
-    assert!(
-        matches!(&effects[0], Effect::SwitchModel { agent_id, session_id: sid, model_id: mid, .. } if *agent_id == target && Some(sid.clone()) == session_id && mid == &model_id)
-    );
+    let Effect::PolycodeSwitchModel(selection) = &effects[0] else {
+        panic!("expected atomic model selection")
+    };
+    assert_eq!(selection.agent_id, target);
+    assert_eq!(Some(selection.session_id.clone()), session_id);
+    assert_eq!(selection.model_id, model_id);
     assert!(!app.external_acp);
     let effects = dispatch_task_result(
-        TaskResult::SwitchModelComplete {
-            agent_id: target,
-            model_id: model_id.clone(),
-            effort: None,
-            result: Ok(()),
-            prev_model_id: None,
+        TaskResult::PolycodeSwitchModelComplete {
+            selection: selection.clone(),
+            result: Ok(None),
         },
         &mut app,
     );
@@ -96,23 +99,141 @@ fn polycode_switch_preserves_native_session_tools_mcp_and_permissions_and_persis
 }
 
 #[test]
-fn polycode_busy_switch_requires_explicit_cancel_without_dropping_tools() {
+fn polycode_busy_picker_remains_usable_without_dropping_tools() {
     let mut app = test_app_with_agent();
     app.agents.get_mut(&AgentId(0)).unwrap().session.state = AgentState::TurnRunning;
     let previous = app.agents[&AgentId(0)].session.models.current.clone();
-    assert!(
-        dispatch_enabled(
-            &mut app,
-            Command::Choose {
-                provider: Choice::Subscription(ProviderId::Cursor),
-                login: true
-            }
-        )
-        .is_empty()
+    let effects = dispatch_enabled(
+        &mut app,
+        Command::Choose {
+            provider: Choice::Subscription(ProviderId::Cursor),
+            login: true,
+        },
     );
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        Effect::Provider {
+            operation: Operation::Start(ProviderId::Cursor),
+            ..
+        }
+    )));
     assert!(app.agents[&AgentId(0)].session.state.is_busy());
     assert_eq!(app.agents[&AgentId(0)].session.models.current, previous);
-    assert!(app.agents[&AgentId(0)].question_view.is_none());
+    assert!(app.agents[&AgentId(0)].question_view.is_some());
+}
+
+#[test]
+fn model_settings_busy_queue_replace_cancel_and_stale_session_completion() {
+    use super::super::provider::{
+        cancel_model_switches, model_switch_complete, queue_model_switch,
+    };
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model = acp::ModelId::new("codex/actual");
+    app.models
+        .available
+        .insert(model.clone(), acp::ModelInfo::new(model.clone(), "Actual"));
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+    let before = app.agents[&id].session.models.current.clone();
+    let effects = queue_model_switch(&mut app, id, model.clone(), None);
+    let Effect::PolycodeSwitchModel(first) = &effects[0] else {
+        panic!("expected queued switch")
+    };
+    assert_eq!(app.agents[&id].session.models.current, before);
+    assert!(app.agents[&id].session.state.is_busy());
+    let effects = queue_model_switch(&mut app, id, model.clone(), None);
+    let Effect::PolycodeSwitchModel(second) = &effects[0] else {
+        panic!("expected replacement")
+    };
+    assert!(model_switch_complete(&mut app, first.clone(), Ok(None)).is_empty());
+    assert!(app.agents[&id].session.model_switch_pending);
+    assert_eq!(app.agents[&id].session.models.current, before);
+    assert_eq!(cancel_model_switches(&mut app).len(), 1);
+    assert!(model_switch_complete(&mut app, second.clone(), Ok(None)).is_empty());
+    assert_eq!(app.agents[&id].session.models.current, before);
+    let effects = queue_model_switch(&mut app, id, model, None);
+    let Effect::PolycodeSwitchModel(third) = &effects[0] else {
+        panic!("expected queued switch")
+    };
+    app.agents.get_mut(&id).unwrap().session.session_id =
+        Some(acp::SessionId::new("resumed-session"));
+    assert!(model_switch_complete(&mut app, third.clone(), Ok(None)).is_empty());
+    assert_eq!(app.agents[&id].session.models.current, before);
+}
+
+#[test]
+fn model_settings_selection_captures_the_picker_catalog_revision() {
+    use super::super::provider::queue_model_switch;
+    let mut app = test_app_with_agent();
+    let model = acp::ModelId::new("codex/actual");
+    app.models.available.insert(model.clone(), acp::ModelInfo::new(model.clone(), "Actual"));
+    app.provider.catalog = serde_json::from_value(serde_json::json!({"providers":[{
+        "id":"codex","name":"ChatGPT","loggedIn":true,"catalogRevision":"a".repeat(64),
+        "models":[{"id":"actual","name":"Actual","contextWindow":64000}]}]})).unwrap();
+    let effects = queue_model_switch(&mut app, AgentId(0), model, None);
+    let Effect::PolycodeSwitchModel(selection) = &effects[0] else { panic!("expected queued switch") };
+    assert_eq!(selection.catalog_revision, Some("a".repeat(64)));
+    app.provider.catalog.providers[0].catalog_revision = Some("b".repeat(64));
+    assert_eq!(selection.catalog_revision, Some("a".repeat(64)), "refresh must not silently upgrade a pending target's account/catalog");
+}
+
+#[test]
+fn model_settings_picker_never_interrupts_or_approves_tool_permission() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let permission = crate::app::agent_view::test_fixtures::make_followup_permission_state();
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .permission_queue
+        .push_back(permission);
+    let effects = dispatch_enabled(&mut app, Command::Menu { login: false });
+    assert!(effects.is_empty());
+    assert_eq!(app.agents[&id].permission_queue.len(), 1);
+    assert!(app.agents[&id].question_view.is_none());
+}
+
+#[test]
+fn model_settings_applied_no_effort_does_not_persist_a_stale_catalog_default() {
+    use super::super::provider::{model_switch_complete, queue_model_switch};
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model = acp::ModelId::new("codex/default-changed");
+    let info = acp::ModelInfo::new(model.clone(), "Actual").meta(
+        serde_json::json!({
+            "supportsReasoningEffort": true, "reasoningEffort": "high", "reasoningEfforts": ["high"]
+        })
+        .as_object()
+        .cloned(),
+    );
+    app.models.available.insert(model.clone(), info.clone());
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .models
+        .available
+        .insert(model.clone(), info);
+    let effects = queue_model_switch(&mut app, id, model, None);
+    let Effect::PolycodeSwitchModel(selection) = &effects[0] else {
+        panic!("expected queued switch")
+    };
+    let effects = model_switch_complete(&mut app, selection.clone(), Ok(None));
+    assert!(app.agents[&id].session.models.reasoning_effort.is_none());
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        Effect::PersistPreferredModel {
+            reasoning_effort: None,
+            ..
+        }
+    )));
+    assert!(!effects.iter().any(|e| matches!(
+        e,
+        Effect::PersistPreferredModel {
+            reasoning_effort: Some(_),
+            ..
+        }
+    )));
 }
 
 fn setup_login() -> AppView {

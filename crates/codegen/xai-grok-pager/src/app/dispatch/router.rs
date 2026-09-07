@@ -150,16 +150,34 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         return vec![];
     }
     if xai_grok_shell::polycode::enabled() {
-        if matches!(&action, Action::SwitchModel { .. } | Action::SetDefaultModel(_)) {
-            if let ActiveView::Agent(id) = app.active_view && let Some(agent) = app.agents.get(&id)
-                && (agent.session.state.is_busy() || agent.session.model_switch_pending)
-            {
-                app.show_toast("Wait for the turn to finish, or cancel it before changing models");
-                return vec![];
-            }
+        if !app.provider.pending_models.selections.is_empty()
+            && (matches!(&action, Action::Quit | Action::QuitConfirmed)
+                || matches!(app.active_view, ActiveView::Agent(id) if app.provider.pending_models.selections.contains_key(&id)))
+            && matches!(
+                &action,
+                Action::NewSession
+                    | Action::NewSessionWithId(_)
+                    | Action::LoadSession(..)
+                    | Action::ResumeForeignSession
+                    | Action::CancelTurn
+                    | Action::Quit
+                    | Action::QuitConfirmed
+            )
+        {
+            let mut effects = if matches!(&action, Action::Quit | Action::QuitConfirmed) {
+                super::provider::cancel_model_switches(app)
+            } else { super::provider::cancel_active_model_switch(app) };
+            effects.extend(dispatch(action, app));
+            return effects;
         }
         if let Action::SetDefaultModel(model_id) = action {
-            return dispatch(Action::SwitchModel { model_id, effort: None }, app);
+            return dispatch(
+                Action::SwitchModel {
+                    model_id,
+                    effort: None,
+                },
+                app,
+            );
         }
     }
     app.reconcile_foreign_resume_launch();
@@ -931,10 +949,23 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             }]
         }
         Action::NextModel => vec![],
+        Action::CancelPendingModelSwitch => {
+            let effects = super::provider::cancel_active_model_switch(app);
+            app.show_toast("Queued model switch cancelled; current work and model unchanged");
+            effects
+        }
         Action::SwitchModel { model_id, effort } => {
             let ActiveView::Agent(id) = app.active_view else {
                 return vec![];
             };
+            if xai_grok_shell::polycode::enabled()
+                && app
+                    .agents
+                    .get(&id)
+                    .is_some_and(|a| a.session.session_id.is_some())
+            {
+                return super::provider::queue_model_switch(app, id, model_id, effort);
+            }
             let Some(agent) = app.agents.get_mut(&id) else {
                 return vec![];
             };
@@ -1195,10 +1226,12 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::Provider(command) => super::provider::dispatch(app, command),
         Action::Login => {
-            if xai_grok_shell::polycode::enabled()
-            { super::provider::dispatch(app, crate::app::provider::Command::Menu { login: true }) }
-            else { dispatch_login(app) }
-        },
+            if xai_grok_shell::polycode::enabled() {
+                super::provider::dispatch(app, crate::app::provider::Command::Menu { login: true })
+            } else {
+                dispatch_login(app)
+            }
+        }
         Action::CancelLogin => dispatch_cancel_login(app),
         Action::SubmitAuthCode(code) => dispatch_submit_auth_code(app, code),
         Action::CopyAuthUrl => {

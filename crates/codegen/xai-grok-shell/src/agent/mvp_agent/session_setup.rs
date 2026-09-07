@@ -459,6 +459,14 @@ impl MvpAgent {
                 origin_client.clone(),
             )
         });
+        if crate::polycode::enabled() && arguments.meta.as_ref().is_some_and(|m| m.contains_key("reasoningEffort")) {
+            let effort = parse_reasoning_effort_meta(arguments.meta.as_ref())
+                .ok_or_else(|| acp::Error::invalid_params().data("Invalid reasoningEffort; choose a model-advertised level"))?;
+            let target = resolved_custom_model.map(acp::ModelId::new).unwrap_or_else(|| self.models_manager.current_model_id());
+            if !self.models_manager.model_supports_reasoning_effort_value(target.0.as_ref(), effort) {
+                return Err(acp::Error::invalid_params().data("Selected model does not expose this reasoning effort level"));
+            }
+        }
         let effort_route = split_new_session_effort(
             resolved_custom_model,
             resolve_new_session_effort_hint(
@@ -845,6 +853,9 @@ impl MvpAgent {
             drop(flush_timer);
         }
         let initial_reasoning_effort = parse_reasoning_effort_meta(request_meta.as_ref());
+        if crate::polycode::enabled() && request_meta.as_ref().is_some_and(|m| m.contains_key("reasoningEffort")) && initial_reasoning_effort.is_none() {
+            return Err(acp::Error::invalid_params().data("Invalid reasoningEffort on session resume"));
+        }
         let origin_client = self.origin_client_info_from_meta(request_meta.as_ref());
         let mut load_session_sampling = self.resolve_sampling_config_for_model(
             &self.models_manager.current_model_id(),

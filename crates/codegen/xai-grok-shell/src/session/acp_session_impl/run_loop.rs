@@ -402,6 +402,12 @@ pub(super) async fn run_session(
         });
     }
     let _startup_tasks = StartupTasks::spawn(&session, completion_tx.clone());
+    let mut pending_model = crate::session::model_settings::PendingSlot::<
+        crate::session::model_settings::PendingModelSwitch,
+    >::new();
+    let mut pending_validation: Option<crate::session::model_settings::ValidationTask> = None;
+    let mut model_commit_tick = tokio::time::interval(std::time::Duration::from_millis(250));
+    model_commit_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut model_switch_rx = session.models_manager.subscribe_model_switch();
     let _ = *model_switch_rx.borrow_and_update();
     let idle_flush_sleep = match session.idle_flush_timeout {
@@ -738,19 +744,59 @@ pub(super) async fn run_session(
                             session.handle_session_mode(session_mode).await;
                             let _ = responds_to.send(());
                         }
+                        SessionCommand::QueueModelSwitch(pending) => {
+                            if pending.effort_only {
+                                let matches_target = if let Some(current) = pending_model.as_ref() {
+                                    current.model_id == pending.model_id
+                                } else {
+                                    session.chat_state_handle.get_sampling_config().await.is_some_and(|current|
+                                        current.model == pending.sampling_config.model && current.base_url == pending.sampling_config.base_url)
+                                };
+                                if !matches_target {
+                                    let _ = pending.responds_to.send(Err(acp::Error::invalid_params().data("Pending model changed before effort selection; select the effort again")));
+                                    continue;
+                                }
+                            }
+                            let label = format!("{}{}", pending.model_id.0,
+                                pending.sampling_config.reasoning_effort.map(|e| format!(" ({e} effort)")).unwrap_or_default());
+                            let replaced = pending_model.is_some();
+                            drop(pending_validation.take());
+                            pending_model.cancel("Queued model switch replaced by a newer selection");
+                            pending_model.replace(*pending);
+                            session.send_hook_annotation(&format!("{}Queued switch to {label}; applies after current work completes. /model cancel cancels.",
+                                if replaced { "Replaced pending selection. " } else { "" })).await;
+                        }
+                        SessionCommand::CancelPendingModelSwitch { selection_id, responds_to } => {
+                            if pending_model.accepts_cancel(selection_id.as_deref()) {
+                                drop(pending_validation.take());
+                                pending_model.cancel("Queued model switch cancelled; current model unchanged");
+                            }
+                            let _ = responds_to.send(());
+                        }
+                        SessionCommand::GetPendingModelSwitch { responds_to } => {
+                            let _ = responds_to.send(pending_model.as_ref().map(|p| (p.model_id.clone(), p.catalog_revision.clone())));
+                        }
                         SessionCommand::SetSessionModel { sampling_config, use_concise, is_family_switch, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, responds_to } => {
+                            drop(pending_validation.take());
+                            pending_model.cancel("Queued model switch cancelled by session restore/configuration reset");
                             let updated_model_id = session.handle_set_session_model(sampling_config, use_concise, is_family_switch, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent).await;
                             let _ = responds_to.send(updated_model_id);
                         }
                         SessionCommand::SetReasoningEffort { effort, responds_to } => {
+                            drop(pending_validation.take());
+                            pending_model.cancel("Queued model switch cancelled by direct effort configuration");
                             let updated_model_id = session.handle_set_reasoning_effort(effort).await;
                             let _ = responds_to.send(updated_model_id);
                         }
                         SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {
+                            drop(pending_validation.take());
+                            pending_model.cancel("Queued model switch cancelled by harness configuration change");
                             let outcome = session.handle_rebuild_agent_for_definition(definition).await;
                             let _ = responds_to.send(outcome);
                         }
                         SessionCommand::OverrideModelName { model_name, extra_headers, context_window } => {
+                            drop(pending_validation.take());
+                            pending_model.cancel("Queued model switch cancelled by direct model configuration");
                             // Update the actor's SamplingConfig model, headers, and context window
                             if let Some(mut cfg) = session.chat_state_handle.get_sampling_config().await {
                                 tracing::info!(
@@ -1039,6 +1085,8 @@ pub(super) async fn run_session(
                             }
                         }
                         SessionCommand::Cancel(options) => {
+                            drop(pending_validation.take());
+                            pending_model.cancel("Queued model switch cancelled with current work");
                             // Flush the actor-owned replay buffer before tearing down the running turn
                             // Chunks still pending at cancel (notably AgentThoughtChunk reasoning text) then get committed to updates.jsonl
                             // A long reasoning stream's tail can sit in the buffer when the user hits Ctrl+C
@@ -1295,7 +1343,7 @@ pub(super) async fn run_session(
                                 .send(PersistenceMsg::CopyFile { one_shot: respond_to });
                         }
                         SessionCommand::IsBusy { respond_to } => {
-                            let _ = respond_to.send(session.is_busy().await);
+                            let _ = respond_to.send(pending_model.is_some() || session.is_busy().await);
                         }
                         SessionCommand::FlushComplete { respond_to } => {
                             // Flush the actor-owned replay buffer inline
@@ -1336,6 +1384,8 @@ pub(super) async fn run_session(
                             });
                         }
                         SessionCommand::UpdateAttachPolicy { startup_hints } => {
+                            drop(pending_validation.take());
+                            pending_model.cancel("Queued model switch cancelled by session attach/resume");
                             session.apply_attach_policy(&startup_hints);
                         }
                         SessionCommand::UpdateMcpServers { mcp_servers, respond_to } => {
@@ -2135,6 +2185,8 @@ pub(super) async fn run_session(
                             );
                         }
                         SessionCommand::Shutdown(kind) => {
+                            drop(pending_validation.take());
+                            pending_model.cancel("Queued model switch cancelled by session shutdown");
                             let end_timer = session_end::SessionEndTimer::new_shared();
                             shutdown_workflows(&session, &end_timer).await;
                             // Flush the actor-owned replay buffer so streamed chunks still pending at shutdown are committed to updates.jsonl
@@ -2193,6 +2245,44 @@ pub(super) async fn run_session(
                         }
                     }
             }
+                // Commands (notably cancel/replace/resume) win over validation completion.
+                validated = async { (&mut pending_validation.as_mut().expect("guarded validation").0).await }, if pending_validation.is_some() => {
+                    drop(pending_validation.take());
+                    let validated = validated.unwrap_or_else(|_| Err(acp::Error::internal_error().data("Model validation interrupted")));
+                    match validated {
+                        Ok(None) => {}, // still working; do not reuse a validation at some later idle
+                        outcome => if let Some(mut pending) = pending_model.take() {
+                            let result = match outcome {
+                                Ok(Some(config)) => {
+                                    pending.sampling_config = config;
+                                    session.commit_pending_model_switch(&mut pending).await
+                                }
+                                Err(error) => Err(error),
+                                Ok(None) => unreachable!(),
+                            };
+                            if result.is_ok() {
+                                session.send_hook_annotation(&format!("Applied switch to {}{}", pending.model_id.0,
+                                    pending.sampling_config.reasoning_effort.map(|e| format!(" ({e} effort)")).unwrap_or_default())).await;
+                            } else {
+                                session.send_hook_annotation("Queued model switch failed revalidation; current model unchanged. Refresh and select again.").await;
+                            }
+                            let _ = pending.responds_to.send(result);
+                        }
+                    }
+                }
+                _ = model_commit_tick.tick(), if pending_model.is_some() && pending_validation.is_none() => {
+                    if pending_model.as_ref().is_some_and(|p| p.responds_to.is_closed()) {
+                        pending_model.take();
+                    } else if !session.is_busy().await {
+                        let pending = pending_model.as_ref().expect("guarded pending model");
+                        let (id, entry, revision, config) = (pending.model_id.clone(), pending.catalog_entry.clone(),
+                            pending.catalog_revision.clone(), pending.sampling_config.clone());
+                        let session = session.clone();
+                        pending_validation = Some(crate::session::model_settings::ValidationTask(tokio::task::spawn_local(async move {
+                            session.validate_pending_model_switch(id, entry, revision, config).await
+                        })));
+                    }
+                }
                 // Prefer cmd_rx when both are already waiting so a queued hold/edit can land before the turn-end promotion (biased select)
                 maybe_completion = completion_rx.recv() => {
                     let Some(super::turn_task::TurnCompletionMsg {
@@ -2230,6 +2320,7 @@ pub(super) async fn run_session(
                     if let Some(notification) = replay_buffer.flush() {
                         session.emit_buffered(notification).await;
                     }
+                    let work_failed = result.is_err();
                     let (turn_succeeded, suppress_goal_continuation, infra_pause_message) =
                         SessionActor::post_turn_goal_degradation_plan(&result);
                     // A `RemovedFromQueue` completion never started a turn, so there is nothing to summarize below
@@ -2254,6 +2345,10 @@ pub(super) async fn run_session(
                     #[cfg(test)]
                     if let Some(processed) = processed {
                         let _ = processed.send(());
+                    }
+                    if work_failed {
+                        drop(pending_validation.take());
+                        pending_model.cancel("Queued model switch cancelled because current work failed");
                     }
                     // Drain monitor events that were routed to the mid-turn buffer but arrived after the turn ended
                     // The is_turn_active check races the buffer push

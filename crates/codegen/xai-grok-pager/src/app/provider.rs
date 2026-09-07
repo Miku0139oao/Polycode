@@ -11,9 +11,18 @@ pub enum Choice {
 }
 #[derive(Debug, Clone)]
 pub enum Command {
-    Menu { login: bool },
-    Choose { provider: Choice, login: bool },
+    Menu {
+        login: bool,
+    },
+    Choose {
+        provider: Choice,
+        login: bool,
+    },
     Model(String),
+    ModelEffort(
+        String,
+        Option<xai_grok_shell::sampling::types::ReasoningEffort>,
+    ),
     Refresh,
     Cancel,
 }
@@ -31,6 +40,7 @@ pub struct State {
     pub pending_session_id: Option<String>,
     /// Prevent late ACP traffic from a cancelled create reaching any new placeholder.
     pub retired_sessions: std::collections::HashSet<String>,
+    pub pending_models: super::model_settings::Pending,
 }
 impl State {
     pub fn invalidate(&mut self) -> Option<LoginAttempt> {

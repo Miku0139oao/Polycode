@@ -136,6 +136,13 @@ pub enum ChatStateCommand {
     /// Update the sampling config (e.g., model switch).
     UpdateSamplingConfig { config: SamplingConfig },
 
+    /// Commit a complete route and its credentials in one mailbox turn. Snapshot readers
+    /// (notably child inheritance) must never observe a new route with old credentials.
+    UpdateSamplingConfigAndCredentials {
+        configuration: Box<(SamplingConfig, Credentials)>,
+        reply: oneshot::Sender<()>,
+    },
+
     /// Track that the agent edited a file path.
     RecordAgentEditedPath { path: String },
 

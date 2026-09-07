@@ -688,6 +688,9 @@ async fn apply_headless_model_and_effort(
         Some(token) => match models.resolve_effort_for_model(&model_id, token) {
             Ok(effort) => Some(effort),
             Err(EffortTokenError::Unsupported) => {
+                if xai_grok_shell::polycode::enabled() {
+                    anyhow::bail!("--effort/--reasoning-effort: selected model does not expose reasoning effort control");
+                }
                 tracing::warn!(
                     model = %model_id.0,
                     token,

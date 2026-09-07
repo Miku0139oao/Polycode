@@ -393,6 +393,8 @@ pub enum Action {
         model_id: acp::ModelId,
         effort: Option<ReasoningEffort>,
     },
+    /// Cancel only a queued model configuration, without touching tools/permissions.
+    CancelPendingModelSwitch,
     /// Cancel the currently running turn.
     CancelTurn,
     /// User confirmed a cancel-turn choice from the panel.
@@ -1523,6 +1525,11 @@ pub enum Effect {
         /// Threaded through to `SwitchModelComplete` so `IncompatibleAgent` can roll back.
         prev_model_id: Option<acp::ModelId>,
     },
+    PolycodeSwitchModel(crate::app::model_settings::Selection),
+    CancelPendingModelSwitch {
+        session_id: acp::SessionId,
+        selection_id: String,
+    },
     /// Fetch changelog from CDN (both markdown and structured JSON).
     /// Runs off the render path via `spawn_blocking`.
     /// Result is cached on `AppView` so `/release-notes` and the welcome screen share it.
@@ -2461,6 +2468,10 @@ pub enum TaskResult {
         result: Result<(), SwitchModelError>,
         /// Forwarded from `Effect::SwitchModel.prev_model_id` for rollback on `IncompatibleAgent`.
         prev_model_id: Option<acp::ModelId>,
+    },
+    PolycodeSwitchModelComplete {
+        selection: crate::app::model_settings::Selection,
+        result: Result<Option<ReasoningEffort>, SwitchModelError>,
     },
     /// Changelog fetched from CDN (both formats).
     ChangelogFetched {

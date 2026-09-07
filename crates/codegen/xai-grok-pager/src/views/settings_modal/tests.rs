@@ -4722,7 +4722,7 @@ fn row_layout_bool_without_chevron() {
 }
 
 // -- User-feedback follow-up: always reserve a blank line between
-//    the "Tip · Ask Grok…" docs footer and the keybindings hints.
+//    the "Tip · Ask Polycode…" docs footer and the keybindings hints.
 //
 // The chrome sets `footer_lines` to `predicted_hint_rows + 1`, so a blank row always separates the tip from the first hint line
 // This holds even when the hints wrap to 2 rows at narrow modal widths
@@ -5495,7 +5495,7 @@ fn docs_footer_tip_is_centered() {
     );
 
     // SHORT path: width that fits SHORT but not LONG.
-    // SHORT is "Tip · Ask Grok to change a setting" (34 cells); LONG is ~73 cells. width=40 lands in the SHORT band.
+    // SHORT is "Tip · Ask Polycode to change a setting" (37 cells); width=40 lands in the SHORT band.
     let (row_short, tip_start_short, trailing_short) = render(40);
     assert!(
         row_short.contains("change a setting"),
@@ -5543,7 +5543,7 @@ fn tip_line_has_blank_row_above() {
     let mut tip_y: Option<u16> = None;
     for y in 0..area.height {
         let txt = buf_row_text(&buf, y, area.x, area.width);
-        if txt.contains("Tip") && txt.contains("Ask Grok") {
+        if txt.contains("Tip") && txt.contains("Ask Polycode") {
             tip_y = Some(y);
             break;
         }
@@ -6166,7 +6166,7 @@ fn consent_chooser_drops_tip_and_reset() {
     let mut consent = enter_picker_for("coding_data_sharing");
     let text = screen(&mut consent);
     assert!(
-        !text.contains("Ask Grok"),
+        !text.contains("Ask Polycode"),
         "consent chooser must not render the docs tip:\n{text}"
     );
     assert!(
@@ -6195,7 +6195,7 @@ fn consent_chooser_drops_tip_and_reset() {
     let mut ordinary = enter_picker_for("theme");
     let text = screen(&mut ordinary);
     assert!(
-        text.contains("d reset") && text.contains("Ask Grok"),
+        text.contains("d reset") && text.contains("Ask Polycode"),
         "ordinary pickers keep the tip and the reset hint:\n{text}"
     );
     assert!(

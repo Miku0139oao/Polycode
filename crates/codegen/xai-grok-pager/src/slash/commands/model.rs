@@ -42,6 +42,9 @@ impl SlashCommand for ModelCommand {
 
     fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         let trimmed = args.trim();
+        if trimmed.eq_ignore_ascii_case("cancel") {
+            return CommandResult::Action(Action::CancelPendingModelSwitch);
+        }
         if trimmed.is_empty() {
             return CommandResult::Error("Usage: /model <name> [effort]".into());
         }
@@ -57,12 +60,6 @@ impl SlashCommand for ModelCommand {
         // Without it the fall-through reports "Unknown model: … none"
         if let Some((prefix, token)) = split_trailing_token(trimmed)
             && let Some(id) = resolve_model(ctx.models, prefix)
-            && ctx
-                .models
-                .available
-                .get(&id)
-                .map(supports_reasoning_effort)
-                .unwrap_or(false)
         {
             return match ctx.models.resolve_effort_for_model(&id, token) {
                 Ok(effort) => CommandResult::Action(Action::SwitchModel {
@@ -223,6 +220,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn model_settings_picker_offers_only_catalog_levels_and_cancel_is_local() {
+        let mut state = ModelState::default();
+        let id = acp::ModelId::new("codex/actual");
+        let meta = serde_json::json!({"supportsReasoningEffort":true,"reasoningEffort":"minimal",
+            "reasoningEfforts":["minimal","high"]});
+        state.available.insert(
+            id.clone(),
+            acp::ModelInfo::new(id.clone(), "Actual").meta(meta.as_object().cloned()),
+        );
+        let items = build_effort_items(&state, &id);
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().any(|i| i.insert_text == "Actual minimal"));
+        assert!(items.iter().any(|i| i.insert_text == "Actual high"));
+        assert!(!items.iter().any(|i| i.insert_text.contains("xhigh")));
+        let mut ctx = dummy_exec_ctx(&state);
+        assert!(matches!(
+            ModelCommand.run(&mut ctx, "Actual xhigh"),
+            CommandResult::Error(_)
+        ));
+        assert!(matches!(
+            ModelCommand.run(&mut ctx, "cancel"),
+            CommandResult::Action(Action::CancelPendingModelSwitch)
+        ));
+        let (plain, info) = plain_model("cursor/actual", "Cursor Actual");
+        state.available.insert(plain.clone(), info);
+        assert!(build_effort_items(&state, &plain).is_empty());
+        let mut ctx = dummy_exec_ctx(&state);
+        assert!(
+            matches!(ModelCommand.run(&mut ctx, "Cursor Actual high"), CommandResult::Error(message) if message.contains("does not support reasoning effort"))
+        );
+    }
     #[test]
     fn split_trailing_token_splits_on_final_whitespace() {
         assert_eq!(

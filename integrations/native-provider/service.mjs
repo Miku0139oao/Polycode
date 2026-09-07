@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 export { CredentialStore } from './store.mjs';
+import { catalogRevision, validateReasoningMetadata, validateSelectedEffort } from './model-settings.mjs';
 
 function waiter(promise, signal) {
   if (!signal) return promise;
@@ -55,6 +56,7 @@ export class NativeProviderService {
     if (!refresh && cached?.revision === snapshot.revision) return cached.models;
     const models = await this.providers[provider].models(snapshot.credential, { signal });
     if (!Array.isArray(models) || models.length > 500 || models.some(m => typeof m.id !== 'string' || !m.id || m.id.length > 512 || typeof m.name !== 'string' || m.name.length > 512 || /[\x00-\x1f\x7f]/.test(m.id + m.name) || !Number.isFinite(m.contextWindow) || m.contextWindow <= 0) || new Set(models.map(m => m.id)).size !== models.length) throw new Error('Invalid catalog');
+    for (const model of models) validateReasoningMetadata(model);
     if ((await this.store.snapshot(provider)).revision !== snapshot.revision) throw error('Account changed while loading models; refresh the catalog.', 409);
     this.catalogs.set(provider, { revision: snapshot.revision, models });
     return models;
@@ -63,12 +65,16 @@ export class NativeProviderService {
     const providers = [];
     for (const id of Object.keys(this.providers)) {
       const loggedIn = Boolean(await this.store.get(id));
-      let models = [], message;
+      let models = [], message, revision;
       if (loggedIn) {
-        try { models = await this.modelsFor(id, await this.credentialSnapshot(id, signal), refresh, signal); }
+        try {
+          const snapshot = await this.credentialSnapshot(id, signal);
+          models = await this.modelsFor(id, snapshot, refresh, signal);
+          revision = catalogRevision(snapshot.revision, models);
+        }
         catch { message = 'Model discovery failed. Check login and provider availability.'; }
       }
-      providers.push({ id, name: names[id], loggedIn, models, ...(message ? { message } : {}) });
+      providers.push({ id, name: names[id], loggedIn, models, ...(revision ? { catalogRevision: revision } : {}), ...(message ? { message } : {}) });
     }
     return { providers };
   }
@@ -110,6 +116,16 @@ export class NativeProviderService {
       const url = new URL(req.url, this.url);
       if (req.method === 'GET' && url.pathname === '/control/catalog') return json(res, 200, await this.catalog(false, controller.signal));
       if (req.method === 'POST' && url.pathname === '/control/refresh') { await this.body(req); return json(res, 200, await this.catalog(true, controller.signal)); }
+      if (req.method === 'POST' && url.pathname === '/control/validate-model') {
+        const b = await this.body(req);
+        const snapshot = await this.credentialSnapshot(b.provider, controller.signal);
+        const models = await this.modelsFor(b.provider, snapshot, true, controller.signal);
+        if (typeof b.catalogRevision !== 'string' || b.catalogRevision !== catalogRevision(snapshot.revision, models)) throw error('Queued model catalog or credentials changed; select the model again.', 409);
+        const model = models.find(m => m.id === b.model);
+        if (!model) throw error('Queued model is no longer available', 409);
+        validateSelectedEffort(model, { reasoning_effort: b.effort });
+        return json(res, 200, {});
+      }
       if (req.method === 'POST' && url.pathname === '/control/login/start') { const b = await this.body(req); return json(res, 200, await this.login(b.provider)); }
       if (url.pathname === '/control/login/status' && req.method === 'GET') {
         const a = this.attempts.get(url.searchParams.get('attemptId')); if (!a) throw error('Unknown login attempt', 404);
@@ -127,7 +143,9 @@ export class NativeProviderService {
         if (body.model.startsWith(provider + '/')) body.model = body.model.slice(provider.length + 1);
         const snapshot = await this.credentialSnapshot(provider, controller.signal);
         const models = await this.modelsFor(provider, snapshot, false, controller.signal);
-        if (!models.some(m => m.id === body.model)) throw error('Model is not advertised by the selected provider');
+        const model = models.find(m => m.id === body.model);
+        if (!model) throw error('Model is not advertised by the selected provider');
+        validateSelectedEffort(model, body);
         const response = await this.providers[provider].complete(body, snapshot.credential, { signal: controller.signal });
         res.writeHead(response.status, { 'Content-Type': response.headers.get('Content-Type') ?? 'application/json', 'Cache-Control': 'no-store' });
         if (response.body) for await (const chunk of response.body) {

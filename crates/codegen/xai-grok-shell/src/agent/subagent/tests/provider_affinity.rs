@@ -110,7 +110,14 @@ async fn exercise_subscription_parent(parent_base: &str, foreign_base: &str) {
         routed_entry("other-slug", foreign_base),
     );
     let chat = spawn_test_parent_chat_state("old-slug");
-    chat.update_sampling_config(live_sampling("live-slug", parent_base));
+    let mut live = live_sampling("live-slug", parent_base);
+    let selected_effort = if parent_base == CODEX {
+        Some(xai_grok_sampling_types::ReasoningEffort::Low)
+    } else {
+        None
+    };
+    live.reasoning_effort = selected_effort;
+    chat.update_sampling_config(live);
     chat.update_credentials(xai_chat_state::Credentials {
         api_key: Some("live-key-fixture".into()),
         auth_type: xai_chat_state::AuthType::ApiKey,
@@ -137,6 +144,11 @@ async fn exercise_subscription_parent(parent_base: &str, foreign_base: &str) {
     assert_eq!(inherited.base_url, parent_base);
     assert_eq!(inherited.model, "live-slug");
     assert_eq!(inherited.temperature, Some(0.17));
+    assert_eq!(parent.config.reasoning_effort, selected_effort);
+    assert_eq!(
+        inherited.reasoning_effort, selected_effort,
+        "captured child sampling config must inherit native effort, including unavailable Cursor control"
+    );
     assert_eq!(inherited.api_key, parent.config.api_key);
     assert_eq!(id, parent.model_id);
 

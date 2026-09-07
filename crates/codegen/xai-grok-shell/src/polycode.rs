@@ -26,6 +26,15 @@ impl ProviderId {
         }
     }
 }
+/// Positive process-local registration identity. Unknown is never native by default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegisteredModelProvider {
+    NativeGrok,
+    Subscription(ProviderId),
+}
+pub fn registered_model_provider(id: &str) -> Option<RegisteredModelProvider> {
+    bridge().and_then(|b| b.registered_model_provider(id))
+}
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Catalog {
     pub providers: Vec<Provider>,
@@ -36,6 +45,8 @@ pub struct Provider {
     pub id: ProviderId,
     pub name: String,
     pub logged_in: bool,
+    #[serde(default)]
+    pub catalog_revision: Option<String>,
     pub models: Vec<Model>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -44,6 +55,10 @@ pub struct Model {
     pub id: String,
     pub name: String,
     pub context_window: u64,
+    #[serde(default)]
+    pub reasoning_efforts: Vec<xai_grok_sampling_types::ReasoningEffortOption>,
+    #[serde(default)]
+    pub default_reasoning_effort: Option<xai_grok_sampling_types::ReasoningEffort>,
 }
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,6 +93,7 @@ pub struct Bridge {
     token: String,
     client: Client,
     catalog: RwLock<Catalog>,
+    registered_models: RwLock<IndexMap<String, RegisteredModelProvider>>,
     initial_provider: Option<String>,
 }
 pub fn bridge() -> Option<&'static Bridge> {
@@ -162,6 +178,7 @@ impl Bridge {
             token,
             client,
             catalog: RwLock::new(Catalog::default()),
+            registered_models: RwLock::new(IndexMap::new()),
             initial_provider: None,
         })
     }
@@ -236,6 +253,34 @@ impl Bridge {
         *self.catalog.write().expect("bridge catalog") = catalog.clone();
         Ok(catalog)
     }
+    /// Validate the selected target, not an arbitrary fallback, against fresh account/catalog data.
+    pub(crate) async fn validate_selection(
+        &self,
+        id: &str,
+        revision: &str,
+        effort: Option<xai_grok_sampling_types::ReasoningEffort>,
+    ) -> Result<(), String> {
+        let (provider, model) = id.split_once('/').ok_or("Invalid subscription model")?;
+        let _: serde_json::Value = self.request(
+            Method::POST,
+            "control/validate-model",
+            Some(serde_json::json!({"provider": provider, "model": model,
+                "catalogRevision": revision, "effort": effort})),
+        ).await.map_err(|_| "Selected model catalog or credentials changed/unavailable; refresh and select again".to_owned())?;
+        Ok(())
+    }
+    pub(crate) fn selection_revision(&self, id: &str) -> Option<String> {
+        self.catalog()
+            .providers
+            .into_iter()
+            .find(|p| {
+                p.logged_in
+                    && p.models
+                        .iter()
+                        .any(|m| id == format!("{}/{}", p.id.as_str(), m.id))
+            })
+            .and_then(|p| p.catalog_revision)
+    }
     fn safe_text(&self, value: &str) -> bool {
         value.len() <= 8192
             && !value.contains(&self.token)
@@ -246,7 +291,13 @@ impl Bridge {
     fn validate_catalog(&self, catalog: &Catalog) -> Result<(), String> {
         let mut providers = std::collections::HashSet::new();
         for provider in &catalog.providers {
-            if !providers.insert(provider.id.as_str()) || !self.safe_text(&provider.name) {
+            if !providers.insert(provider.id.as_str())
+                || !self.safe_text(&provider.name)
+                || provider
+                    .catalog_revision
+                    .as_ref()
+                    .is_some_and(|r| r.len() != 64 || !r.bytes().all(|b| b.is_ascii_hexdigit()))
+            {
                 return Err("Invalid bridge provider catalog".into());
             }
             let mut ids = std::collections::HashSet::new();
@@ -257,6 +308,7 @@ impl Bridge {
                     || !self.safe_text(&model.name)
                     || model.context_window == 0
                     || !ids.insert(&model.id)
+                    || !valid_reasoning_metadata(model)
                 {
                     return Err("Invalid bridge model catalog".into());
                 }
@@ -335,12 +387,83 @@ impl Bridge {
                 && entry.info.base_url == self.model_base(p.id)
                 && entry.info.api_backend == ApiBackend::ChatCompletions
                 && entry.info.extra_headers.is_empty()
+                && entry.info.query_params.is_empty()
+                && entry.info.env_http_headers.is_empty()
                 && p.models.iter().any(|m| {
                     id == format!("{}/{}", p.id.as_str(), m.id)
                         && entry.info.id.as_deref() == Some(id)
                         && entry.info.model == m.id
                 })
         })
+    }
+    fn registered_model_provider(&self, id: &str) -> Option<RegisteredModelProvider> {
+        let registered = self
+            .registered_models
+            .read()
+            .expect("model identity registry")
+            .get(id)
+            .copied()?;
+        if let RegisteredModelProvider::Subscription(provider) = registered {
+            // A stale catalog cannot turn sign-out/removal into a native-billing identity.
+            if !self
+                .catalog
+                .read()
+                .expect("bridge catalog")
+                .providers
+                .iter()
+                .any(|p| {
+                    p.id == provider
+                        && p.logged_in
+                        && p.models
+                            .iter()
+                            .any(|m| id == format!("{}/{}", p.id.as_str(), m.id))
+                })
+            {
+                return None;
+            }
+        }
+        Some(registered)
+    }
+    fn register_models(
+        &self,
+        resolved: &IndexMap<String, ModelEntry>,
+        native_sources: Option<&IndexMap<String, ModelEntry>>,
+    ) {
+        let mut registered = IndexMap::new();
+        for (id, entry) in resolved {
+            if self.ready_model(id, entry) {
+                if let Some(provider) = self
+                    .catalog()
+                    .providers
+                    .into_iter()
+                    .find(|p| entry.info.base_url == self.model_base(p.id))
+                {
+                    registered.insert(
+                        id.clone(),
+                        RegisteredModelProvider::Subscription(provider.id),
+                    );
+                }
+            } else if let Some(source) = native_sources.and_then(|m| m.get(id)) {
+                let original = &source.info;
+                let info = &entry.info;
+                if (crate::util::is_xai_api_url(&original.base_url)
+                    || crate::util::is_prod_cli_chat_proxy_url(&original.base_url))
+                    && info.model == original.model
+                    && info.base_url == original.base_url
+                    && entry.api_base_url == source.api_base_url
+                    && info.api_backend == original.api_backend
+                    && info.extra_headers == original.extra_headers
+                    && info.query_params == original.query_params
+                    && info.env_http_headers == original.env_http_headers
+                {
+                    registered.insert(id.clone(), RegisteredModelProvider::NativeGrok);
+                }
+            }
+        }
+        *self
+            .registered_models
+            .write()
+            .expect("model identity registry") = registered;
     }
     /// Append last, after native/global config resolution. User headers/credentials must not
     /// override the trusted transport, nor may the process key enter a native Grok entry.
@@ -361,12 +484,21 @@ impl Bridge {
                     model: Some(model.id),
                     name: Some(format!("{} / {}", provider.name, model.name)),
                     context_window: Some(model.context_window),
+                    supports_reasoning_effort: Some(!model.reasoning_efforts.is_empty()),
+                    reasoning_efforts: model.reasoning_efforts.clone(),
+                    reasoning_effort: model.default_reasoning_effort,
                     supported_in_api: Some(true),
                     ..Default::default()
                 }
                 .with_provider_defaults(&config, provider.id.as_str())
                 .apply(&key, None, endpoints);
                 entry.info.id = Some(key.clone());
+                // Do not manufacture a default from the first option when upstream did not expose one.
+                entry.info.reasoning_effort = model.default_reasoning_effort;
+                if model.reasoning_efforts.is_empty() {
+                    entry.info.description =
+                        Some("Provider does not expose reasoning effort control".into());
+                }
                 entry.auth_provider = Some(crate::auth::AuthProviderRef::fail_closed(
                     "polycode process transport".into(),
                 ));
@@ -375,12 +507,30 @@ impl Bridge {
         }
     }
 }
+fn valid_reasoning_metadata(model: &Model) -> bool {
+    let mut values = std::collections::HashSet::new();
+    model.reasoning_efforts.len() <= 7
+        && model.reasoning_efforts.iter().all(|o| {
+            o.id == o.value.as_str()
+                && o.label == o.value.as_str()
+                && values.insert(o.id.as_str())
+                && o.description.as_ref().is_none_or(|d| {
+                    d.len() <= 8192 && !d.chars().any(|c| c.is_control() && c != '\n' && c != '\t')
+                })
+        })
+        && model.reasoning_efforts.iter().filter(|o| o.default).count() <= 1
+        && model
+            .default_reasoning_effort
+            .is_none_or(|d| model.reasoning_efforts.iter().any(|o| o.value == d))
+}
 pub(crate) fn inject_models(
     resolved: &mut IndexMap<String, ModelEntry>,
     endpoints: &crate::agent::config::EndpointsConfig,
+    native_sources: Option<&IndexMap<String, ModelEntry>>,
 ) {
     if let Some(bridge) = bridge() {
         bridge.inject(resolved, endpoints);
+        bridge.register_models(resolved, native_sources);
     }
 }
 pub(crate) fn is_ready_model(id: &str, entry: &ModelEntry) -> bool {
@@ -520,6 +670,7 @@ mod tests {
                 id: ProviderId::Codex,
                 name: "ChatGPT".into(),
                 logged_in: false,
+                catalog_revision: None,
                 models: vec![],
             }],
         };
@@ -556,6 +707,7 @@ mod tests {
             id: ProviderId::Codex,
             name: "private-leader-process-token".into(),
             logged_in: false,
+            catalog_revision: None,
             models: vec![],
         });
         let mut bad_provider = bridge.leader_bootstrap();
@@ -641,6 +793,127 @@ mod tests {
         assert!(!format!("{entry:?}").contains("not-a-real-process-token"));
     }
     #[test]
+    fn model_settings_catalog_metadata_survives_overlay_bootstrap_and_acp() {
+        let bridge = Bridge::new(
+            "http://127.0.0.1:1234",
+            "private-model-settings-token".into(),
+        )
+        .unwrap();
+        let catalog: Catalog = serde_json::from_value(serde_json::json!({"providers":[
+            {"id":"codex","name":"ChatGPT","loggedIn":true,"catalogRevision":"a".repeat(64),"models":[
+                {"id":"actual","name":"Actual","contextWindow":64000,"reasoningEfforts":[
+                    {"id":"low","value":"low","label":"low","default":false},
+                    {"id":"high","value":"high","label":"high","default":true}],"defaultReasoningEffort":"high"}]},
+            {"id":"cursor","name":"Cursor","loggedIn":true,"models":[{"id":"actual","name":"Actual","contextWindow":64000}]}
+        ]})).unwrap();
+        bridge.validate_catalog(&catalog).unwrap();
+        *bridge.catalog.write().unwrap() = catalog;
+        let leader = Bridge::from_leader_bootstrap(bridge.leader_bootstrap()).unwrap();
+        let cfg = crate::agent::config::Config::default();
+        let mut models = IndexMap::new();
+        leader.inject(&mut models, &cfg.endpoints);
+        let codex = &models["codex/actual"].info;
+        assert!(codex.supports_reasoning_effort);
+        assert_eq!(
+            codex.reasoning_effort,
+            Some(xai_grok_sampling_types::ReasoningEffort::High)
+        );
+        assert_eq!(
+            codex
+                .reasoning_efforts
+                .iter()
+                .map(|e| e.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["low", "high"]
+        );
+        assert!(!models["cursor/actual"].info.supports_reasoning_effort);
+        assert!(models["cursor/actual"].info.reasoning_effort.is_none());
+        assert!(models["cursor/actual"].info.reasoning_efforts.is_empty());
+        let acp = crate::agent::config::to_acp_model_info(&models);
+        let meta = acp[&agent_client_protocol::ModelId::new("codex/actual")]
+            .meta
+            .as_ref()
+            .unwrap();
+        assert_eq!(meta["reasoningEfforts"].as_array().unwrap().len(), 2);
+        assert_eq!(meta["reasoningEffort"], "high");
+    }
+    #[test]
+    fn registered_provider_identity_is_positive_scoped_and_survives_restore() {
+        let bridge = Bridge::new("http://127.0.0.1:1234", "registry-fixture-token".into()).unwrap();
+        let cfg = crate::agent::config::Config::default();
+        let mut native = crate::agent::config::resolve_model_list(&cfg, None)
+            .into_values()
+            .next()
+            .unwrap();
+        native.info.model = "original-native".into();
+        native.info.base_url = "https://api.x.ai/v1".into();
+        let sources = IndexMap::from([("native-original".into(), native.clone())]);
+        let catalog: Catalog = serde_json::from_value(serde_json::json!({"providers":[
+            {"id":"codex","name":"ChatGPT","loggedIn":true,"models":[{"id":"a","name":"A","contextWindow":64000}]},
+            {"id":"cursor","name":"Cursor","loggedIn":true,"models":[{"id":"b","name":"B","contextWindow":64000}]}
+        ]})).unwrap();
+        *bridge.catalog.write().unwrap() = catalog;
+        let mut resolved = sources.clone();
+        resolved.insert("grok-forged".into(), native.clone());
+        resolved.insert("codex/forged".into(), native.clone());
+        let mut forged = native;
+        forged.info.base_url = "https://api.x.ai.attacker.invalid/v1".into();
+        resolved.insert("forged-endpoint".into(), forged);
+        bridge.inject(&mut resolved, &cfg.endpoints);
+        bridge.register_models(&resolved, Some(&sources));
+        assert_eq!(
+            bridge.registered_model_provider("native-original"),
+            Some(RegisteredModelProvider::NativeGrok)
+        );
+        assert_eq!(
+            bridge.registered_model_provider("codex/a"),
+            Some(RegisteredModelProvider::Subscription(ProviderId::Codex))
+        );
+        assert_eq!(
+            bridge.registered_model_provider("cursor/b"),
+            Some(RegisteredModelProvider::Subscription(ProviderId::Cursor))
+        );
+        for unknown in [
+            "grok-forged",
+            "codex/forged",
+            "forged-endpoint",
+            "unknown",
+            "a",
+        ] {
+            assert_eq!(bridge.registered_model_provider(unknown), None, "{unknown}");
+        }
+        let restored = Bridge::from_leader_bootstrap(bridge.leader_bootstrap()).unwrap();
+        restored.register_models(&resolved, Some(&sources));
+        // Picker selection is deliberately absent from this API: only the actual model id matters.
+        assert_eq!(
+            restored.registered_model_provider("codex/a"),
+            bridge.registered_model_provider("codex/a")
+        );
+        assert_eq!(
+            restored.registered_model_provider("native-original"),
+            Some(RegisteredModelProvider::NativeGrok)
+        );
+        restored.catalog.write().unwrap().providers[0].logged_in = false;
+        assert_eq!(restored.registered_model_provider("codex/a"), None);
+        assert_eq!(
+            restored.registered_model_provider("cursor/b"),
+            Some(RegisteredModelProvider::Subscription(ProviderId::Cursor))
+        );
+        let mut rerouted = sources.clone();
+        rerouted.get_mut("native-original").unwrap().info.base_url =
+            "https://unregistered.invalid/v1".into();
+        restored.register_models(&rerouted, Some(&sources));
+        assert_eq!(restored.registered_model_provider("native-original"), None);
+    }
+    #[test]
+    fn model_settings_invalid_default_is_not_silently_dropped() {
+        let model: Model =
+            serde_json::from_value(serde_json::json!({"id":"a","name":"A","contextWindow":1,
+            "reasoningEfforts":[{"id":"low","value":"low","label":"low","default":true}],"defaultReasoningEffort":"xhigh"}))
+            .unwrap();
+        assert!(!valid_reasoning_metadata(&model));
+    }
+    #[test]
     fn login_debug_is_redacted_and_catalog_rejects_token() {
         let b = Bridge::new("http://127.0.0.1:1234", "secret-process-token".into()).unwrap();
         let a = LoginAttempt {
@@ -655,6 +928,7 @@ mod tests {
                 id: ProviderId::Cursor,
                 name: b.token.clone(),
                 logged_in: false,
+                catalog_revision: None,
                 models: vec![],
             }],
         };

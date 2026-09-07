@@ -232,6 +232,17 @@ impl ChatStateHandle {
             .send(ChatStateCommand::UpdateSamplingConfig { config });
     }
 
+    /// Atomically commit model/provider/effort and credentials, then acknowledge visibility
+    /// to all later snapshot readers. Does not persist credential secrets.
+    pub async fn update_sampling_config_and_credentials(
+        &self, config: SamplingConfig, credentials: Credentials,
+    ) -> Result<(), &'static str> {
+        let (reply, receive) = oneshot::channel();
+        self.cmd_tx.send(ChatStateCommand::UpdateSamplingConfigAndCredentials { configuration: Box::new((config, credentials)), reply })
+            .map_err(|_| "Chat state closed before configuration commit")?;
+        receive.await.map_err(|_| "Chat state closed before configuration acknowledgement")
+    }
+
     /// Track that the agent edited a file path.
     pub fn record_agent_edited_path(&self, path: String) {
         let _ = self

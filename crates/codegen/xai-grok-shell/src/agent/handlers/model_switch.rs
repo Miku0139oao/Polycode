@@ -37,6 +37,19 @@ pub(crate) async fn apply(
         Some(serde_json::json!({"model": args.model_id.0.as_ref()})),
     );
     tracing::debug!("session_session_model::mvp_agent: {:?}", &args);
+    let expected_catalog_revision = args.meta.as_ref().and_then(|m| m.get("polycodeCatalogRevision")).and_then(|v| v.as_str()).map(str::to_owned);
+    let selection_id = args
+        .meta
+        .as_ref()
+        .and_then(|m| m.get("polycodeSelectionId"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let effort_only = args
+        .meta
+        .as_ref()
+        .and_then(|m| m.get("polycodeEffortOnly"))
+        .and_then(|v| v.as_bool())
+        == Some(true);
     let acp::SetSessionModelRequest {
         session_id,
         model_id,
@@ -46,13 +59,23 @@ pub(crate) async fn apply(
         .session_handle_waiting_for_load(&session_id)
         .await
         .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
-    let _config_guard = agent.config_mutation_lock(&session_id).lock_owned().await;
+    let config_guard = agent.config_mutation_lock(&session_id).lock_owned().await;
     let handle = agent.resident_handle(&session_id).unwrap_or(handle);
+    let queued_user_switch = crate::polycode::enabled() && config_notice == ConfigNotice::Send;
     // A subscription's session-local classification never authorizes a switch to
     // an unauthenticated native/arbitrary model. Explicit Grok login still updates
     // the shared live auth cell used by the existing session.
     let _ = agent.session_auth_for_model(&model_id)?;
     let model = agent.resolve_model_id(&model_id)?;
+    if let SwitchEffort::Set(Some(explicit)) = effort
+        && config_notice == ConfigNotice::Send
+        && !agent
+            .models_manager
+            .model_supports_reasoning_effort_value(model_id.0.as_ref(), explicit)
+    {
+        return Err(acp::Error::invalid_params()
+            .data("Selected model does not expose this reasoning effort level"));
+    }
     let use_concise = model.info().use_concise;
     let session_default = handle
         .session_default_agent_profile
@@ -154,6 +177,9 @@ pub(crate) async fn apply(
     }
     let effective_effort = match effort {
         SwitchEffort::Set(explicit) => explicit,
+        SwitchEffort::Preserve if crate::polycode::enabled() && previous_model_id != model_id.0 => {
+            None
+        }
         SwitchEffort::Preserve => handle
             .chat_state_handle
             .get_sampling_config()
@@ -181,6 +207,12 @@ pub(crate) async fn apply(
         );
         pending_rebuild_definition = None;
     }
+    let queued_rebuild = if queued_user_switch {
+        pending_rebuild_definition.take()
+    } else {
+        None
+    };
+    let rebuild_on_commit = queued_rebuild.is_some();
     let did_rebuild = if let Some(def) = pending_rebuild_definition {
         let (rebuild_tx, rebuild_rx) = oneshot::channel();
         let _ = handle
@@ -230,23 +262,68 @@ pub(crate) async fn apply(
         )
     };
     let (tx, rx) = oneshot::channel();
-    let _ = handle.cmd_tx.send(SessionCommand::SetSessionModel {
-        sampling_config: model_sampling,
-        use_concise,
-        is_family_switch,
-        apply_prompt_override,
-        skip_prompt_rewrite: did_rebuild || model_unchanged,
-        auto_compact_threshold_percent: new_threshold,
-        responds_to: tx,
-    });
+    if queued_user_switch {
+        let catalog_entry = serde_json::to_value(&model)
+            .map_err(|_| acp::Error::internal_error().data("Cannot snapshot model catalog"))?;
+        let catalog_revision = expected_catalog_revision.or_else(||
+            crate::polycode::bridge().and_then(|b| b.selection_revision(model_id.0.as_ref())));
+        let _ = handle
+            .cmd_tx
+            .send(SessionCommand::QueueModelSwitch(Box::new(
+                crate::session::model_settings::PendingModelSwitch {
+                    model_id: model_id.clone(),
+                    selection_id,
+                    effort_only,
+                    catalog_entry,
+                    catalog_revision,
+                    sampling_config: model_sampling,
+                    use_concise,
+                    is_family_switch,
+                    apply_prompt_override,
+                    skip_prompt_rewrite: model_unchanged,
+                    rebuild: queued_rebuild,
+                    auto_compact_threshold_percent: new_threshold,
+                    responds_to: tx,
+                },
+            )));
+    } else {
+        let _ = handle.cmd_tx.send(SessionCommand::SetSessionModel {
+            sampling_config: model_sampling,
+            use_concise,
+            is_family_switch,
+            apply_prompt_override,
+            skip_prompt_rewrite: did_rebuild || model_unchanged,
+            auto_compact_threshold_percent: new_threshold,
+            responds_to: tx,
+        });
+    }
+    // Pending selections cannot hold this lock: replacement and effort requests must reach the actor.
+    let _config_guard = if queued_user_switch {
+        drop(config_guard);
+        None
+    } else {
+        Some(config_guard)
+    };
     let updated_model = rx
         .await
         .map_err(|_| acp::Error::internal_error().data("failed to set session model"))??;
+    if queued_user_switch
+        && agent
+            .resident_handle(&session_id)
+            .is_none_or(|live| !live.cmd_tx.same_channel(&handle.cmd_tx))
+    {
+        return Err(
+            acp::Error::invalid_params().data("Session changed while the model switch was pending")
+        );
+    }
     agent.with_resident_mut(&session_id, |handle| {
         handle.model_id = model_id.clone();
         handle.reasoning_effort = applied_effort;
-        handle.agent_name =
-            agent_name_after_model_switch(did_rebuild, &required_agent_type, &handle.agent_name);
+        handle.agent_name = agent_name_after_model_switch(
+            did_rebuild || rebuild_on_commit,
+            &required_agent_type,
+            &handle.agent_name,
+        );
     });
     notify_model_changed(
         agent,
@@ -276,6 +353,7 @@ pub(crate) async fn apply(
     Ok(acp::SetSessionModelResponse::new().meta(
         serde_json::json!({
             "model": updated_model,
+            "reasoningEffort": applied_effort,
         })
         .as_object()
         .cloned(),
@@ -297,6 +375,30 @@ pub(crate) async fn apply_reasoning_effort(
         .session_handle_waiting_for_load(&session_id)
         .await
         .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
+    if crate::polycode::enabled() {
+        let (tx, rx) = oneshot::channel();
+        let _ = handle
+            .cmd_tx
+            .send(SessionCommand::GetPendingModelSwitch { responds_to: tx });
+        let (model_id, catalog_revision) = rx
+            .await.map_err(|_| acp::Error::internal_error().data("Session closed while resolving pending effort target"))?
+            .unwrap_or_else(|| (handle.model_id.clone(), None));
+        let effort = agent
+            .resolve_reasoning_effort_value(&session_id, &model_id, value_id)
+            .ok_or_else(|| {
+                acp::Error::invalid_params()
+                    .data("Selected model does not expose this reasoning effort level")
+            })?;
+        let mut meta = acp::Meta::new();
+        meta.insert("reasoningEffort".into(), serde_json::json!(effort));
+        meta.insert("polycodeEffortOnly".into(), serde_json::json!(true));
+        if let Some(revision) = catalog_revision { meta.insert("polycodeCatalogRevision".into(), serde_json::json!(revision)); }
+        return agent
+            .set_model_gated(
+                acp::SetSessionModelRequest::new(session_id, model_id).meta(Some(meta)),
+            )
+            .await;
+    }
     let _config_guard = agent.config_mutation_lock(&session_id).lock_owned().await;
     let handle = agent.resident_handle(&session_id).unwrap_or(handle);
     let model_id = handle.model_id.clone();

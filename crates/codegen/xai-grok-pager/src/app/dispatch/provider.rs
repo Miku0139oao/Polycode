@@ -2,7 +2,7 @@
 //! sender, so provider management can never enter the model conversation.
 use crate::app::provider::{Choice, Command, Operation, Reply};
 use crate::app::{
-    actions::{Action, Effect},
+    actions::Effect,
     agent::AgentId,
     app_view::{ActiveView, AppView},
 };
@@ -42,6 +42,16 @@ fn card(app: &mut AppView, title: String, options: Vec<QuestionOption>, login: b
     let Some(id) = app.provider.target else {
         return;
     };
+    if app
+        .agents
+        .get(&id)
+        .is_some_and(|a| !a.permission_queue.is_empty() || a.plan_approval_view.is_some())
+    {
+        app.show_toast(
+            "Resolve the current tool/plan permission before opening the provider picker",
+        );
+        return;
+    }
     close_card(app);
     let Some(agent) = app.agents.get_mut(&id) else {
         return;
@@ -149,7 +159,15 @@ fn models(app: &mut AppView, provider: Choice) {
                 p.models.iter().map(move |m| {
                     option(
                         &m.name,
-                        &format!("{} token context", m.context_window),
+                        &format!(
+                            "{} token context; {}",
+                            m.context_window,
+                            if m.reasoning_efforts.is_empty() {
+                                "provider does not expose reasoning effort control"
+                            } else {
+                                "choose native reasoning effort next"
+                            }
+                        ),
                         &format!("model:{}/{}", id.as_str(), m.id),
                     )
                 })
@@ -212,12 +230,13 @@ pub(super) fn dispatch_enabled(app: &mut AppView, command: Command) -> Vec<Effec
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get(&id)
     {
-        if agent.session.state.is_busy()
-            || agent.session.model_switch_pending
-            || (app.provider.local_target == Some(id) && app.provider.creating)
-        {
+        if app.provider.local_target == Some(id) && app.provider.creating {
+            app.show_toast("Native session is starting; wait for creation before choosing again");
+            return vec![];
+        }
+        if !agent.permission_queue.is_empty() || agent.plan_approval_view.is_some() {
             app.show_toast(
-                "Wait for the current turn, or cancel it before switching providers/models",
+                "Resolve the current tool/plan permission before opening the provider picker",
             );
             return vec![];
         }
@@ -255,6 +274,11 @@ pub(super) fn dispatch_enabled(app: &mut AppView, command: Command) -> Vec<Effec
     effects.extend(invalidate(app));
     app.provider.target = Some(target);
     close_card(app);
+    let selected_effort = match &command {
+        Command::ModelEffort(_, effort) => *effort,
+        _ => None,
+    };
+    let choose_effort = matches!(&command, Command::Model(_));
     match command {
         Command::Menu { login } => {
             app.provider.login_menu = login;
@@ -307,10 +331,39 @@ pub(super) fn dispatch_enabled(app: &mut AppView, command: Command) -> Vec<Effec
                 }
             }
         }
-        Command::Model(model) => {
+        Command::Model(model) | Command::ModelEffort(model, _) => {
             let id = agent_client_protocol::ModelId::new(model);
             if !app.models.available.contains_key(&id) {
                 app.show_toast("Model no longer available; refresh with /provider");
+                return effects;
+            }
+            let efforts = app.models.reasoning_effort_options_for(&id);
+            if choose_effort && !efforts.is_empty() {
+                let mut options = efforts
+                    .iter()
+                    .map(|e| {
+                        option(
+                            &e.label,
+                            e.description.as_deref().unwrap_or(if e.default {
+                                "Provider default"
+                            } else {
+                                "Native reasoning effort"
+                            }),
+                            &format!("model-effort:{}:{}", e.value, id.0),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                options.push(option(
+                    "Model default",
+                    "Use the selected model's advertised default",
+                    &format!("model-default:{}", id.0),
+                ));
+                card(
+                    app,
+                    "Choose reasoning effort for the selected model".into(),
+                    options,
+                    false,
+                );
                 return effects;
             }
             if app.provider.local_target == Some(target) {
@@ -329,7 +382,7 @@ pub(super) fn dispatch_enabled(app: &mut AppView, command: Command) -> Vec<Effec
                     return effects;
                 }
                 let mut create =
-                    super::session::lifecycle::start_local_session(app, target, Some(id));
+                    super::session::lifecycle::start_local_session(app, target, Some(id.clone()));
                 // Identify pre-SessionCreated ACP notifications without binding the
                 // UI (binding early would let queued prompts sample prematurely).
                 for effect in &mut create {
@@ -350,7 +403,12 @@ pub(super) fn dispatch_enabled(app: &mut AppView, command: Command) -> Vec<Effec
                         .get_mut(&target)
                         .unwrap()
                         .session
-                        .deferred_model_switch = None;
+                        .deferred_model_switch =
+                        selected_effort.map(|effort| crate::app::agent::DeferredModelSwitch {
+                            model_id: id.clone(),
+                            effort: Some(effort),
+                            prev_model_id: None,
+                        });
                 }
                 effects.extend(create);
                 return effects;
@@ -365,13 +423,7 @@ pub(super) fn dispatch_enabled(app: &mut AppView, command: Command) -> Vec<Effec
                 );
                 return effects;
             }
-            effects.extend(super::router::dispatch(
-                Action::SwitchModel {
-                    model_id: id,
-                    effort: None,
-                },
-                app,
-            ));
+            effects.extend(queue_model_switch(app, target, id, selected_effort));
         }
         Command::Cancel => unreachable!(),
     }
@@ -494,6 +546,136 @@ pub(super) fn complete(
     vec![]
 }
 
+/// Queue the complete target without changing the live route, effort, tools or permissions.
+pub(super) fn queue_model_switch(
+    app: &mut AppView,
+    target: AgentId,
+    model_id: agent_client_protocol::ModelId,
+    effort: Option<xai_grok_shell::sampling::types::ReasoningEffort>,
+) -> Vec<Effect> {
+    let Some(agent) = app.agents.get_mut(&target) else {
+        return vec![];
+    };
+    let Some(session_id) = agent.session.session_id.clone() else {
+        return vec![];
+    };
+    let models = if agent.session.models.available.contains_key(&model_id) {
+        &agent.session.models
+    } else {
+        &app.models
+    };
+    if !models.available.contains_key(&model_id) {
+        app.show_toast("Model no longer available; refresh and select again");
+        return vec![];
+    }
+    if let Some(effort) = effort {
+        if let Err(error) = models.resolve_effort_for_model(&model_id, effort.as_str()) {
+            app.show_toast(&error.message());
+            return vec![];
+        }
+    }
+    let replaced = app.provider.pending_models.selections.contains_key(&target);
+    let label = format!(
+        "{}{}",
+        models.display_name_for(&model_id),
+        effort.map(|e| format!(" ({e} effort)")).unwrap_or_default()
+    );
+    let revision_for = |catalog: &xai_grok_shell::polycode::Catalog| catalog.providers.iter()
+        .find(|p| p.models.iter().any(|m| model_id.0.as_ref() == format!("{}/{}", p.id.as_str(), m.id)))
+        .and_then(|p| p.catalog_revision.clone());
+    let catalog_revision = revision_for(&app.provider.catalog).or_else(||
+        xai_grok_shell::polycode::bridge().and_then(|b| revision_for(&b.catalog())));
+    let mut selection = app
+        .provider
+        .pending_models
+        .queue(target, session_id, model_id, effort);
+    selection.catalog_revision = catalog_revision;
+    app.provider.pending_models.selections.insert(target, selection.clone());
+    agent.session.model_switch_pending = true;
+    app.show_toast(&format!(
+        "{}Queued switch to {label}; applies after current work completes. /model cancel cancels.",
+        if replaced {
+            "Replaced pending selection. "
+        } else {
+            ""
+        }
+    ));
+    vec![Effect::PolycodeSwitchModel(selection)]
+}
+pub(super) fn cancel_active_model_switch(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(selection) = app.provider.pending_models.selections.remove(&id) else {
+        return vec![];
+    };
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent.session.model_switch_pending = false;
+    }
+    vec![Effect::CancelPendingModelSwitch {
+        session_id: selection.session_id,
+        selection_id: selection.selection_id,
+    }]
+}
+pub(super) fn cancel_model_switches(app: &mut AppView) -> Vec<Effect> {
+    let pending = std::mem::take(&mut app.provider.pending_models.selections);
+    pending
+        .into_iter()
+        .map(|(id, selection)| {
+            if let Some(agent) = app.agents.get_mut(&id) {
+                agent.session.model_switch_pending = false;
+            }
+            Effect::CancelPendingModelSwitch {
+                session_id: selection.session_id,
+                selection_id: selection.selection_id,
+            }
+        })
+        .collect()
+}
+pub(super) fn model_switch_complete(
+    app: &mut AppView,
+    selection: crate::app::model_settings::Selection,
+    result: Result<
+        Option<xai_grok_shell::sampling::types::ReasoningEffort>,
+        crate::app::actions::SwitchModelError,
+    >,
+) -> Vec<Effect> {
+    let current_session = app
+        .agents
+        .get(&selection.agent_id)
+        .and_then(|a| a.session.session_id.as_ref());
+    if !app
+        .provider
+        .pending_models
+        .accepts(&selection, current_session)
+    {
+        return vec![];
+    }
+    app.provider
+        .pending_models
+        .selections
+        .remove(&selection.agent_id);
+    let applied_effort = result.as_ref().ok().copied().flatten();
+    let succeeded = result.is_ok();
+    let effects = super::session::lifecycle::handle_polycode_switch_model_complete(
+        app,
+        selection.agent_id,
+        selection.model_id.clone(),
+        applied_effort,
+        result.map(|_| ()),
+    );
+    if succeeded {
+        app.show_toast(&format!(
+            "Applied switch to {}{}",
+            selection.model_id.0,
+            applied_effort
+                .map(|e| format!(" ({e} effort)"))
+                .unwrap_or_default()
+        ));
+    }
+    effects
+}
+
 pub(crate) fn answer(id: &str, login: bool) -> Command {
     match id {
         "grok" => Command::Choose {
@@ -510,6 +692,16 @@ pub(crate) fn answer(id: &str, login: bool) -> Command {
         },
         "refresh" => Command::Refresh,
         "menu" => Command::Menu { login },
+        s if s.starts_with("model-effort:") => {
+            match s[13..]
+                .split_once(':')
+                .and_then(|(effort, model)| effort.parse().ok().map(|e| (e, model)))
+            {
+                Some((effort, model)) => Command::ModelEffort(model.to_owned(), Some(effort)),
+                None => Command::Cancel,
+            }
+        }
+        s if s.starts_with("model-default:") => Command::ModelEffort(s[14..].to_owned(), None),
         s if s.starts_with("model:") => Command::Model(s[6..].to_owned()),
         _ => Command::Cancel,
     }

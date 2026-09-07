@@ -1391,6 +1391,42 @@ async fn update_sampling_config_is_queryable() {
 }
 
 #[tokio::test]
+async fn model_settings_atomic_route_credentials_effort_snapshot_and_restore() {
+    let h = TestHarness::new();
+    let writer = async {
+        for i in 0..8 {
+            let mut config = test_config();
+            config.model = format!("choice-{i}");
+            config.base_url = format!("https://provider-{i}.invalid/v1");
+            config.reasoning_effort = Some(xai_grok_sampling_types::ReasoningEffort::Low);
+            let credentials = crate::Credentials { api_key: Some(format!("fixture-key-{i}")), ..Default::default() };
+            h.handle.update_sampling_config_and_credentials(config, credentials).await.unwrap();
+        }
+    };
+    let reader = async {
+        for _ in 0..8 {
+            let snapshot = h.handle.snapshot().await.unwrap();
+            if let Some(index) = snapshot.sampling_config.model.strip_prefix("choice-") {
+                assert_eq!(snapshot.credentials.api_key, Some(format!("fixture-key-{index}")));
+                assert_eq!(snapshot.sampling_config.base_url, format!("https://provider-{index}.invalid/v1"));
+                assert_eq!(snapshot.sampling_config.reasoning_effort, Some(xai_grok_sampling_types::ReasoningEffort::Low));
+            }
+        }
+    };
+    tokio::join!(writer, reader);
+    let saved = h.handle.snapshot().await.unwrap();
+    h.handle.update_sampling_config_and_credentials(test_config(), crate::Credentials::default()).await.unwrap();
+    let reset = h.handle.snapshot().await.unwrap();
+    assert_eq!(reset.sampling_config.model, "test-model");
+    assert!(reset.credentials.api_key.is_none());
+    h.handle.restore_snapshot(saved);
+    let restored = h.handle.snapshot().await.unwrap();
+    assert_eq!(restored.sampling_config.model, "choice-7");
+    assert_eq!(restored.credentials.api_key.as_deref(), Some("fixture-key-7"));
+    assert_eq!(restored.sampling_config.reasoning_effort, Some(xai_grok_sampling_types::ReasoningEffort::Low));
+}
+
+#[tokio::test]
 async fn notification_meta_reflects_timing() {
     let h = TestHarness::new();
     h.handle.record_stream_start(1000);

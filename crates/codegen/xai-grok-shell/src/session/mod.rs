@@ -7,6 +7,7 @@ pub mod handle;
 pub(crate) mod memory_state;
 pub mod merge;
 pub(crate) mod message_delivery;
+pub(crate) mod model_settings;
 pub mod notifications;
 pub mod pending_interaction;
 pub mod prompt_queue;

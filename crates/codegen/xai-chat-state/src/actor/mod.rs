@@ -227,6 +227,12 @@ impl ChatStateActor {
             ChatStateCommand::UpdateSamplingConfig { config } => {
                 self.state.sampling_config = config;
             }
+            ChatStateCommand::UpdateSamplingConfigAndCredentials { configuration, reply } => {
+                let (config, credentials) = *configuration;
+                self.state.sampling_config = config;
+                self.state.credentials = credentials;
+                let _ = reply.send(());
+            }
             ChatStateCommand::RecordAgentEditedPath { path } => {
                 self.state.agent_edited_paths.insert(path);
             }

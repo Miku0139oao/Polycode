@@ -17,6 +17,7 @@ pub mod bundle;
 pub(crate) mod cancel_latency;
 pub mod cli;
 pub mod consent;
+pub(crate) mod model_settings;
 pub(crate) mod provider;
 pub use crate::link_opener;
 use xai_grok_telemetry::region;
@@ -2422,7 +2423,7 @@ mod tests {
         assert_eq!(
             first_5,
             vec![
-                "Polycode — Grok Build TUI with Codex and Cursor backends",
+                "Polycode — native workspace for ChatGPT, Cursor and Grok",
                 "",
                 "Usage: grok [OPTIONS] [PROMPT] [COMMAND]",
                 "",

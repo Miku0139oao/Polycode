@@ -338,6 +338,16 @@ pub enum SessionCommand {
         session_mode: acp::SessionModeId,
         responds_to: oneshot::Sender<()>,
     },
+    /// Polycode admission is separate from commit. The reply completes only after safe commit.
+    #[allow(private_interfaces)]
+    QueueModelSwitch(Box<crate::session::model_settings::PendingModelSwitch>),
+    CancelPendingModelSwitch {
+        selection_id: Option<String>,
+        responds_to: oneshot::Sender<()>,
+    },
+    GetPendingModelSwitch {
+        responds_to: oneshot::Sender<Option<(acp::ModelId, Option<String>)>>,
+    },
     SetSessionModel {
         sampling_config: xai_grok_sampler::SamplerConfig,
         use_concise: bool,

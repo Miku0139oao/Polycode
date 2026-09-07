@@ -3454,6 +3454,10 @@ pub(crate) fn resolve_model_list(
         }
         resolved = prefetched;
     }
+    // Capture trusted native catalog identity before user overrides. Rendering later reads
+    // only the registered identity map; it never resolves configuration or credentials.
+    let native_identity_sources = (crate::polycode::enabled() && !cfg.endpoints.has_custom_endpoint())
+        .then(|| resolved.clone());
     for (key, model_override) in &cfg.config_models {
         let had_base = resolved.contains_key(key);
         let base = resolved.shift_remove(key);
@@ -3565,7 +3569,7 @@ pub(crate) fn resolve_model_list(
     for entry in resolved.values_mut() {
         entry.info.derive_reasoning_effort_fields();
     }
-    crate::polycode::inject_models(&mut resolved, &cfg.endpoints);
+    crate::polycode::inject_models(&mut resolved, &cfg.endpoints, native_identity_sources.as_ref());
     resolved
 }
 /// Layer 6 of [`resolve_model_list`]: fold the global `[models].extra_headers` into every model as a base.

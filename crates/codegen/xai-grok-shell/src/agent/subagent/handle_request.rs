@@ -650,6 +650,13 @@ pub(crate) async fn run_shell_child(
         });
     }
     let subagent_max_turns = resolve_subagent_max_turns(definition.max_turns, ctx.parent_max_turns);
+    if crate::polycode::enabled() && let Some(raw) = effective_runtime.reasoning_effort.as_deref() {
+        if raw.parse::<ReasoningEffort>().ok().is_none_or(|effort|
+            !ctx.models_manager.model_supports_reasoning_effort_value(effective_model_id.0.as_ref(), effort)) {
+            return child_run_output(failure_result(&request,
+                "Selected child model does not expose this reasoning effort level; choose an advertised level or omit the override"), completion_data, None);
+        }
+    }
     if let Some(raw) = effective_runtime.reasoning_effort.as_deref()
         && ctx
             .models_manager

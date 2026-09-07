@@ -29,6 +29,7 @@ pub(crate) fn action_denied(action: &Action) -> bool {
     matches!(
         action,
         Action::OpenDashboard
+            | Action::CancelPendingModelSwitch
             | Action::FetchSessionList
             | Action::ShowSessionPicker
             | Action::ChooseNewSessionMode

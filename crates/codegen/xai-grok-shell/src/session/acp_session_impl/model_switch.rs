@@ -1,7 +1,165 @@
 use super::*;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use xai_chat_state::conversation_util::replace_or_insert_system_head;
+#[cfg(test)]
+#[path = "model_settings_tests.rs"]
+mod model_settings_tests;
 impl SessionActor {
+    /// Fail closed if child status is unavailable. No permission response is touched here.
+    pub(super) async fn model_settings_idle(&self) -> Result<bool, acp::Error> {
+        if self.is_busy().await || !self.pending_interactions.lock().unwrap().is_empty() {
+            return Ok(false);
+        }
+        use xai_grok_tools::implementations::grok_build::task::types::{
+            SubagentEvent, SubagentListActiveRequest,
+        };
+        let Some(event_tx) = &self.tool_context.subagent_event_tx else {
+            return Ok(true);
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        event_tx
+            .send(SubagentEvent::ListActive(SubagentListActiveRequest {
+                parent_session_id: self.session_id_string(),
+                respond_to: tx,
+            }))
+            .map_err(|_| {
+                acp::Error::internal_error().data("Cannot verify active children; model unchanged")
+            })?;
+        let children = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .map_err(|_| {
+                acp::Error::internal_error()
+                    .data("Timed out checking active children; model unchanged")
+            })?
+            .map_err(|_| {
+                acp::Error::internal_error().data("Cannot verify active children; model unchanged")
+            })?;
+        Ok(crate::session::model_settings::can_commit(
+            self.is_busy().await,
+            !children.is_empty(),
+        ))
+    }
+
+    /// Runs outside the actor loop; cancel/replace/resume can retire it during remote validation.
+    pub(super) async fn validate_pending_model_switch(
+        self: &std::sync::Arc<Self>,
+        model_id: acp::ModelId,
+        catalog_entry: serde_json::Value,
+        catalog_revision: Option<String>,
+        mut sampling_config: xai_grok_sampler::SamplerConfig,
+    ) -> Result<Option<xai_grok_sampler::SamplerConfig>, acp::Error> {
+        if !self.model_settings_idle().await? {
+            return Ok(None);
+        }
+        let models = self.models_manager.models();
+        let entry = models.get(model_id.0.as_ref()).ok_or_else(|| {
+            acp::Error::invalid_params().data("Queued model is no longer available")
+        })?;
+        if !entry.info.user_selectable
+            || serde_json::to_value(entry).ok().as_ref() != Some(&catalog_entry)
+        {
+            return Err(
+                acp::Error::invalid_params().data("Queued model catalog changed; select again")
+            );
+        }
+        if let Some(bridge) =
+            crate::polycode::bridge().filter(|b| b.owns_endpoint(&sampling_config.base_url))
+        {
+            let revision = catalog_revision.as_deref().ok_or_else(|| {
+                acp::Error::invalid_params()
+                    .data("Provider has no catalog revision; refresh and select again")
+            })?;
+            bridge
+                .validate_selection(
+                    model_id.0.as_ref(),
+                    revision,
+                    sampling_config.reasoning_effort,
+                )
+                .await
+                .map_err(|e| acp::Error::invalid_params().data(e))?;
+        } else {
+            let session_key = if let Some(am) = &self.auth_manager {
+                am.get_valid_token()
+                    .await
+                    .ok()
+                    .or_else(|| am.current().map(|a| a.key))
+            } else {
+                None
+            };
+            let mut credentials =
+                crate::agent::config::resolve_credentials(entry, session_key.as_deref());
+            crate::agent::config::enforce_disable_api_key_auth(
+                &mut credentials,
+                self.auth_manager
+                    .as_ref()
+                    .is_some_and(|am| am.grok_com_config().api_key_auth_disabled()),
+                session_key.as_deref(),
+            );
+            if credentials.api_key.is_none() || credentials.base_url != sampling_config.base_url {
+                return Err(acp::Error::auth_required().data(
+                    "Selected model credentials expired or route changed; sign in and select again",
+                ));
+            }
+            sampling_config.api_key = credentials.api_key;
+        }
+        if !self.model_settings_idle().await? {
+            return Ok(None);
+        }
+        Ok(Some(sampling_config))
+    }
+
+    /// Linearization boundary in the actor: validation is complete and queued cancel/replace
+    /// commands have priority over this completion. No network validation blocks command intake.
+    pub(super) async fn commit_pending_model_switch(
+        self: &std::sync::Arc<Self>,
+        pending: &mut crate::session::model_settings::PendingModelSwitch,
+    ) -> Result<acp::ModelId, acp::Error> {
+        if self.is_busy().await
+            || !self.pending_interactions.lock().unwrap().is_empty()
+            || pending.responds_to.is_closed()
+        {
+            return Err(acp::Error::invalid_params()
+                .data("Model selection expired while validating; select again"));
+        }
+        // Recheck local catalog policy after the remote round trip, including non-serialized allowlist.
+        if self
+            .models_manager
+            .models()
+            .get(pending.model_id.0.as_ref())
+            .is_none_or(|e| {
+                !e.info.user_selectable
+                    || serde_json::to_value(e).ok().as_ref() != Some(&pending.catalog_entry)
+            })
+        {
+            return Err(
+                acp::Error::invalid_params().data("Queued model catalog changed; select again")
+            );
+        }
+        if pending.rebuild.is_some()
+            && self
+                .signals_handle()
+                .snapshot()
+                .await
+                .is_some_and(|s| s.turn_count > 0)
+        {
+            return Err(acp::Error::invalid_params().data(
+                "Queued harness change is no longer safe after work started; start a new session",
+            ));
+        }
+        if let Some(definition) = pending.rebuild.take() {
+            self.handle_rebuild_agent_for_definition(definition).await?;
+            pending.skip_prompt_rewrite = true;
+        }
+        self.handle_set_session_model(
+            pending.sampling_config.clone(),
+            pending.use_concise,
+            pending.is_family_switch,
+            pending.apply_prompt_override,
+            pending.skip_prompt_rewrite,
+            pending.auto_compact_threshold_percent,
+        )
+        .await
+    }
     /// Resolve the title client from the same complete config being committed by the switch.
     /// Build before mutating live state, so a client construction failure cannot retain an
     /// old-provider title resolver behind a nominally successful model selection.
@@ -53,7 +211,7 @@ impl SessionActor {
     ) -> Result<acp::ModelId, acp::Error> {
         if crate::polycode::enabled() && self.state.lock().await.running_task.is_some() {
             return Err(acp::Error::invalid_params()
-                .data("Wait for the active turn, or cancel it before switching models"));
+                .data("Direct model mutation is unsafe during work; use the queued model API"));
         }
         let (summary_client, summary_model) = self.selected_summary_client(&sampling_config)?;
         self.abort_title_refresh();
@@ -101,11 +259,8 @@ impl SessionActor {
                 client: summary_client,
                 model: summary_model,
             });
-        self.rebuild_spec.native_service_consent.set_provider(
-            xai_grok_sampler::local_transport::subscription_provider(&sampling_config.base_url),
-        );
-        self.chat_state_handle
-            .update_sampling_config(xai_grok_sampling_types::SamplingConfig {
+        let previous = self.chat_state_handle.get_sampling_config().await;
+        let next_sampling = xai_grok_sampling_types::SamplingConfig {
                 base_url: sampling_config.base_url.clone(),
                 model: sampling_config.model.clone(),
                 max_completion_tokens: sampling_config.max_completion_tokens,
@@ -118,14 +273,14 @@ impl SessionActor {
                 context_window: new_context_window,
                 reasoning_effort: sampling_config.reasoning_effort,
                 stream_tool_calls: Some(sampling_config.stream_tool_calls),
-            });
+            };
         let existing = self.chat_state_handle.get_credentials().await;
         let session_key = self
             .auth_manager
             .as_ref()
             .and_then(|am| am.current_or_expired().map(|a| a.key));
         self.chat_state_handle
-            .update_credentials(xai_chat_state::Credentials {
+            .update_sampling_config_and_credentials(next_sampling, xai_chat_state::Credentials {
                 api_key: sampling_config.api_key.clone(),
                 auth_type: crate::agent::config::resolve_chat_state_auth_type(
                     sampling_config.model.as_str(),
@@ -134,7 +289,13 @@ impl SessionActor {
                 ),
                 alpha_test_key: existing.alpha_test_key,
                 client_version: sampling_config.client_version.clone(),
-            });
+            }).await.map_err(|e| acp::Error::internal_error().data(e))?;
+        if previous.as_ref().is_none_or(|c| c.base_url != sampling_config.base_url
+            || c.model != sampling_config.model || c.reasoning_effort != sampling_config.reasoning_effort) {
+            self.rebuild_spec.native_service_consent.set_provider(
+                xai_grok_sampler::local_transport::subscription_provider(&sampling_config.base_url),
+            );
+        }
         self.invalidate_model_auth_memo();
         self.signals_handle()
             .record_model_usage(&sampling_config.model);
@@ -211,11 +372,13 @@ impl SessionActor {
         };
         if !self
             .models_manager
-            .model_supports_reasoning_effort(&cfg.model)
+            .model_supports_reasoning_effort_value(&cfg.model, effort)
         {
             return Err(acp::Error::invalid_params()
                 .data("the session's current model does not support reasoning effort"));
         }
+        let previous_model = cfg.model.clone();
+        let previous_effort = cfg.reasoning_effort;
         if let Some(routed) = self.models_manager.model_for_effort(&cfg.model, effort) {
             cfg.model = routed;
         }
@@ -230,9 +393,11 @@ impl SessionActor {
             .notifications
             .persistence_tx
             .send(PersistenceMsg::SummarySampling { client, model });
-        self.rebuild_spec.native_service_consent.set_provider(
-            xai_grok_sampler::local_transport::subscription_provider(&cfg.base_url),
-        );
+        if previous_model != cfg.model || previous_effort != cfg.reasoning_effort {
+            self.rebuild_spec.native_service_consent.set_provider(
+                xai_grok_sampler::local_transport::subscription_provider(&cfg.base_url),
+            );
+        }
         self.chat_state_handle.update_sampling_config(cfg);
         let agent_name = self.agent.borrow().definition().name.clone();
         let _ = self

@@ -34,21 +34,29 @@ impl ModelsManager {
         let Some(effort) = effort else {
             return;
         };
-        if !self.model_supports_reasoning_effort(&sampling.model) {
+        // Different subscriptions can advertise the same wire slug. Resolve capabilities by
+        // the complete route rather than whichever bare slug happens to be first in the catalog.
+        let model_key = self
+            .models()
+            .into_iter()
+            .find(|(_, e)| e.info.model == sampling.model && e.info.base_url == sampling.base_url)
+            .map(|(key, _)| key)
+            .unwrap_or_else(|| sampling.model.clone());
+        if !self.model_supports_reasoning_effort_value(&model_key, effort) {
             // SummaryClient stays quiet; the spawn or switch that carried this effort already warned that the model does not support it
             if matches!(target, EffortTarget::NewSession | EffortTarget::ModelSwitch) {
                 tracing::warn!(
                     session_id = %session_id.0,
                     model = %sampling.model,
                     effort = %effort,
-                    "reasoning_effort: model does not support effort; ignoring it"
+                    "reasoning_effort: inherited effort unavailable; using the selected model's catalog default"
                 );
             }
             return;
         }
         // Some models are a different model id at each effort, so swap in the id this effort asks for.
         // Do this before the log, or the log records an id we are not sending.
-        if let Some(routed) = self.model_for_effort(&sampling.model, effort) {
+        if let Some(routed) = self.model_for_effort(&model_key, effort) {
             sampling.model = routed;
         }
         // Same fields at every target; only the level differs
@@ -72,6 +80,75 @@ impl ModelsManager {
             EffortTarget::SummaryClient => log_applied!(tracing::Level::DEBUG),
         }
         sampling.reasoning_effort = Some(effort);
+    }
+}
+
+#[cfg(test)]
+mod model_settings_tests {
+    use super::*;
+    #[test]
+    fn model_settings_recovery_revalidates_inherited_effort_against_target_route() {
+        let manager = ModelsManager::default();
+        let mut entry = crate::agent::config::resolve_model_list(&Default::default(), None)
+            .into_values()
+            .next()
+            .unwrap();
+        entry.info.model = "shared-slug".into();
+        entry.info.base_url = "https://catalog-fixture.invalid/codex/v1".into();
+        entry.info.supports_reasoning_effort = true;
+        entry.info.reasoning_effort = Some(ReasoningEffort::High);
+        entry.info.reasoning_efforts =
+            serde_json::from_value(serde_json::json!(["low", "high"])).unwrap();
+        manager.insert_test_entry("codex/shared-slug", entry.clone());
+        let mut config = crate::agent::config::sampling_config_for_model(
+            &entry,
+            crate::agent::config::resolve_credentials(&entry, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        manager.apply_supported_effort(
+            &mut config,
+            Some(ReasoningEffort::Xhigh),
+            &acp::SessionId::new("restore"),
+            EffortTarget::ModelSwitch,
+        );
+        assert_eq!(
+            config.reasoning_effort,
+            Some(ReasoningEffort::High),
+            "obsolete persisted effort uses the actual target default"
+        );
+        manager.apply_supported_effort(
+            &mut config,
+            Some(ReasoningEffort::Low),
+            &acp::SessionId::new("restore"),
+            EffortTarget::NewSession,
+        );
+        assert_eq!(config.reasoning_effort, Some(ReasoningEffort::Low));
+        entry.info.base_url = "https://catalog-fixture.invalid/cursor/v1".into();
+        entry.info.supports_reasoning_effort = false;
+        entry.info.reasoning_effort = None;
+        entry.info.reasoning_efforts.clear();
+        manager.insert_test_entry("cursor/shared-slug", entry.clone());
+        let mut cursor = crate::agent::config::sampling_config_for_model(
+            &entry,
+            crate::agent::config::resolve_credentials(&entry, None),
+            None,
+            None,
+            None,
+            None,
+        );
+        manager.apply_supported_effort(
+            &mut cursor,
+            Some(ReasoningEffort::Low),
+            &acp::SessionId::new("restore"),
+            EffortTarget::ModelSwitch,
+        );
+        assert!(
+            cursor.reasoning_effort.is_none(),
+            "same slug on another provider must not borrow Codex capabilities"
+        );
     }
 }
 

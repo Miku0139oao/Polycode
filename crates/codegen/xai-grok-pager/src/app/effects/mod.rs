@@ -1839,6 +1839,20 @@ pub(crate) fn execute(
                     TaskResult::CancelComplete
                 });
         }
+        Effect::PolycodeSwitchModel(selection) => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let result = crate::app::model_settings::execute(&selection, &tx).await;
+                TaskResult::PolycodeSwitchModelComplete { selection, result }
+            });
+        }
+        Effect::CancelPendingModelSwitch { session_id, selection_id } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                crate::app::model_settings::cancel(session_id, selection_id, &tx).await;
+                TaskResult::CancelComplete
+            });
+        }
         Effect::SwitchModel {
             agent_id,
             session_id,

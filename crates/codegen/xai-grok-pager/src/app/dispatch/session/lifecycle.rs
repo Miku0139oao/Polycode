@@ -1499,7 +1499,27 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
     result: Result<(), SwitchModelError>,
     prev_model_id: Option<acp::ModelId>,
 ) -> Vec<Effect> {
-    if result.is_ok() && xai_grok_shell::polycode::enabled() {
+    handle_switch_model_complete_inner(app, agent_id, model_id, effort, result, prev_model_id, false)
+}
+pub(in crate::app::dispatch) fn handle_polycode_switch_model_complete(
+    app: &mut AppView,
+    agent_id: AgentId,
+    model_id: acp::ModelId,
+    effort: Option<ReasoningEffort>,
+    result: Result<(), SwitchModelError>,
+) -> Vec<Effect> {
+    handle_switch_model_complete_inner(app, agent_id, model_id, effort, result, None, true)
+}
+fn handle_switch_model_complete_inner(
+    app: &mut AppView,
+    agent_id: AgentId,
+    model_id: acp::ModelId,
+    effort: Option<ReasoningEffort>,
+    result: Result<(), SwitchModelError>,
+    prev_model_id: Option<acp::ModelId>,
+    authoritative_effort: bool,
+) -> Vec<Effect> {
+    if result.is_ok() && (authoritative_effort || xai_grok_shell::polycode::enabled()) {
         use crate::app::provider::Choice;
         use xai_grok_shell::polycode::ProviderId;
         app.provider.selected = Some(if model_id.0.starts_with("codex/") {
@@ -1525,6 +1545,9 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
                 let prev_model = agent.session.models.current.clone();
                 let prev_effort = agent.session.models.reasoning_effort;
                 agent.session.models.set_current(model_id.clone(), effort);
+                if authoritative_effort {
+                    agent.session.models.reasoning_effort = effort;
+                }
                 let resolved_effort = agent.session.models.reasoning_effort;
                 let unchanged =
                     prev_model.as_ref() == Some(&model_id) && prev_effort == resolved_effort;

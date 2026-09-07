@@ -249,7 +249,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         crate::app::workspace_sync::request(app);
     }
     match result {
-        TaskResult::Provider { generation, target, reply } => super::provider::complete(app, generation, target, reply),
+        TaskResult::Provider {
+            generation,
+            target,
+            reply,
+        } => super::provider::complete(app, generation, target, reply),
         TaskResult::SessionCreated {
             agent_id,
             session_id,
@@ -756,6 +760,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         TaskResult::CompactComplete { agent_id, result } => {
             handle_compact_complete(app, agent_id, result)
+        }
+        TaskResult::PolycodeSwitchModelComplete { selection, result } => {
+            super::provider::model_switch_complete(app, selection, result)
         }
         TaskResult::SwitchModelComplete {
             agent_id,

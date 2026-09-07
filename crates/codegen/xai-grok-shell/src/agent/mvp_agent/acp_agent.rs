@@ -31,6 +31,24 @@ impl MvpAgent {
         &self,
         args: acp::SetSessionModelRequest,
     ) -> Result<acp::SetSessionModelResponse, acp::Error> {
+        if crate::polycode::enabled() && args.meta.as_ref().and_then(|m| m.get("polycodeCancelPending")).and_then(|v| v.as_bool()) == Some(true) {
+            let handle = self.session_handle_waiting_for_load(&args.session_id).await
+                .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
+            let (tx, rx) = oneshot::channel();
+            let selection_id = args.meta.as_ref().and_then(|m| m.get("polycodeSelectionId")).and_then(|v| v.as_str()).map(str::to_owned);
+            let _ = handle.cmd_tx.send(SessionCommand::CancelPendingModelSwitch { selection_id, responds_to: tx });
+            rx.await.map_err(|_| acp::Error::internal_error().data("session closed"))?;
+            return Ok(acp::SetSessionModelResponse::new());
+        }
+        if args.meta.as_ref().is_some_and(|m| m.contains_key("reasoningEffort"))
+            && parse_reasoning_effort_meta(args.meta.as_ref()).is_none() {
+            return Err(acp::Error::invalid_params().data("Invalid reasoningEffort; use a level advertised by the selected model"));
+        }
+        if let Some(revision) = args.meta.as_ref().and_then(|m| m.get("polycodeCatalogRevision")) {
+            if revision.as_str().is_none_or(|r| r.len() != 64 || !r.bytes().all(|b| b.is_ascii_hexdigit())) {
+                return Err(acp::Error::invalid_params().data("Invalid selected model catalog revision"));
+            }
+        }
         let model = match self.resolve_model_id(&args.model_id) {
             Ok(model) => model,
             Err(_) => {
