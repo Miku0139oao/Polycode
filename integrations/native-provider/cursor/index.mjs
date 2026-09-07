@@ -102,10 +102,13 @@ function configKey(body) {
   const { messages, stream, stream_options, ...config } = body;
   return hash(json(config));
 }
-function assistantMatches(actual, expected) {
+function assistantMatches(actual, expected, model) {
   // Native engines may omit content:null or use "". All actual tool fields must match.
   if (!actual || actual.role !== 'assistant' || (actual.content ?? '') !== (expected.content ?? '')) return false;
-  if (Object.keys(actual).some(key => !['role', 'content', 'tool_calls'].includes(key))) return false;
+  // Native transcript storage annotates assistant messages with their source
+  // model. Accept that exact identity only; it cannot select another session.
+  if (Object.hasOwn(actual, 'model_id') && actual.model_id !== model) return false;
+  if (Object.keys(actual).some(key => !['role', 'content', 'tool_calls', 'model_id'].includes(key))) return false;
   return json(actual.tool_calls ?? []) === json(expected.tool_calls ?? []);
 }
 const responseJSON = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
@@ -236,7 +239,7 @@ export function createCursorProvider({
       const prefix = json(body.messages.slice(0, -2));
       // Establish unique ownership before configuration: a changed choice/model must not select
       // another parked connection whose backend happened to reuse the exact assistant call.
-      const matches = [...sessions].filter(s => s.account === account && s.base === prefix && s.expected && assistantMatches(body.messages.at(-2), s.expected) && last.tool_call_id === s.pending.toolCallId);
+      const matches = [...sessions].filter(s => s.account === account && s.base === prefix && s.expected && assistantMatches(body.messages.at(-2), s.expected, body.model) && last.tool_call_id === s.pending.toolCallId);
       if (matches.length !== 1 || matches[0].config !== config) throw fail('continuation_mismatch', 'No unique matching live Cursor tool call for this credential, transcript and configuration. Do not replay; restart explicitly.', 409);
       session = matches[0];
       if (session.busy) throw fail('session_busy', 'Cursor continuation is already in progress.', 409);

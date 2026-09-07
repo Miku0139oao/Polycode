@@ -3,9 +3,11 @@
 **Windows live validation in progress, not a verified production provider.**
 Undocumented Cursor compatibility can break and carries account/terms risk.
 With the user's authorization, actual Windows-native OAuth and model discovery
-passed on 2026-09-08. Real text generation also passed after correcting current
-protocol metadata parsing. Native coding/tool continuation and immutable release
-acceptance remain under validation; these observations do not prove full parity.
+passed on 2026-09-08. Real text generation and native read/write/PowerShell tool
+round trips passed after correcting protocol metadata and exact native
+`model_id` continuation handling. Writes and commands used single-operation
+approval. These isolated runtime tests are not immutable release acceptance or
+proof of full parity; relative paths and session resume remain under validation.
 
 This directory is standalone, dependency-free ESM for Node 22+ / Bun. It changes
 no native Grok engine, tools, MCP configuration, permissions, session files,

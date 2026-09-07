@@ -182,12 +182,14 @@ export function userRule(message, index) {
 export function runMessage(body, conversationId, messageId) {
   const tools = (body.tools ?? []).map(mcpDefinition);
   const instructions = 'Only request the explicitly supplied MCP tools. Polycode owns all execution and permissions. '
-    + 'No built-in tools, filesystem, shell, web, subagents, or mode switches are available.';
+    + 'No built-in tools, filesystem, shell, web, subagents, or mode switches are available. '
+    + 'The /polycode-virtual environment is transport metadata, not the native workspace. '
+    + 'For MCP file and shell tools use relative paths in the native workspace, or exact absolute paths provided by the caller. Never prepend /polycode-virtual to tool arguments.';
   const rules = body.messages.flatMap((m, i) => ['system', 'developer'].includes(m.role) ? [bytes(2, userRule(m, i))] : []);
   // Virtual context only: no cwd/env/host discovery, MCP filesystem mode or internal tool headers.
   const context = concat(...rules, bytes(4, concat(string(1, 'Polycode model transport'), string(2, '/polycode-virtual'),
     string(10, 'UTC'), string(11, '/polycode-virtual'))), ...tools.map(t => bytes(7, t)),
-    bytes(14, concat(string(1, MCP_PROVIDER), string(2, instructions))));
+    bytes(14, concat(string(1, MCP_PROVIDER), string(2, instructions), string(3, MCP_PROVIDER))));
   const parts = messageParts(body.messages.at(-1));
   const images = parts.filter(p => p.type === 'image').map((p, i) => bytes(1,
     concat(string(2, `${messageId}-image-${i}`), string(7, p.mimeType), bytes(8, p.data))));

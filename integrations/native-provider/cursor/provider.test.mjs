@@ -161,6 +161,9 @@ test('MCP definition, arbitrary names/JSON and exact model roundtrip; no local e
   const prompt = p.text(p.one(user, 1));
   assert.equal(prompt, JSON.stringify(request.messages[1].content[0])); // Annotation is retained as typed text.
   const context = p.fields(p.one(userAction, 2));
+  const serverInstructions = p.fields(p.one(context, 14));
+  assert.equal(p.text(p.one(serverInstructions, 3)), p.MCP_PROVIDER);
+  assert.match(p.text(p.one(serverInstructions, 2)), /Never prepend \/polycode-virtual to tool arguments/);
   const rule = p.fields(p.one(context, 2));
   assert.equal(p.text(p.one(rule, 2)), 'Native permissions stay here.\n' + JSON.stringify({ polycode_message_metadata: { name: 'native' } }));
   assert.equal(p.one(rule, 4, 0), 2n, 'Ordinary USER rule, not TEAM');
@@ -186,6 +189,21 @@ test('native result resumes same connection and monotonically shared append seq 
   assert.deepEqual(mock.appends.map(a => a.seq), [0, 1, 2, 3]);
   assert.deepEqual(decodeResult(mock.appends[1]), { id: 7, execId: 'original-exec-id', content: JSON.stringify(payload), isError: true });
   assert.equal([...mock.connections.values()][0].cancelled, true);
+});
+
+test('native assistant model metadata resumes only the exact selected model', async t => {
+  const mock = mockProtocol(c => c.send(execFrame()), (c, record) => {
+    if (record.message[0].id === 5) c.send(textFrame('native continuation'), doneFrame());
+  });
+  const instance = provider(t, mock), request = body();
+  const first = await (await instance.complete(request, A)).json();
+  const message = first.choices[0].message;
+  assert.equal((await instance.complete(continuation(request, { ...message, model_id: 'foreign-model' }), A)).status, 409);
+  assert.equal(mock.appends.length, 1);
+  const response = await instance.complete(continuation(request, { ...message, model_id: request.model }), A);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).choices[0].message.content, 'native continuation');
+  assert.equal(mock.connections.size, 1);
 });
 
 test('streaming fragments, tool intents and native-result continuation', async t => {
