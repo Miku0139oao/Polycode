@@ -17,6 +17,7 @@ MCP, permissions, sessions, and features. It is not an official xAI, OpenAI,
 or Cursor release.
 
 **Windows native candidate under validation; no usable public installer is advertised yet.**
+**The v0.2.0 WSL installation recommendation is withdrawn.**
 The published v0.2.0 WSL candidate has user-reported failures across all providers.
 Historical development-binary results do not establish that package or the new Windows build.
 
