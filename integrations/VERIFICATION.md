@@ -10,17 +10,45 @@ Ubuntu, macOS or native Windows release support is established.
 
 ## Current native checkpoint
 
-The implementation snapshot supplied for this documentation pass reports **55
-passing offline tests**, combining the parent native-provider service and Cursor
-transport suites. This documentation-only pass did not rerun those tests or
-perform account authentication. Native Rust/TUI work and installer/package drafts
-are in progress; their presence is not evidence of successful integration.
+The parent has rerun **114/114 provider/transport tests on both Node and Bun**,
+plus **25/25 Python harness/safety tests**. These are offline results, not live
+account acceptance.
+
+Two actual native fullscreen PTY runs passed against binary SHA256
+`a4bad9e7cb9063454a2323009238ed3e52677b14713854fb782df178a3fba49e`:
+`native-artifacts-9` and `native-artifacts-leader-1` (default leader enabled).
+They exercised signed-out startup, TUI-controlled mock OAuth/cancellation,
+same-process provider/model switching, streamed output, a real native `read_file`
+round trip with random fixture contents, history preservation, cancellation
+recovery and rejected credential redirects. They used isolated mock providers,
+`--always-approve`, `--disable-web-search` and `--no-memory`; they do **not** prove
+live OAuth, MCP/approval behavior, all default features, or release readiness.
+
+The successful runs exposed real native auxiliary requests absent from the
+original mock contract. The fixture now distinguishes initial title, dashboard,
+title refresh and prediction calls instead of confusing them with interactive
+turns. Bare-origin unauthenticated probes must receive 401; every model/control
+request still requires the process bearer. Subsequent source fixes preserve
+subscription helper defaults, enforce Cursor named/required tool choices, and
+reject rather than silently discard unsupported explicit ChatGPT controls.
+The subsequent Rust regression passed **9,089 pager tests (4 upstream ignored)**
+and **235 sampler tests**. Shell execution aborted with stack overflow and prior
+failures; it has no passing full-suite result. Direct existing-executable diagnosis
+of 22 failures found 20 pass alone and 2 reproduce, with no case timeouts. Test-only
+fixes for missing JWT crypto initialization and missing fixture auth state are
+prepared but not compiled. Compilation is paused while improving the workflow.
+See [fast Rust verification](tests/native_RUST_VERIFICATION.md).
+
+The expanded `/new` and actual stdio MCP round trip ran on the frozen older binary,
+but that run correctly failed its newer unsupported-helper-default assertion.
+It is partial evidence, not a passing final acceptance run. Final rebuilt-binary,
+permission/default-feature and live-provider acceptance remain open.
 
 | Area | Evidence scope / remaining gate |
 | --- | --- |
 | Local service, credential store, ChatGPT transport, launcher | Offline tests cover local control/OAuth state, locking/revisions, request/stream conversion and launch boundaries; no live subscription endpoint acceptance established |
 | Experimental Cursor transport | Offline mocks cover protocol parsing, correlated native tool-intent/result continuation, cancellation, isolation and fail-closed behavior; real OAuth/catalog/remote stream behavior unverified |
-| Native Rust integration | Active implementation; no completed native build/regression/TUI result claimed here |
+| Native Rust integration | Prior integrated binary passed two real fullscreen runs with mock providers, including leader mode; final helper changes and full Rust regression remain open |
 | Browser authentication | No demonstrated TUI → Windows browser → WSL callback/poll → same TUI flow for the native release |
 | Release and installer | v0.2.0 binary/Bun gzip, runtime ZIP and checksum manifest are planned; public assets, clean install and installed native launch not yet verified |
 

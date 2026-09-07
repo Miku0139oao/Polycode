@@ -19,6 +19,7 @@ PROMPTS = {'stream': 'Exercise the initial stream.',
            'model': 'Exercise the second model.',
            'cursor': 'Exercise the other provider.',
            'tool': 'Read the temporary test fixture using your native file tool.',
+           'mcp': 'Discover and call the local fixture MCP probe through the native tools.',
            'wait': 'Exercise cancellation of a running response.',
            'cancelled_login': 'Exercise the current model after cancelling sign-in.',
            'redirect': 'Exercise the model redirect boundary.',
@@ -45,6 +46,8 @@ class MockBridge:
         self.stopping = threading.Event()
         self.tool_definition = None
         self.tool_verified = False
+        self.mcp_value = None
+        self.mcp_verified = False
         self.server = self.trap = None
         self.threads = []
 
@@ -56,7 +59,7 @@ class MockBridge:
         with self.lock:
             return copy.deepcopy({'events': self.events, 'requests': self.requests,
                                   'trap_requests': self.trap_requests, 'errors': self.errors,
-                                  'tool_verified': self.tool_verified})
+                                  'tool_verified': self.tool_verified, 'mcp_verified': self.mcp_verified})
 
     def catalog(self):
         with self.lock:
@@ -85,6 +88,11 @@ class MockBridge:
             def log_message(self, *_):
                 pass  # Never print bearer tokens, URLs, or request bodies.
 
+            def send_response(self, code, message=None):
+                if getattr(self, 'request_record', None) is not None:
+                    self.request_record['status'] = code
+                super().send_response(code, message)
+
             def json_response(self, status, data, headers=None):
                 raw = json.dumps(data).encode()
                 self.send_response(status)
@@ -102,6 +110,7 @@ class MockBridge:
                 self.handle_request()
 
             def handle_request(self):
+                self.request_record = None
                 raw = self.rfile.read(int(self.headers.get('Content-Length', '0')))
                 headers = dict(self.headers)
                 auth_ok = self.headers.get('Authorization') == 'Bearer ' + owner.token
@@ -120,9 +129,10 @@ class MockBridge:
                     self.json_response(400, {'error': 'invalid JSON'})
                     return
                 with owner.lock:
-                    owner.requests.append({'method': self.command, 'path': path.replace(owner.token, '[REDACTED]'),
+                    self.request_record = {'method': self.command, 'path': path.replace(owner.token, '[REDACTED]'),
                                            'authenticated': auth_ok, 'secret_elsewhere': secret_elsewhere,
-                                           'body': json.loads(json.dumps(body).replace(owner.token, '[REDACTED]'))})
+                                           'body': json.loads(json.dumps(body).replace(owner.token, '[REDACTED]'))}
+                    owner.requests.append(self.request_record)
                 if not auth_ok or secret_elsewhere:
                     self.json_response(401, {'error': 'invalid process authentication'})
                     return
@@ -201,9 +211,21 @@ class MockBridge:
                 # Native adapters may encode user text in standard OpenAI text blocks.
                 if isinstance(last_user, list):
                     last_user = '\n'.join(b.get('text', '') for b in last_user if b.get('type') == 'text')
-                case = next((key for key, prompt in PROMPTS.items() if isinstance(last_user, str) and prompt in last_user), None)
+                system = next((m.get('content', '') for m in messages if m.get('role') == 'system'), '')
+                tools = body.get('tools') or []
+                auxiliary = None
+                if len(tools) == 1 and tools[0].get('function', {}).get('name') == 'session_title' and body.get('tool_choice') == {'type': 'function', 'function': {'name': 'session_title'}}:
+                    auxiliary = 'title_function'
+                elif not tools and isinstance(system, str) and system.startswith('You predict the next line the USER will type into their coding agent.'):
+                    auxiliary = 'prediction'
+                elif isinstance(last_user, str) and last_user.startswith('<system-reminder>Generate a session title for the conversation above.'):
+                    auxiliary = 'title'
+                elif isinstance(last_user, str) and last_user.startswith('<system-reminder>Write an ultra-short dashboard line that captures the AGENT\'S REPLY'):
+                    auxiliary = 'dashboard'
+                case = auxiliary or next((key for key, prompt in PROMPTS.items() if isinstance(last_user, str) and prompt in last_user), None)
                 assert case is not None, 'unexpected model prompt (background sampler?)'
-                owner.event('chat', provider=provider, model=model, case=case)
+                self.request_record['purpose'] = 'auxiliary' if auxiliary else 'interactive'
+                owner.event('auxiliary' if auxiliary else 'chat', provider=provider, model=model, case=case)
                 if case == 'redirect':
                     owner.event('model_redirect')
                     self.redirect()
@@ -215,6 +237,14 @@ class MockBridge:
                 self.end_headers()
                 self.close_connection = True
                 self.chunk(model, {'role': 'assistant'})
+                if auxiliary:
+                    if auxiliary == 'title_function':
+                        self.chunk(model, {'tool_calls': [{'index': 0, 'id': 'native-title-call', 'type': 'function', 'function': {'name': 'session_title', 'arguments': json.dumps({'session_title': 'Native subscription test session with original tools'})}}]})
+                        self.finish_sse(model, 'tool_calls')
+                    else:
+                        self.chunk(model, {'content': 'NONE' if auxiliary == 'prediction' else 'Native subscription test session with original tools'})
+                        self.finish_sse(model)
+                    return
                 if case == 'stream':
                     self.chunk(model, {'content': STREAM_MARKER})
                     owner.stream_started.set()
@@ -233,6 +263,30 @@ class MockBridge:
                             self.wfile.flush()
                     except (BrokenPipeError, ConnectionResetError):
                         owner.cancel_disconnected.set()
+                    return
+                if case == 'mcp':
+                    assert owner.mcp_value, 'MCP fixture value missing'
+                    results = [m for m in messages if m.get('role') == 'tool']
+                    completed = next((m for m in results if m.get('tool_call_id') == 'native-mcp-call'), None)
+                    if completed:
+                        calls = [c for m in messages if m.get('role') == 'assistant' for c in (m.get('tool_calls') or [])]
+                        assert any(c.get('id') == 'native-mcp-call' and c.get('function', {}).get('name') == 'use_tool' for c in calls), 'MCP result has no correlated native call'
+                        assert owner.mcp_value in json.dumps(completed), 'native MCP result lacks fixture bytes'
+                        owner.mcp_verified = True
+                        owner.event('mcp_roundtrip')
+                        self.chunk(model, {'content': 'NATIVE_MCP_ROUNDTRIP_OK'})
+                        self.finish_sse(model)
+                        return
+                    assert owner.mcp_value not in json.dumps(body), 'MCP fixture leaked before native invocation'
+                    searched = next((m for m in results if m.get('tool_call_id') == 'native-mcp-search'), None)
+                    if searched:
+                        assert 'fixture__probe' in json.dumps(searched), 'native MCP tool discovery failed'
+                        name, call_id, arguments = 'use_tool', 'native-mcp-call', {'tool_name': 'fixture__probe', 'tool_input': {}}
+                    else:
+                        name, call_id, arguments = 'search_tool', 'native-mcp-search', {'query': 'fixture probe'}
+                    assert any(t.get('function', {}).get('name') == name for t in body.get('tools', [])), 'native MCP dispatch tool absent'
+                    self.chunk(model, {'tool_calls': [{'index': 0, 'id': call_id, 'type': 'function', 'function': {'name': name, 'arguments': json.dumps(arguments)}}]})
+                    self.finish_sse(model, 'tool_calls')
                     return
                 if case == 'tool':
                     results = [m for m in messages if m.get('role') == 'tool' and m.get('tool_call_id') == CALL_ID]

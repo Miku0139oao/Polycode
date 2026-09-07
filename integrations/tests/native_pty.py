@@ -358,11 +358,38 @@ def run_scenario(t, bridge, root):
     t.escape()
     t.pump(2)
     t.alive()
+    # A new session must inherit the selected subscription without falling back
+    # to signed-out Grok; this also exercises Cursor's initial title function.
+    roundtrips = len(events('tool_roundtrip'))
+    titles = len([e for e in events('auxiliary') if e['provider'] == 'cursor' and e['case'] == 'title_function'])
+    t.command('/new')
+    t.pump(1)
+    t.command(PROMPTS['tool'])
+    t.wait(lambda: len(events('tool_roundtrip')) > roundtrips, 'new Cursor session native tool result')
+    t.wait(lambda: len([e for e in events('auxiliary') if e['provider'] == 'cursor' and e['case'] == 'title_function']) > titles, 'new Cursor session title function')
+    t.text(TOOL_MARKER)
+    t.command(PROMPTS['mcp'])
+    t.wait(lambda: bridge.mcp_verified, 'native MCP discovery and tool result')
+    t.text('NATIVE_MCP_ROUNDTRIP_OK')
+    mcp_calls = [json.loads(line) for line in (root / 'mcp-calls.jsonl').read_text().splitlines()]
+    assert sum(call['method'] == 'tools/call' for call in mcp_calls) == 1, 'MCP execution missing or replayed'
+    assert bridge.token not in (root / 'mcp-environment.jsonl').read_text(), 'bridge bearer leaked into native MCP subprocess environment'
     snapshot = bridge.snapshot()
     assert not snapshot['errors'], snapshot['errors']
     assert not snapshot['trap_requests'], 'cross-origin redirect or real browser followed a fixture URL'
-    assert all(r['authenticated'] and not r['secret_elsewhere'] for r in snapshot['requests'])
-    chats = [r for r in snapshot['requests'] if r['path'].endswith('/chat/completions')]
+    assert all(not r['secret_elsewhere'] for r in snapshot['requests'])
+    for request in snapshot['requests']:
+        if not request['authenticated']:
+            # Native endpoint discovery can probe the bare origin. It must be
+            # rejected, never granted model/control access or sent a credential.
+            assert (request['method'], request['path'], request.get('status')) == ('GET', '/', 401), request
+        if request['path'].startswith(('/control/', '/codex/', '/cursor/')):
+            assert request['authenticated'], request
+    inference = [r for r in snapshot['requests'] if r['path'].endswith('/chat/completions')]
+    chats = [r for r in inference if r.get('purpose') == 'interactive']
+    auxiliary = [r for r in inference if r.get('purpose') == 'auxiliary']
+    assert {r['path'].split('/')[1] for r in auxiliary} == {'codex', 'cursor'}, 'native helpers were disabled or misrouted'
+    assert all(not any(r['body'].get(k) is not None for k in ('temperature', 'top_p', 'max_tokens', 'max_completion_tokens')) for r in auxiliary), 'unsupported helper defaults reached subscription transport'
     cursor_chat = next(r['body'] for r in chats if r['path'].startswith('/cursor/') and PROMPTS['cursor'] in json.dumps(r['body']))
     history = json.dumps(cursor_chat['messages'])
     for preserved in (PROMPTS['stream'], STREAM_MARKER, PROMPTS['model'], 'NATIVE_MODEL_OK'):
@@ -370,7 +397,7 @@ def run_scenario(t, bridge, root):
     tool_sets = [{d['function']['name'] for d in r['body'].get('tools', [])} for r in chats]
     assert tool_sets[0] and all(s == tool_sets[0] for s in tool_sets), 'native tool catalog changed/lost on switch'
     assert bridge.token.encode() not in t.data, 'process token leaked to terminal'
-    for request in chats:
+    for request in inference:
         serialized = json.dumps(request['body'])
         auth_material = ['MOCK_LOGIN_PENDING', '/control/login', '[REDACTED]']
         auth_material.extend(e[key] for e in events('login_start') for key in ('attempt_id', 'url'))
@@ -401,7 +428,14 @@ def main():
         fixture = workspace / 'native-fixture.txt'
         fixture_value = 'fixture-nonce-' + os.urandom(24).hex()
         fixture.write_text(fixture_value + '\n')
+        mcp_value = 'mcp-nonce-' + os.urandom(24).hex()
+        mcp_fixture = workspace / 'native-mcp-value.txt'
+        mcp_fixture.write_text(mcp_value + '\n')
+        (workspace / '.mcp.json').write_text(json.dumps({'mcpServers': {'fixture': {
+            'command': '/usr/bin/python3', 'args': [str(Path(__file__).with_name('native_mcp_fixture.py')),
+            str(mcp_fixture), str(root / 'mcp-environment.jsonl'), str(root / 'mcp-calls.jsonl')]}}}))
         with MockBridge(fixture, fixture_value) as bridge:
+            bridge.mcp_value = mcp_value
             env = isolated_environment(root, bridge)
             try:
                 native_preflight(binary, env)

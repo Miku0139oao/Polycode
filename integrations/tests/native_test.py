@@ -12,9 +12,81 @@ from urllib.parse import quote
 
 from native_mock import CALL_ID, MODELS, PROMPTS, STREAM_MARKER, TOOL_MARKER, MockBridge, read_tool
 from native_pty import Screen, Terminal, isolated_environment, native_preflight, require_network_isolation
+from native_live import official_login, open_official_browser
 
 TOOLS = [{'type': 'function', 'function': {'name': 'Read', 'parameters': {
     'type': 'object', 'properties': {'file_path': {'type': 'string'}}, 'required': ['file_path']}}}]
+
+
+class LiveSafetyTests(unittest.TestCase):
+    def test_official_browser_destination_is_exact(self):
+        self.assertEqual(official_login('https://auth.openai.com/oauth/authorize?state=fixture', 'codex'), 'https://auth.openai.com/oauth/authorize?state=fixture')
+        self.assertEqual(official_login('https://cursor.com/loginDeepControl?uuid=fixture', 'cursor'), 'https://cursor.com/loginDeepControl?uuid=fixture')
+        for url in ['http://auth.openai.com/oauth/authorize', 'https://auth.openai.com.evil.test/oauth/authorize', 'https://user@auth.openai.com/oauth/authorize', 'file:///tmp/code', 'https://auth.openai.com/not-oauth']:
+            with self.assertRaises(ValueError):
+                official_login(url, 'codex')
+
+    def test_public_url_is_quoted_as_data_not_shell_code(self):
+        import base64
+        url = "https://auth.openai.com/oauth/authorize?state=x';Write-Output=bad"
+        with patch('native_live.subprocess.run') as run:
+            open_official_browser(url, 'codex')
+        argv = run.call_args.args[0]
+        self.assertNotIn('cmd.exe', argv[0])
+        script = base64.b64decode(argv[-1]).decode('utf-16le')
+        self.assertEqual(script, "Start-Process -FilePath '" + url.replace("'", "''") + "'")
+
+
+class CompiledCaseRunnerTests(unittest.TestCase):
+    def test_exact_case_result_and_separate_error_capture(self):
+        from native_rust_cases import run_case
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / 'fake-test'
+            executable.write_text("#!/usr/bin/python3\nimport sys\ncase=sys.argv[1]\nif case=='panic':\n print('fixture panic detail',file=sys.stderr)\n sys.exit(101)\nprint('test result: ok. '+('0' if case=='missing' else '1')+' passed; 0 failed; 0 ignored;')\n")
+            executable.chmod(0o700)
+            good = run_case(executable, root, 'good', root / 'good', 5, 33554432)
+            missing = run_case(executable, root, 'missing', root / 'missing', 5, 33554432)
+            panic = run_case(executable, root, 'panic', root / 'panic', 5, 33554432)
+            self.assertTrue(good['passed'])
+            self.assertFalse(missing['passed'], 'zero matched tests must never pass')
+            self.assertFalse(panic['passed'])
+            self.assertIn('fixture panic detail', Path(panic['stderr']).read_text())
+            self.assertNotIn('fixture panic detail', Path(panic['stdout']).read_text())
+            self.assertEqual(good['cwd'], str(root))
+
+    def test_timeout_is_failure_not_a_skipped_test(self):
+        from native_rust_cases import run_case
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / 'fake-test'
+            executable.write_text('#!/usr/bin/python3\nimport time\ntime.sleep(10)\n')
+            executable.chmod(0o700)
+            result = run_case(executable, root, 'slow', root / 'slow', .1, 33554432)
+            self.assertTrue(result['timed_out'])
+            self.assertFalse(result['passed'])
+
+
+class McpFixtureTests(unittest.TestCase):
+    def test_stdio_protocol_and_private_environment_evidence(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = root / 'value.txt'
+            fixture.write_text('mcp-private-fixture-value\n')
+            requests = [
+                {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {'protocolVersion': '2024-11-05'}},
+                {'jsonrpc': '2.0', 'method': 'notifications/initialized'},
+                {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list'},
+                {'jsonrpc': '2.0', 'id': 3, 'method': 'tools/call', 'params': {'name': 'probe', 'arguments': {}}},
+            ]
+            result = subprocess.run([sys.executable, str(Path(__file__).with_name('native_mcp_fixture.py')), str(fixture), str(root / 'env.jsonl'), str(root / 'calls.jsonl')], input='\n'.join(map(json.dumps, requests)) + '\n', text=True, capture_output=True, check=True, timeout=10, env={'PATH': '/usr/bin:/bin', 'HOME': directory})
+            replies = [json.loads(line) for line in result.stdout.splitlines()]
+            self.assertEqual([r['id'] for r in replies], [1, 2, 3])
+            self.assertEqual(replies[1]['result']['tools'][0]['name'], 'probe')
+            self.assertEqual(replies[2]['result']['content'][0]['text'], fixture.read_text())
+            self.assertEqual((root / 'env.jsonl').stat().st_mode & 0o777, 0o600)
+            self.assertNotIn('POLYCODE_BRIDGE_TOKEN', (root / 'env.jsonl').read_text())
 
 
 class MockTests(unittest.TestCase):
@@ -76,6 +148,46 @@ class MockTests(unittest.TestCase):
         for path in ('/control/refresh', '/control/login/start', '/control/login/cancel', '/codex/v1/chat/completions', '/cursor/v1/chat/completions'):
             self.assertEqual(self.json('POST', path, {}, token=False)[0], 401)
         self.assertEqual(self.json('GET', '/control/login/status?attemptId=x', token=False)[0], 401)
+
+    def test_bare_origin_probe_is_rejected_and_status_recorded(self):
+        self.assertEqual(self.json('GET', '/', token=False)[0], 401)
+        request = self.bridge.snapshot()['requests'][-1]
+        self.assertFalse(request['authenticated'])
+        self.assertEqual(request['status'], 401)
+
+    def test_native_auxiliary_calls_do_not_impersonate_interactive_turns(self):
+        previous = {'role': 'user', 'content': PROMPTS['stream']}
+        bodies = [
+            ('title_function', {'messages': [previous], 'tools': [{'type': 'function', 'function': {'name': 'session_title'}}], 'tool_choice': {'type': 'function', 'function': {'name': 'session_title'}}}),
+            ('prediction', {'messages': [{'role': 'system', 'content': 'You predict the next line the USER will type into their coding agent.'}, previous]}),
+            ('title', {'messages': [previous, {'role': 'user', 'content': '<system-reminder>Generate a session title for the conversation above.'}]}),
+            ('dashboard', {'messages': [previous, {'role': 'user', 'content': "<system-reminder>Write an ultra-short dashboard line that captures the AGENT'S REPLY"}], 'tools': TOOLS}),
+        ]
+        for kind, fields in bodies:
+            with self.subTest(kind=kind):
+                chunks = self.sse({'model': 'mock-alpha', 'stream': True, **fields})
+                self.assertNotIn(STREAM_MARKER, json.dumps(chunks))
+                self.assertFalse(self.bridge.stream_started.is_set())
+                event = self.bridge.snapshot()['events'][-1]
+                self.assertEqual((event['kind'], event['case']), ('auxiliary', kind))
+                self.assertEqual(self.bridge.snapshot()['requests'][-1]['purpose'], 'auxiliary')
+                if kind == 'title_function':
+                    calls = [c for chunk in chunks for c in chunk['choices'][0]['delta'].get('tool_calls', [])]
+                    self.assertEqual(calls[0]['function']['name'], 'session_title')
+                    self.assertIn('session_title', json.loads(calls[0]['function']['arguments']))
+
+    def test_mcp_discovery_and_correlated_native_dispatch(self):
+        self.bridge.mcp_value = 'mcp-distinct-fixture-value'
+        messages = [{'role': 'user', 'content': PROMPTS['mcp']}]
+        tools = [{'type': 'function', 'function': {'name': name}} for name in ('search_tool', 'use_tool')]
+        for name, output in [('search_tool', 'fixture__probe schema'), ('use_tool', self.bridge.mcp_value)]:
+            chunks = self.sse({'model': 'mock-alpha', 'stream': True, 'messages': messages, 'tools': tools})
+            call = next(chunk['choices'][0]['delta']['tool_calls'][0] for chunk in chunks if 'tool_calls' in chunk['choices'][0]['delta'])
+            self.assertEqual(call['function']['name'], name)
+            messages.extend([{'role': 'assistant', 'tool_calls': [call]}, {'role': 'tool', 'tool_call_id': call['id'], 'content': output}])
+        chunks = self.sse({'model': 'mock-alpha', 'stream': True, 'messages': messages, 'tools': tools})
+        self.assertIn('NATIVE_MCP_ROUNDTRIP_OK', json.dumps(chunks))
+        self.assertTrue(self.bridge.mcp_verified)
 
     def test_login_poll_refresh_and_exact_encoded_attempt_id(self):
         attempt = self.start_login()
