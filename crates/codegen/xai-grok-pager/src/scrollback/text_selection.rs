@@ -1680,14 +1680,17 @@ mod tests {
             selection_range: Some(0),
             ..Default::default()
         };
+        // Both expectations depend on the same process-global latch. Protect
+        // the off assertion too: another RTL test may otherwise enable it.
+        let _g = BIDI_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _latch = BidiLatchGuard(crate::render::bidi::is_enabled());
+        crate::render::bidi::set_enabled(false);
         // Region is logical columns 0..3 (the "…" span is excluded).
         assert_eq!(selectable_cols(&line.content, &line.selectable), Some(0..3));
-        // Reordering off: identity.
         assert_eq!(visual_selectable_cols(&line), Some(0..3));
-        with_rtl_bidi(|| {
-            // Painted "خوب…" reorders to "…بوخ"; the word occupies visual cells 1..4
-            assert_eq!(visual_selectable_cols(&line), Some(1..4));
-        });
+        crate::render::bidi::set_enabled(true);
+        // Painted "خوب…" reorders to "…بوخ"; the word occupies visual cells 1..4.
+        assert_eq!(visual_selectable_cols(&line), Some(1..4));
     }
 
     /// The overlay copy path (single-line, resolved-model) maps drag columns against the painted region, not the trailing-trimmed `text`.

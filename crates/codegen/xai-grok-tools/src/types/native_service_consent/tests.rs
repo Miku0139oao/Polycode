@@ -1577,7 +1577,8 @@ async fn unauthorized_uses_actual_sent_fallback_and_does_not_echo_secrets() {
         let error = result.unwrap_err().to_string();
         assert!(!error.contains("actual-sent"));
         assert!(!error.contains("password"));
-        assert_eq!(*callback.0.lock(), vec![Some("12345678901".into())]);
+        // Native attribution retains exactly the final 12 characters.
+        assert_eq!(*callback.0.lock(), vec![Some("-12345678901".into())]);
         assert_eq!(
             server.received_requests().await.unwrap()[0]
                 .headers
