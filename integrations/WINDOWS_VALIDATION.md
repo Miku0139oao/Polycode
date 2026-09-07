@@ -38,6 +38,29 @@ TUI, OAuth, generation or billing acceptance.
 TUI through ConPTY. Set NODE_PTY_MODULE to the test-only node-pty module path.
 It performs no real login or generation.
 
+`windows-native-tools.mjs NATIVE_EXE` runs real native Read, Write and PowerShell
+tools for both subscription routes using synthetic model responses. It approves
+only individual operations, cancels a streaming response, checks the persisted
+provider-qualified model ID, restarts the TUI and reads newly changed fixture
+bytes from the resumed session. These are offline integration observations.
+
+## Interactive login
+
+When the account owner is available, run each provider against the candidate:
+
+```powershell
+node integrations/tests/windows-live-login.mjs CANDIDATE_DIRECTORY codex --interactive-login
+node integrations/tests/windows-live-login.mjs CANDIDATE_DIRECTORY cursor --interactive-login
+```
+
+Run sequentially. The harness installs into a fresh temporary directory without
+changing PATH, prints the native TUI's authorization URL, and waits up to ten
+minutes for the owner to complete browser login. A PASS requires the real model
+picker and normal process exit. It does not send a generation request, inspect
+credential files, or satisfy coding/generation acceptance. Reports and sanitized
+terminal observations remain in the printed temporary directory. The browser
+URL file and auth directory are private local artifacts and must not be uploaded.
+
 ## Prerelease evidence
 
 The build action creates the `polycode-windows-candidate` Actions artifact.
@@ -57,7 +80,30 @@ offline mode; other gates require real observations. Include only sanitized logs
 
 The candidate workflow never generates stable authorization sidecars.
 
-## Outstanding acceptance
+## Local observations (2026-09-08)
+
+Runtime revision `813a2137a2a5f4cde2d102e737c90574d2242b7e` built successfully
+as a Windows MSVC release executable. Native SHA256:
+`266065995bf3dc0d275bf75b7ff3b7557db4681ba6b869c0662379127e79419e`.
+The local development package manifest SHA256 is
+`8b3dfb67edaba0d401c1bb22f326bdb2f722936ad214446310164cb2007c5404`.
+This package is not a published or accepted GitHub artifact.
+
+- Packaged installation and signed-out ConPTY startup passed for native Grok,
+  ChatGPT and Cursor, each with normal exit code 0.
+- Actual native Read, Write and PowerShell execution passed for both subscription
+  routes using synthetic transport and individual permission approvals.
+- Cancellation reached the model stream. A subsequent restart preserved the
+  canonical `cursor/mock-cursor` model identity and read fresh fixture bytes.
+  No forced terminal exit or fixture error occurred.
+- The resume defect was a persisted unqualified model ID. The fix preserves
+  provider identity using the authenticated catalog and exact registered route;
+  it does not relax native authentication checks.
+- The old installed WSL package started ChatGPT/Cursor browser authorization and
+  displayed Grok's browser approval screen. These observations do not reproduce
+  or resolve the user's real account/generation failures.
+
+## Remaining acceptance
 
 - Old WSL package: binary help and shipped Bun execute; signed-out TUI observed.
   These checks do not resolve real provider failures.

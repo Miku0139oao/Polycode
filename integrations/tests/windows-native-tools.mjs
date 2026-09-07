@@ -1,7 +1,7 @@
 // Native Windows engine + actual native file/shell tools; model transport is a
 // loopback fixture. Never counts as live provider or clean-OS acceptance.
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomBytes, createHash } from 'node:crypto';
@@ -173,6 +173,12 @@ try {
   assert.ok(!t.forcedExit && t.exitCode===0,'First terminal did not exit normally');
   const session=plain(t.output).match(/--resume\s+([a-f0-9-]{36})/)?.[1];
   assert.ok(session,'Native TUI did not expose a resumable session');
+  const sessionsRoot=join(home,'grok','sessions');
+  const summaryPath=readdirSync(sessionsRoot,{withFileTypes:true}).filter(entry=>entry.isDirectory())
+    .map(entry=>join(sessionsRoot,entry.name,session,'summary.json')).find(existsSync);
+  assert.ok(summaryPath,'Persisted native session summary is missing');
+  report.persistedModelId=JSON.parse(readFileSync(summaryPath,'utf8')).current_model_id;
+  assert.equal(report.persistedModelId,'cursor/mock-cursor','Persistence lost the selected provider identity');
   writeFileSync(join(root,'first-terminal.txt'),plain(t.output).replaceAll(bridge.token,'[REDACTED]'));
   writeFileSync(file,nonce+'-resumed');
   t=new WindowsTerminal(binary,[...nativeArgs,'--resume',session],workspace,env);
