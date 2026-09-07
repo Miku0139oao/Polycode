@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic, local-only HTTP control + OpenAI SSE fixture; never an ACP agent."""
 import copy
+import hashlib
 import json
 import re
 import secrets
@@ -44,6 +45,7 @@ class MockBridge:
         self.token = secrets.token_urlsafe(32)
         self.lock = threading.RLock()
         self.logged_in = dict.fromkeys(PROVIDERS, False)
+        self.catalog_generations = dict.fromkeys(PROVIDERS, 0)
         self.attempts = {}
         self.events = []
         self.requests = []
@@ -86,11 +88,17 @@ class MockBridge:
                                                      if k not in ('nonce', 'arguments')}}
                                                      for p, state in self.native_resumes.items()}})
 
+    def catalog_revision(self, provider):
+        # Synthetic account/catalog identity, not a hash of any credential.
+        return hashlib.sha256(json.dumps([provider, self.catalog_generations[provider],
+                                          MODELS[provider]]).encode()).hexdigest()
+
     def catalog(self):
         with self.lock:
             return {'providers': [
                 {'id': p, 'name': 'OpenAI ChatGPT' if p == 'codex' else 'Cursor',
                  'loggedIn': self.logged_in[p],
+                 'catalogRevision': self.catalog_revision(p) if self.logged_in[p] else None,
                  'models': [{'id': i, 'name': n, 'contextWindow': 131072}
                             for i, n in MODELS[p]] if self.logged_in[p] else []}
                 for p in PROVIDERS]}
@@ -103,6 +111,7 @@ class MockBridge:
                 raise AssertionError('Cannot complete a terminal login attempt')
             attempt['state'] = 'completed'
             self.logged_in[attempt['provider']] = True
+            self.catalog_generations[attempt['provider']] += 1
 
     def child_reply(self, child_provider, provider, model, body, resume=False):
         """Reply to a native-engine child, never create or execute an agent here."""
@@ -267,6 +276,18 @@ class MockBridge:
                         self.redirect()
                     else:
                         self.json_response(200, owner.catalog())
+                    return
+                if (method, path) == ('POST', '/control/validate-model'):
+                    provider = body.get('provider')
+                    with owner.lock:
+                        valid = (provider in PROVIDERS and owner.logged_in[provider]
+                                 and body.get('model') in [m[0] for m in MODELS[provider]]
+                                 and body.get('catalogRevision') == owner.catalog_revision(provider)
+                                 and body.get('effort') is None)
+                    owner.event('model_validation', accepted=valid)
+                    self.json_response(200 if valid else 400, {} if valid else
+                                       {'error': {'code': 'invalid_selection',
+                                                  'message': 'Synthetic catalog or effort changed'}})
                     return
                 if (method, path) == ('POST', '/control/login/start'):
                     provider = body.get('provider')

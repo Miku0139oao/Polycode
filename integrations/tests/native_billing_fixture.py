@@ -150,7 +150,12 @@ class BillingFixture:
                         tools = body.get('tools') or []
                         if case and len(tools) > 1:
                             delta, finish = scripted_reply(body, case, owner.nonce, owner.native_nonce, owner.events)
-                            owner.events[-1].update(provider=provider, model=body.get('model'))
+                            event = owner.events[-1]
+                            event.update(provider=provider, model=body.get('model'),
+                                         request_tool_names=[t.get('function', {}).get('name') for t in tools],
+                                         last_message_role=messages[-1].get('role') if messages else None,
+                                         response_contains_marker=bool(delta.get('content', '').startswith('NATIVE_ACCEPTANCE_')),
+                                         response_emitted=False)
                             def chunk(value, reason=None):
                                 return 'data: ' + json.dumps({'id': 'permission-billing-fixture', 'object': 'chat.completion.chunk', 'created': 1,
                                                              'model': body['model'], 'choices': [{'index': 0, 'delta': value, 'finish_reason': reason}]}) + '\n\n'
@@ -163,6 +168,7 @@ class BillingFixture:
                                 self.wfile.write(frame.encode())
                                 self.wfile.flush()
                                 time.sleep(.2)  # Exercise incremental native SSE/UI delivery, not one buffered JSON blob.
+                            event['response_emitted'] = True
                             return
                     request = Request(owner.upstream.url + self.path, data=raw if self.command == 'POST' else None,
                                       headers={'Authorization': 'Bearer ' + owner.upstream.token, 'Content-Type': 'application/json'}, method=self.command)

@@ -119,6 +119,23 @@ class MockTests(unittest.TestCase):
         response = self.request(method, path, body, **kwargs)
         return response.status, json.loads(response.read())
 
+    def test_model_selection_revalidates_synthetic_account_catalog_and_effort(self):
+        for provider in ('codex', 'cursor'):
+            self.bridge.complete_login(self.start_login(provider))
+            entry = next(p for p in self.bridge.catalog()['providers'] if p['id'] == provider)
+            body = {'provider': provider, 'model': entry['models'][0]['id'],
+                    'catalogRevision': entry['catalogRevision'], 'effort': None}
+            self.assertEqual(self.json('POST', '/control/validate-model', body)[0], 200)
+            for patch in ({'model': 'unregistered'}, {'effort': 'high'},
+                          {'catalogRevision': []}, {'provider': 'native'}):
+                self.assertEqual(self.json('POST', '/control/validate-model', {**body, **patch})[0], 400)
+            self.bridge.complete_login(self.start_login(provider))
+            self.assertEqual(self.json('POST', '/control/validate-model', body)[0], 400)
+            body['catalogRevision'] = self.bridge.catalog_revision(provider)
+            self.assertEqual(self.json('POST', '/control/validate-model', body)[0], 200)
+            self.bridge.logged_in[provider] = False
+            self.assertEqual(self.json('POST', '/control/validate-model', body)[0], 400)
+
     def start_login(self, provider='codex'):
         status, data = self.json('POST', '/control/login/start', {'provider': provider})
         self.assertEqual(status, 200)
