@@ -10,45 +10,44 @@ Ubuntu, macOS or native Windows release support is established.
 
 ## Current native checkpoint
 
-The parent has rerun **114/114 provider/transport tests on both Node and Bun**,
-plus **25/25 Python harness/safety tests**. These are offline results, not live
-account acceptance.
+Rust source **`18dce8670c9767944e2a225a75dd10580a27e985`** passed the complete
+selected seven-package library/binary unit gate: **20,535 passed, 0 failed,
+11 existing ignored**. Default stack, serial shared-process cases, internal
+concurrency tests retained, no filters or snapshot updates. All previously
+aborting memory, mid-turn and manual-compaction cases passed. The six-package
+Windows MSVC `--all-targets` check also passed; that is typechecking, not Windows
+test execution or sandbox parity. See [current evidence](tests/native_CURRENT_VERIFICATION.md)
+and [Rust workflow](tests/native_RUST_VERIFICATION.md).
 
-Two actual native fullscreen PTY runs passed against binary SHA256
-`a4bad9e7cb9063454a2323009238ed3e52677b14713854fb782df178a3fba49e`:
-`native-artifacts-9` and `native-artifacts-leader-1` (default leader enabled).
-They exercised signed-out startup, TUI-controlled mock OAuth/cancellation,
-same-process provider/model switching, streamed output, a real native `read_file`
-round trip with random fixture contents, history preservation, cancellation
-recovery and rejected credential redirects. They used isolated mock providers,
-`--always-approve`, `--disable-web-search` and `--no-memory`; they do **not** prove
-live OAuth, MCP/approval behavior, all default features, or release readiness.
+The actual composition-root executable was subsequently built from that source:
+SHA256 **`e8bc41336b6e40a4340a24cb37163c5448b31ab08aa790daf5c80ee09e3bde2e`**.
+It is a **development-profile, unoptimized** binary, not a release-optimized build.
+Both `native-artifacts-18d-baseline` and `native-artifacts-18d-default-2` passed
+with the native leader. They exercised fullscreen signed-out startup, mock TUI
+login/cancellation, provider/model/history continuity, streaming/cancellation,
+native Read, `/new`, helper affinity, actual stdio MCP discovery/execution and
+credential redirect/isolation checks.
 
-The successful runs exposed real native auxiliary requests absent from the
-original mock contract. The fixture now distinguishes initial title, dashboard,
-title refresh and prediction calls instead of confusing them with interactive
-turns. Bare-origin unauthenticated probes must receive 401; every model/control
-request still requires the process bearer. Subsequent source fixes preserve
-subscription helper defaults, enforce Cursor named/required tool choices, and
-reject rather than silently discard unsupported explicit ChatGPT controls.
-The subsequent Rust regression passed **9,089 pager tests (4 upstream ignored)**
-and **235 sampler tests**. Shell execution aborted with stack overflow and prior
-failures; it has no passing full-suite result. Direct existing-executable diagnosis
-of 22 failures found 20 pass alone and 2 reproduce, with no case timeouts. Test-only
-fixes for missing JWT crypto initialization and missing fixture auth state are
-prepared but not compiled. Compilation is paused while improving the workflow.
-See [fast Rust verification](tests/native_RUST_VERIFICATION.md).
+The default profile did **not** set always-approve, disable-web-search, no-memory,
+no-auto-update or the dashboard override. It observed the actual MCP permission
+card, verified zero `tools/call` while pending, selected the exact single-use
+**Yes** option (not blanket approval), and verified exactly one subsequent call.
+The first default-profile run correctly stopped at that unhandled permission;
+the harness was extended to answer it explicitly, not bypass it.
 
-The expanded `/new` and actual stdio MCP round trip ran on the frozen older binary,
-but that run correctly failed its newer unsupported-helper-default assertion.
-It is partial evidence, not a passing final acceptance run. Final rebuilt-binary,
-permission/default-feature and live-provider acceptance remain open.
+These runs still trust only the disposable fixture workspace, disable telemetry,
+suppress the real browser and use isolated mock accounts/network. They do not
+prove permission denial, native Task execution, billing approval/denial, live
+OAuth, actual subscription endpoints, installed entrypoint or release readiness.
+The integrated Python harness/profile tests are **29/29 passed**. Earlier unchanged
+provider/transport suites passed **114/114 on Node and Bun**; those are offline
+results, not fresh live-provider acceptance.
 
 | Area | Evidence scope / remaining gate |
 | --- | --- |
 | Local service, credential store, ChatGPT transport, launcher | Offline tests cover local control/OAuth state, locking/revisions, request/stream conversion and launch boundaries; no live subscription endpoint acceptance established |
 | Experimental Cursor transport | Offline mocks cover protocol parsing, correlated native tool-intent/result continuation, cancellation, isolation and fail-closed behavior; real OAuth/catalog/remote stream behavior unverified |
-| Native Rust integration | Prior integrated binary passed two real fullscreen runs with mock providers, including leader mode; final helper changes and full Rust regression remain open |
+| Native Rust integration | 20,535 unit passes and fresh native leader/default-profile mock PTY acceptance at the source/hash above; remaining live/feature/install gates are not closed |
 | Browser authentication | No demonstrated TUI → Windows browser → WSL callback/poll → same TUI flow for the native release |
 | Release and installer | v0.2.0 binary/Bun gzip, runtime ZIP and checksum manifest are planned; public assets, clean install and installed native launch not yet verified |
 
@@ -60,8 +59,9 @@ not satisfy feature-preservation acceptance**.
 
 ## Required evidence before claiming native completion
 
-All rows below are **pending**. Record the exact integrated source commit,
-commands, environment, outcomes and redacted evidence when updating this ledger.
+The end-to-end gates below remain open beyond the explicitly verified scopes
+above. Record source commit, commands, environment, outcomes and redacted evidence;
+unit or mock success does not silently close a broader gate.
 
 | Gate | Required acceptance evidence |
 | --- | --- |

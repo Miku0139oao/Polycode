@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import re
 import select
 import signal
 import socket
@@ -226,7 +227,7 @@ class Terminal:
         os.close(self.master)
 
 
-def isolated_environment(root, bridge):
+def isolated_environment(root, bridge, default_features=False):
     """Allowlist instead of inheriting real OAuth/API keys, proxies, config, or browser."""
     home = root / 'home'
     home.mkdir()
@@ -240,7 +241,9 @@ def isolated_environment(root, bridge):
            'POLYCODE_BRIDGE_URL': bridge.url, 'POLYCODE_BRIDGE_TOKEN': bridge.token,
            'DISABLE_TELEMETRY': '1', 'DISABLE_ERROR_REPORTING': '1',
            'GROK_TELEMETRY_ENABLED': 'off', 'GROK_TELEMETRY_TRACE_UPLOAD': '0',
-           'GROK_EXTERNAL_OTEL': '0', 'GROK_AGENT_DASHBOARD': '0'}
+           'GROK_EXTERNAL_OTEL': '0'}
+    if not default_features:
+        env['GROK_AGENT_DASHBOARD'] = '0'
     return env
 
 
@@ -255,7 +258,16 @@ def native_preflight(binary, env):
         raise RuntimeError('NATIVE BINARY GATE: this binary does not advertise --polycode-native and --no-external-acp; old ACP binaries cannot pass')
 
 
-def run_scenario(t, bridge, root):
+def permission_key(screen, label):
+    # PermissionView Options mode handles digits directly. Match the exact
+    # rendered label, never the default/highlighted blanket-approval row.
+    rows = re.findall(r'(?m)^[ \t┃]*([1-9])[ \t]+\([○●]\)[ \t]+([^\n]+)$', screen)
+    matches = [key for key, text in rows if text.strip() == label]
+    assert len(matches) <= 1, 'Ambiguous permission option label'
+    return matches[0].encode() if matches else None
+
+
+def run_scenario(t, bridge, root, default_features=False):
     def events(kind):
         return [e for e in bridge.snapshot()['events'] if e['kind'] == kind]
 
@@ -369,6 +381,13 @@ def run_scenario(t, bridge, root):
     t.wait(lambda: len([e for e in events('auxiliary') if e['provider'] == 'cursor' and e['case'] == 'title_function']) > titles, 'new Cursor session title function')
     t.text(TOOL_MARKER)
     t.command(PROMPTS['mcp'])
+    if default_features:
+        t.wait(lambda: 'Allow (Fixture) Probe?' in t.screen.text() and permission_key(t.screen.text(), 'Yes') is not None,
+               'native MCP allow-once permission option')
+        before_approval = [json.loads(line) for line in (root / 'mcp-calls.jsonl').read_text().splitlines()]
+        assert not any(call['method'] == 'tools/call' for call in before_approval), 'MCP executed before user approval'
+        assert not bridge.mcp_verified, 'MCP result appeared while approval was pending'
+        t.send(permission_key(t.screen.text(), 'Yes'))
     t.wait(lambda: bridge.mcp_verified, 'native MCP discovery and tool result')
     t.text('NATIVE_MCP_ROUNDTRIP_OK')
     mcp_calls = [json.loads(line) for line in (root / 'mcp-calls.jsonl').read_text().splitlines()]
@@ -404,13 +423,25 @@ def run_scenario(t, bridge, root):
         for forbidden in auth_material:
             assert forbidden not in serialized, 'UI-only auth material leaked into model history'
     return {'pid': t.proc.pid, 'fullscreen': True, 'same_process': True,
-            'history_preserved': True, 'native_tool_names': sorted(tool_sets[0]), **snapshot}
+            'history_preserved': True, 'mcp_explicit_allow_once': default_features,
+            'native_tool_names': sorted(tool_sets[0]), **snapshot}
+
+
+def native_command(binary, workspace, with_leader=False, default_features=False):
+    command = [str(binary), '--polycode-native', '--no-external-acp',
+               '--fullscreen', '--trust', '--cwd', str(workspace)]
+    if not default_features:
+        command += ['--no-auto-update', '--always-approve', '--disable-web-search', '--no-memory']
+    if not with_leader:
+        command.append('--no-leader')
+    return command
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binary', type=Path, help='absolute path to a newly built native Rust binary')
     parser.add_argument('--with-leader', action='store_true', help='exercise the default private native leader instead of the in-process path')
+    parser.add_argument('--default-features', action='store_true', help='retain default tool permissions, memory, web, dashboard and updater policy; fixture workspace remains explicitly trusted')
     parser.add_argument('--artifacts', type=Path, help='new directory for redacted transcript/report; defaults to /tmp/native-e2e-*')
     args = parser.parse_args()
     require_network_isolation()
@@ -420,7 +451,9 @@ def main():
     if any(artifacts.iterdir()):
         raise SystemExit('Artifact directory must be empty')
     terminal = None
-    report = {'passed': False, 'binary': str(binary), 'with_leader': args.with_leader}
+    report = {'passed': False, 'binary': str(binary), 'with_leader': args.with_leader,
+              'default_features': args.default_features, 'workspace_trusted': True,
+              'real_accounts': False, 'browser_suppressed': True, 'telemetry_disabled': True}
     with tempfile.TemporaryDirectory(prefix='native-fixture-') as temp:
         root = Path(temp)
         workspace = root / 'workspace'
@@ -436,18 +469,15 @@ def main():
             str(mcp_fixture), str(root / 'mcp-environment.jsonl'), str(root / 'mcp-calls.jsonl')]}}}))
         with MockBridge(fixture, fixture_value) as bridge:
             bridge.mcp_value = mcp_value
-            env = isolated_environment(root, bridge)
+            env = isolated_environment(root, bridge, args.default_features)
             try:
                 native_preflight(binary, env)
                 with binary.open('rb') as executable:
                     report['binary_sha256'] = hashlib.file_digest(executable, 'sha256').hexdigest()
-                command = [str(binary), '--polycode-native', '--no-external-acp',
-                           '--fullscreen', '--no-auto-update', '--trust', '--always-approve',
-                           '--disable-web-search', '--no-memory', '--cwd', str(workspace)]
-                if not args.with_leader:
-                    command.append('--no-leader')
+                command = native_command(binary, workspace, args.with_leader, args.default_features)
+                report['command'] = command
                 terminal = Terminal(command, env, workspace)
-                report.update(run_scenario(terminal, bridge, root))
+                report.update(run_scenario(terminal, bridge, root, args.default_features))
                 report['passed'] = True
             except Exception as error:
                 report['failure'] = (type(error).__name__ + ': ' + str(error)).replace(bridge.token, '[REDACTED]')

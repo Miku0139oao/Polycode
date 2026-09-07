@@ -2,6 +2,8 @@
 
 These files test the **original Grok engine**, not an external ACP adapter.
 `pty_smoke.py`, `pty_live.py`, and `mock_acp.py` are not native acceptance evidence.
+The current tested source/hash and remaining gates are recorded in
+[native_CURRENT_VERIFICATION.md](native_CURRENT_VERIFICATION.md).
 No Rust build is performed here. Python 3.11+ standard library, Linux PTYs,
 `unshare` (util-linux), and `ip` (iproute2) are required.
 
@@ -10,8 +12,8 @@ No Rust build is performed here. Python 3.11+ standard library, Linux PTYs,
 From Git Bash on Windows:
 
 ```sh
-MSYS_NO_PATHCONV=1 wsl -d archlinux --exec python3 \
-  /mnt/d/ai-harness/polycode-e2e/integrations/tests/native_test.py
+MSYS_NO_PATHCONV=1 wsl -d archlinux --exec python3 -m unittest discover \
+  -s /mnt/d/ai-harness/polycode-native/integrations/tests -p 'native_*test.py'
 ```
 
 This covers authenticated control routes, pending/completed/failed/cancelled
@@ -21,7 +23,7 @@ redirect-trap positive controls, environment/network guards, incremental VT
 painting, and an actual PTY terminal-discovery exchange. The tiny Python PTY
 child tests mechanics only: **unit success is not native-binary success**.
 
-## Real native run after the Rust worker merges/builds
+## Run native mock acceptance
 
 Use the actual newly built Linux executable. The old
 `/root/grok-build-target/debug/xai-grok-pager` is not evidence unless replaced by
@@ -31,12 +33,12 @@ executable's SHA-256, path, PID, transcript, screen, and HTTP evidence.
 
 ```sh
 MSYS_NO_PATHCONV=1 wsl -d archlinux --exec unshare --net sh -c \
-  'ip link set lo up && exec python3 /mnt/d/ai-harness/polycode-e2e/integrations/tests/native_pty.py "$1"' \
+  'ip link set lo up && exec python3 /mnt/d/ai-harness/polycode-native/integrations/tests/native_pty.py "$1"' \
   native-e2e /ABSOLUTE/PATH/TO/NEW/xai-grok-pager
 ```
 
 Replace the final binary path. If cherry-picked into another worktree, also
-replace `/mnt/d/ai-harness/polycode-e2e`. `unshare --net` needs root or suitable
+replace `/mnt/d/ai-harness/polycode-native`. `unshare --net` needs root or suitable
 namespace privileges (the available Arch WSL root environment supports it).
 Never remove isolation to work around a failure. The harness refuses a network
 namespace containing any interface other than `lo`. This also prevents real
@@ -48,18 +50,27 @@ scenario prints `PASS`; assertions/timeouts fail nonzero and retain redacted
 evidence. Temporary HOME, Grok config/state, workspace, and fixture are deleted.
 The child environment is an allowlist: no real keys, OAuth caches, proxies,
 DISPLAY, Wayland, WSL interop, or user browser configuration is inherited.
-`--always-approve --trust` applies only to the disposable fixture workspace;
-this is a native **read-tool execution** test, not a permission-prompt test.
+The restricted baseline uses `--always-approve --trust` only in the disposable
+workspace; it is not permission-prompt acceptance. The default profile below
+instead handles the actual MCP allow-once prompt.
 
 ## Acceptance sequence and exact UI wiring
 
-The harness runs one native executable with:
+The restricted baseline runs one native executable with:
 
 ```text
 --polycode-native --no-external-acp --no-leader --fullscreen
 --no-auto-update --trust --always-approve --disable-web-search --no-memory
 --cwd <temporary workspace>
 ```
+
+Add `--with-leader --default-features` to the **Python harness** arguments to
+exercise the native leader without always-approve, disable-web-search, no-memory,
+no-auto-update or the dashboard override. Workspace trust, telemetry suppression,
+mock browser/accounts and network isolation remain explicit. This profile matches
+the exact rendered single-use **Yes** permission label, verifies no MCP call while
+pending, and verifies exactly one call after approval; it never selects blanket
+approval. Denial, Task, billing and live/installed acceptance are separate gates.
 
 It provides process-private `POLYCODE_BRIDGE_URL` and `POLYCODE_BRIDGE_TOKEN`.
 Both providers initially return `loggedIn: false, models: []`; no dummy Grok
