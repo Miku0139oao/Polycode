@@ -95,3 +95,30 @@ test('late previous-account catalog cannot replace the current account catalog',
   finish([{ id: 'old-model', name: 'Old', contextWindow: 128000 }]); await old;
   assert.equal((await f.service.catalog()).providers[0].models[0].id, 'new-model');
 });
+for (const [code, expected] of [['transport_error', 'transport_error'], ['secret-verifier', 'provider_authorization_failed']]) {
+  test(`OAuth failure exposes only whitelisted diagnostic code: ${expected}`, async t => {
+    const f = await fixture(t);
+    f.provider.startLogin = async () => ({ url: 'https://auth.openai.com/oauth/authorize',
+      wait: Promise.reject(Object.assign(new Error('secret-token https://example.invalid/?verifier=secret'), { code, status: 502 })) });
+    const start = await f.service.login('codex');
+    await f.service.attempts.get(start.attemptId).completion;
+    const result = await (await f.call('/control/login/status?attemptId=' + start.attemptId)).json();
+    assert.deepEqual(result, { state: 'failed', message: `Authorization failed during provider authorization (${expected}, HTTP 502). Please retry.` });
+    assert.ok(!JSON.stringify(result).includes('secret'));
+    assert.equal(await f.store.get('codex'), null);
+  });
+}
+for (const [code, expected] of [['EACCES', 'permission_denied'], ['private-storage-path', 'credential_store_failed']]) {
+  test(`OAuth storage failure is distinct and secret-safe: ${expected}`, async t => {
+    const f = await fixture(t);
+    f.store.set = async () => { throw Object.assign(new Error('secret-token /private/account/path'), { code }); };
+    const start = await f.service.login('codex');
+    f.finish({ accessToken: 'secret-token' });
+    await f.service.attempts.get(start.attemptId).completion;
+    const result = await (await f.call('/control/login/status?attemptId=' + start.attemptId)).json();
+    assert.deepEqual(result, { state: 'failed', message: `Authorization failed during credential storage (${expected}). Please retry.` });
+    assert.ok(!JSON.stringify(result).includes('secret'));
+    assert.ok(!JSON.stringify(result).includes('private'));
+    assert.equal(await f.store.get('codex'), null);
+  });
+}

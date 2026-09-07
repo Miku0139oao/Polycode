@@ -13,6 +13,18 @@ const error = (message, status = 400) => Object.assign(new Error(message), { sta
 const json = (res, status, data) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data)); };
 const names = { codex: 'OpenAI / ChatGPT subscription', cursor: 'Cursor subscription (experimental)' };
 const ALLOWED = new Set(['auth.openai.com', 'cursor.com']);
+// Only fixed diagnostic codes cross the control boundary, never provider payloads or disk paths.
+const LOGIN_FAILURE_CODES = new Set(['authentication_error', 'invalid_credential', 'expired_credential',
+  'invalid_response', 'size_limit', 'transport_error', 'login_timeout', 'cancelled',
+  'quota_exceeded', 'upstream_http_error']);
+function loginFailure(cause, stage) {
+  const code = stage === 'credential storage'
+    ? (['EACCES', 'EPERM'].includes(cause?.code) ? 'permission_denied' : 'credential_store_failed')
+    : (LOGIN_FAILURE_CODES.has(cause?.code) ? cause.code : 'provider_authorization_failed');
+  const status = stage === 'provider authorization' && Number.isInteger(cause?.status)
+    && cause.status >= 400 && cause.status <= 599 ? `, HTTP ${cause.status}` : '';
+  return `Authorization failed during ${stage} (${code}${status}). Please retry.`;
+}
 export class NativeProviderService {
   constructor(providers, store, { token = randomBytes(32).toString('hex'), loginTimeout = 600000 } = {}) {
     this.providers = providers; this.store = store; this.token = token; this.loginTimeout = loginTimeout;
@@ -65,7 +77,7 @@ export class NativeProviderService {
     for (const old of this.attempts.values()) if (old.provider === provider && old.state === 'pending') this.cancel(old);
     // Keep terminal attempt records bounded without evicting pending attempts.
     if (this.attempts.size > 100) for (const [id, a] of this.attempts) if (a.state !== 'pending') this.attempts.delete(id);
-    const attempt = { id: randomUUID(), provider, state: 'pending', controller: new AbortController() };
+    const attempt = { id: randomUUID(), provider, state: 'pending', stage: 'provider authorization', controller: new AbortController() };
     this.attempts.set(attempt.id, attempt);
     attempt.timer = setTimeout(() => this.cancel(attempt, 'Authorization timed out.'), this.loginTimeout);
     try {
@@ -75,10 +87,11 @@ export class NativeProviderService {
       attempt.completion = flow.wait.then(async auth => {
         if (attempt.state !== 'pending' || attempt.controller.signal.aborted) return;
         if (!auth || typeof auth.accessToken !== 'string' || !auth.accessToken) throw new Error('Invalid authorization credential');
+        attempt.stage = 'credential storage';
         const stored = await this.store.set(provider, auth, () => attempt.state === 'pending' && !attempt.controller.signal.aborted);
         if (stored === false || attempt.state !== 'pending' || attempt.controller.signal.aborted) return;
         this.catalogs.delete(provider); attempt.state = 'completed'; clearTimeout(attempt.timer);
-      }).catch(() => { if (attempt.state === 'pending') { attempt.state = 'failed'; attempt.message = 'Authorization failed. Please retry.'; clearTimeout(attempt.timer); } });
+      }).catch(cause => { if (attempt.state === 'pending') { attempt.state = 'failed'; attempt.message = loginFailure(cause, attempt.stage); clearTimeout(attempt.timer); } });
       return { attemptId: attempt.id, url: flow.url, instructions: flow.instructions, ...(flow.userCode ? { userCode: flow.userCode } : {}) };
     } catch (e) { this.cancel(attempt); throw e; }
   }
