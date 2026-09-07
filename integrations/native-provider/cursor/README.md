@@ -1,10 +1,11 @@
 # Experimental Cursor native-provider transport
 
-**Offline implementation checkpoint, not a verified production provider.**
+**Windows live validation in progress, not a verified production provider.**
 Undocumented Cursor compatibility can break and carries account/terms risk.
-The user approved experimental work, but **no account credentials, login,
-model discovery, or live completion have been exercised**. Obtain the separate
-follow-up approval before making live calls.
+With the user's authorization, actual Windows-native OAuth and model discovery
+passed on 2026-09-08. Real text generation also passed after correcting current
+protocol metadata parsing. Native coding/tool continuation and immutable release
+acceptance remain under validation; these observations do not prove full parity.
 
 This directory is standalone, dependency-free ESM for Node 22+ / Bun. It changes
 no native Grok engine, tools, MCP configuration, permissions, session files,

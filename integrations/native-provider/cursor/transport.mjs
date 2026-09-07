@@ -141,7 +141,11 @@ export class Connection {
   }
   async kv(data) {
     const fs = p.fields(data);
-    p.only(fs, [1, 2, 3]);
+    p.only(fs, [1, 2, 3, 4]);
+    // KvServerMessage.span_context is optional tracing metadata in the
+    // installed official schema. Validate its wire type/uniqueness without
+    // forwarding or interpreting it as storage or executable instructions.
+    p.one(fs, 4, 2, false);
     const id = p.number(p.one(fs, 1, 0, false) ?? 0n);
     const requests = fs.filter(f => [2, 3].includes(f.id));
     if (requests.length !== 1 || requests[0].wire !== 2) throw fail('unsupported_protocol', 'Unsupported Cursor KV request.');
@@ -169,20 +173,33 @@ export class Connection {
       for (const f of p.fields(frame.data)) {
         if (f.wire !== 2) throw fail('unsupported_protocol', 'Unsupported Cursor server message.');
         if (f.id === 1) {
-          for (const update of p.fields(f.value)) {
+          const updates = p.fields(f.value);
+          // Optional uint64 timestamp added by the official 2026-09 schema.
+          // It accompanies an update and does not carry text or tool intent.
+          p.one(updates, 25, 0, false);
+          for (const update of updates) {
+            if (update.id === 25) continue;
             if (update.wire !== 2) throw fail('invalid_protocol', 'Invalid Cursor interaction update.');
-            if ([1, 8].includes(update.id)) {
+            if (update.id === 1) {
               const delta = p.one(p.fields(update.value), 1, 2, false);
               if (delta) yield { type: 'text', text: p.text(delta) };
+            } else if ([5, 8].includes(update.id)) {
+              // Thinking duration / token delta are int32 progress counters,
+              // not assistant text or authoritative billable usage.
+              const counters = p.fields(update.value);
+              p.only(counters, [1]);
+              p.one(counters, 1, 0, false);
             } else if (update.id === 14) { yield { type: 'done', usage: p.turnUsage(update.value) }; return; }
             // Notifications only: never turn progress/partial calls into executable intents.
-            else if (![2, 3, 4, 7, 13].includes(update.id)) throw fail('unsupported_protocol', 'Unsupported Cursor interaction update.');
+            // 15 is a partial tool delta; 16/17 delimit a step, not the turn.
+            else if (![2, 3, 4, 7, 13, 15, 16, 17].includes(update.id)) throw fail('unsupported_protocol', 'Unsupported Cursor interaction update.');
           }
         } else if (f.id === 2) yield { type: 'tool', exec: p.parseExec(f.value) };
         else if (f.id === 3) { /* Checkpoint is NOT completion. */ }
         else if (f.id === 4) await this.kv(f.value);
         else if (f.id === 5) throw fail('remote_abort', 'Cursor aborted an execution stream.');
         else if (f.id === 7) throw fail('unsupported_builtin', 'Cursor requested a non-MCP interaction; denied without execution.');
+        else if (f.id === 8) { /* Official TTFT breakdown telemetry; not an operation or completion. */ }
         else throw fail('unsupported_protocol', 'Unknown Cursor server request; denied without execution.');
       }
     }
