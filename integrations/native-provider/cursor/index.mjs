@@ -23,13 +23,18 @@ function token(value) {
   }
   return value;
 }
+function expiryMillis(value) {
+  if (!Number.isFinite(value) || value <= 0) throw fail('invalid_credential', 'Cursor expiry is malformed.', 401);
+  // Poll/refresh may emit Unix seconds. Values below 1e12 cannot be millisecond
+  // timestamps after 2001-09-09, so treat them as seconds rather than "already expired".
+  return value < 1e12 ? value * 1000 : value;
+}
 function credential(value, now, allowExpired = false) {
   if (!object(value)) throw fail('invalid_credential', 'Cursor credential is missing or malformed.', 401);
   const result = { accessToken: token(value.accessToken) };
   if (value.refreshToken !== undefined) result.refreshToken = token(value.refreshToken);
   if (value.expiresAt !== undefined) {
-    if (!Number.isFinite(value.expiresAt) || value.expiresAt <= 0) throw fail('invalid_credential', 'Cursor expiry is malformed.', 401);
-    result.expiresAt = value.expiresAt;
+    result.expiresAt = expiryMillis(value.expiresAt);
   } else {
     // exp is only an expiry hint, NOT signature/identity validation or an account-isolation key.
     try {

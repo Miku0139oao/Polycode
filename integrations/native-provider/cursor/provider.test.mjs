@@ -704,6 +704,15 @@ test('PKCE browser URL only; poll wait validates 200 credentials and does not lo
   assert.deepEqual(logs, []);
 });
 
+test('login poll accepts unix-second expiry instead of treating it as already elapsed milliseconds', async t => {
+  const futureSeconds = Math.floor(Date.now() / 1000) + 3600;
+  const pastSeconds = Math.floor(Date.now() / 1000) - 60;
+  const ok = provider(t, { fetchImpl: async () => Response.json({ ...A, expiresAt: futureSeconds }) });
+  assert.deepEqual(await (await ok.startLogin()).wait, { ...A, expiresAt: futureSeconds * 1000 });
+  const expired = provider(t, { fetchImpl: async () => Response.json({ ...A, expiresAt: pastSeconds }) });
+  await assert.rejects((await expired.startLogin()).wait, e => e.code === 'expired_credential' && !e.message.includes(String(pastSeconds)));
+});
+
 test('auth rejects malformed/failed/expired success without token or raw error exposure', async t => {
   for (const response of [Response.json({ accessToken: 12, refreshToken: 'OFFLINE_SECRET' }), Response.json({ accessToken: '', refreshToken: 'OFFLINE_SECRET' }), Response.json({ accessToken: 'expired', expiresAt: 1 }), new Response('OFFLINE_SECRET', { status: 401 }), new Response('OFFLINE_SECRET', { status: 302, headers: { location: 'https://evil.example/' } })]) {
     const instance = provider(t, { fetchImpl: async () => response });

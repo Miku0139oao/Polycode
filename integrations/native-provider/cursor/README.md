@@ -28,7 +28,9 @@ cursor.close(); // Idempotent; aborts login/HTTP operations and all remote sessi
 ```
 
 - `credential`: `{accessToken: string, refreshToken?: string, expiresAt?: number}`.
-  `expiresAt` is Unix milliseconds. OAuth completion requires HTTP 200 and valid,
+  `expiresAt` is stored as Unix milliseconds. Wire values below `1e12` are treated
+  as Unix seconds so a successful poll is not rejected as already expired.
+  OAuth completion requires HTTP 200 and valid,
   nonempty token fields; known expired results are rejected. JWT `exp`, when
   available, is only an expiry hint, not signature/account identity validation.
   Refresh failure throws; it never returns a stale access token as a fallback.
