@@ -1039,7 +1039,7 @@ mod tests {
                 ),
                 (
                     serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": null } } }),
-                    None,
+                    Some(vec![serde_json::Value::Null]),
                 ),
                 (
                     serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": ["other"] } } }),
