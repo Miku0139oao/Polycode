@@ -191,6 +191,9 @@ export function createCursorProvider({
   async function refresh(input, { signal } = {}) {
     live(signal);
     const old = credential(input, now(), true);
+    // A still-valid access token needs no refresh, including poll responses
+    // without a refresh token. Preserve unknown expiry as unknown.
+    if (old.expiresAt !== undefined && old.expiresAt > now() + 60000) return old;
     if (!old.refreshToken) throw fail('refresh_unavailable', 'No Cursor refresh token; sign in again.', 401);
     const op = operation(signal, requestTimeoutMs);
     try {

@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 export { CredentialStore } from './store.mjs';
 import { catalogRevision, validateReasoningMetadata, validateSelectedEffort } from './model-settings.mjs';
+import { diagnostic } from './diagnostics.mjs';
 
 function waiter(promise, signal) {
   if (!signal) return promise;
@@ -55,7 +56,7 @@ export class NativeProviderService {
     const cached = this.catalogs.get(provider);
     if (!refresh && cached?.revision === snapshot.revision) return cached.models;
     const models = await this.providers[provider].models(snapshot.credential, { signal });
-    if (!Array.isArray(models) || models.length > 500 || models.some(m => typeof m.id !== 'string' || !m.id || m.id.length > 512 || typeof m.name !== 'string' || m.name.length > 512 || /[\x00-\x1f\x7f]/.test(m.id + m.name) || !Number.isFinite(m.contextWindow) || m.contextWindow <= 0) || new Set(models.map(m => m.id)).size !== models.length) throw new Error('Invalid catalog');
+    if (!Array.isArray(models) || models.length > 500 || models.some(m => typeof m.id !== 'string' || !m.id || m.id.length > 512 || typeof m.name !== 'string' || m.name.length > 512 || /[\x00-\x1f\x7f]/.test(m.id + m.name) || (m.contextWindow !== null && (!Number.isSafeInteger(m.contextWindow) || m.contextWindow <= 0))) || new Set(models.map(m => m.id)).size !== models.length) throw new Error('Invalid catalog');
     for (const model of models) validateReasoningMetadata(model);
     if ((await this.store.snapshot(provider)).revision !== snapshot.revision) throw error('Account changed while loading models; refresh the catalog.', 409);
     this.catalogs.set(provider, { revision: snapshot.revision, models });
@@ -64,15 +65,17 @@ export class NativeProviderService {
   async catalog(refresh = false, signal) {
     const providers = [];
     for (const id of Object.keys(this.providers)) {
-      const loggedIn = Boolean(await this.store.get(id));
+      let loggedIn = false;
       let models = [], message, revision;
+      try { loggedIn = Boolean(await this.store.get(id)); }
+      catch (cause) { message = diagnostic(cause, 'credential storage'); }
       if (loggedIn) {
         try {
           const snapshot = await this.credentialSnapshot(id, signal);
           models = await this.modelsFor(id, snapshot, refresh, signal);
           revision = catalogRevision(snapshot.revision, models);
         }
-        catch { message = 'Model discovery failed. Check login and provider availability.'; }
+        catch (cause) { message = diagnostic(cause, 'model discovery'); }
       }
       providers.push({ id, name: names[id], loggedIn, models, ...(revision ? { catalogRevision: revision } : {}), ...(message ? { message } : {}) });
     }
@@ -99,7 +102,10 @@ export class NativeProviderService {
         this.catalogs.delete(provider); attempt.state = 'completed'; clearTimeout(attempt.timer);
       }).catch(cause => { if (attempt.state === 'pending') { attempt.state = 'failed'; attempt.message = loginFailure(cause, attempt.stage); clearTimeout(attempt.timer); } });
       return { attemptId: attempt.id, url: flow.url, instructions: flow.instructions, ...(flow.userCode ? { userCode: flow.userCode } : {}) };
-    } catch (e) { this.cancel(attempt); throw e; }
+    } catch (e) {
+      this.cancel(attempt);
+      throw Object.assign(new Error(diagnostic(e, 'provider authorization')), { status: 500 });
+    }
   }
   cancel(a, message) { if (a.state !== 'pending') return; a.state = 'cancelled'; a.message = message; clearTimeout(a.timer); a.controller.abort(); }
   async body(req) {

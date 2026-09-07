@@ -1,3 +1,10 @@
 /target
 **/*.rs.bk
 .DS_Store
+/.ci/
+/candidate-out/
+/cargo-build.jsonl
+/native-build.json
+/protoc.zip
+/windows-smoke-report.json
+/windows-tools-report.json

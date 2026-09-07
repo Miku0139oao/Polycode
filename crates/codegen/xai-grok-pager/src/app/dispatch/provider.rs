@@ -160,8 +160,12 @@ fn models(app: &mut AppView, provider: Choice) {
                     option(
                         &m.name,
                         &format!(
-                            "{} token context; {}",
-                            m.context_window,
+                            "{}; {}",
+                            m.context_window
+                                .map(|size| format!("{size} token context"))
+                                .unwrap_or_else(|| {
+                                    "Context capacity not provided; native default budget".into()
+                                }),
                             if m.reasoning_efforts.is_empty() {
                                 "provider does not expose reasoning effort control"
                             } else {
@@ -580,17 +584,28 @@ pub(super) fn queue_model_switch(
         models.display_name_for(&model_id),
         effort.map(|e| format!(" ({e} effort)")).unwrap_or_default()
     );
-    let revision_for = |catalog: &xai_grok_shell::polycode::Catalog| catalog.providers.iter()
-        .find(|p| p.models.iter().any(|m| model_id.0.as_ref() == format!("{}/{}", p.id.as_str(), m.id)))
-        .and_then(|p| p.catalog_revision.clone());
-    let catalog_revision = revision_for(&app.provider.catalog).or_else(||
-        xai_grok_shell::polycode::bridge().and_then(|b| revision_for(&b.catalog())));
+    let revision_for = |catalog: &xai_grok_shell::polycode::Catalog| {
+        catalog
+            .providers
+            .iter()
+            .find(|p| {
+                p.models
+                    .iter()
+                    .any(|m| model_id.0.as_ref() == format!("{}/{}", p.id.as_str(), m.id))
+            })
+            .and_then(|p| p.catalog_revision.clone())
+    };
+    let catalog_revision = revision_for(&app.provider.catalog)
+        .or_else(|| xai_grok_shell::polycode::bridge().and_then(|b| revision_for(&b.catalog())));
     let mut selection = app
         .provider
         .pending_models
         .queue(target, session_id, model_id, effort);
     selection.catalog_revision = catalog_revision;
-    app.provider.pending_models.selections.insert(target, selection.clone());
+    app.provider
+        .pending_models
+        .selections
+        .insert(target, selection.clone());
     agent.session.model_switch_pending = true;
     app.show_toast(&format!(
         "{}Queued switch to {label}; applies after current work completes. /model cancel cancels.",

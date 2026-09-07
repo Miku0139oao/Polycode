@@ -1,141 +1,138 @@
-name: Candidate release
-
-# Builds the native Linux pager on GitHub-hosted Ubuntu (faster than local
-# Windows/DrvFS) and uploads an unpublished candidate GitHub Release.
-# This is not live OAuth/billing acceptance and does not authorize public
-# distribution sidecars. Users install with install.ps1 -GitHubCandidate.
-
+name: Windows candidate
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: Release tag (vX.Y.Z)
-        required: true
-        default: v0.2.0
-      profile:
-        description: Cargo profile
+      action:
+        description: Build an artifact, or publish previously accepted bytes
         type: choice
-        options:
-          - release
-          - debug
-        default: release
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
-
+        options: [build, publish]
+        default: build
+      version:
+        description: New immutable prerelease tag
+        default: v0.2.1
+      candidate_run_id:
+        description: Successful build run ID (publish only)
+      acceptance_path:
+        description: Checked-in sanitized acceptance directory (publish only)
+        default: integrations/acceptance/windows
 permissions:
-  contents: write
-
+  contents: read
+  actions: read
 jobs:
-  package:
-    runs-on: ubuntu-24.04
+  build:
+    if: inputs.action == 'build'
+    runs-on: windows-2022
     timeout-minutes: 180
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install packaging dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config libssl-dev zlib1g-dev curl unzip ca-certificates file
-
-      - name: Install protoc 29.3
-        run: |
-          curl -fsSL -o /tmp/protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-linux-x86_64.zip
-          sudo unzip -o /tmp/protoc.zip -d /usr/local
-          echo "PROTOC=/usr/local/bin/protoc" >> "$GITHUB_ENV"
-
-      - name: Install Rust 1.94.0
-        uses: dtolnay/rust-toolchain@1.94.0
-
-      - name: Install Bun 1.3.14
-        uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
-
-      - name: Install native-provider lockfile dependencies
-        run: npm ci --ignore-scripts --prefix integrations/native-provider
-
-      - name: Determine version and profile
-        id: meta
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Install protoc 29.3
+        shell: pwsh
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-            echo "profile=${{ inputs.profile }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-            echo "profile=release" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build native pager
+          curl.exe -fL --retry 3 -o protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-win64.zip
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Expand-Archive protoc.zip -DestinationPath .ci/protoc
+          "PROTOC=$PWD\.ci\protoc\bin\protoc.exe" >> $env:GITHUB_ENV
+          "PROTOC_INCLUDE=$PWD\.ci\protoc\include" >> $env:GITHUB_ENV
+      - name: Install bridge and terminal test dependencies
+        shell: pwsh
         run: |
-          if [ "${{ steps.meta.outputs.profile }}" = "release" ]; then
-            cargo build --locked -p xai-grok-pager-bin --bin xai-grok-pager --release -j 2
-            BINARY="$PWD/target/release/xai-grok-pager"
-            PROFILE='{"opt_level":"3","debuginfo":null,"debug_assertions":false,"overflow_checks":false,"test":false}'
-          else
-            cargo build --locked -p xai-grok-pager-bin --bin xai-grok-pager -j 2
-            BINARY="$PWD/target/debug/xai-grok-pager"
-            PROFILE='{"opt_level":"0","debuginfo":"line-tables-only","debug_assertions":true,"overflow_checks":true,"test":false}'
-          fi
-          python3 - <<PY
-          import hashlib, json, os, pathlib
-          binary = pathlib.Path(os.environ["BINARY"])
-          data = binary.read_bytes()
-          report = {
-            "revision": os.environ["GITHUB_SHA"],
-            "exit": 0,
-            "timeout": False,
-            "binary": str(binary),
-            "sha256": hashlib.sha256(data).hexdigest(),
-            "bytes": len(data),
-            "profile": json.loads(os.environ["PROFILE"]),
-            "scope": "GitHub Actions unpublished candidate build; not live acceptance",
-          }
-          pathlib.Path("native-app-build-gha.json").write_text(json.dumps(report, indent=2) + "\n")
-          print(json.dumps({"sha256": report["sha256"], "bytes": report["bytes"]}))
-          PY
+          npm ci --ignore-scripts --prefix integrations/native-provider
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm install --prefix .ci/pty --no-audit --no-fund node-pty@1.1.0
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          "NODE_PTY_MODULE=$PWD\.ci\pty\node_modules\node-pty" >> $env:GITHUB_ENV
+      - name: Windows bridge and installer regression
+        shell: pwsh
+        run: |
+          node --test integrations/native-provider/test/*.test.mjs integrations/native-provider/cursor/provider.test.mjs integrations/tests/install-native.test.mjs integrations/tests/install-authorization.test.mjs integrations/tests/release-readiness.test.mjs integrations/tests/candidate-readiness.test.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          bun test integrations/native-provider/test integrations/native-provider/cursor/provider.test.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Build actual release executable
+        shell: pwsh
+        run: |
+          cargo build --locked --release --target x86_64-pc-windows-msvc -p xai-grok-pager-bin --bin xai-grok-pager -j2 --message-format=json-render-diagnostics > cargo-build.jsonl
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node integrations/build-report.mjs cargo-build.jsonl target/x86_64-pc-windows-msvc/release/xai-grok-pager.exe native-build.json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Native bridge unit regression
+        shell: pwsh
+        run: |
+          cargo test --locked --release --target x86_64-pc-windows-msvc -p xai-grok-shell --lib polycode::tests:: -j2 -- --test-threads=1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Package Windows candidate
+        shell: pwsh
         env:
-          BINARY: ${{ github.workspace }}/target/${{ steps.meta.outputs.profile }}/xai-grok-pager
-          PROFILE: ${{ steps.meta.outputs.profile == 'release' && '{"opt_level":"3","debuginfo":null,"debug_assertions":false,"overflow_checks":false,"test":false}' || '{"opt_level":"0","debuginfo":"line-tables-only","debug_assertions":true,"overflow_checks":true,"test":false}' }}
-
-      - name: Package unpublished candidate
+          CANDIDATE_VERSION: ${{ inputs.version }}
         run: |
-          python3 integrations/package-release.py \
-            --binary "$PWD/target/${{ steps.meta.outputs.profile }}/xai-grok-pager" \
-            --runtime "$(command -v bun)" \
-            --build-report "$PWD/native-app-build-gha.json" \
-            --output "$PWD/candidate-out" \
-            --version "${{ steps.meta.outputs.version }}" \
-            --source "$PWD"
-          python3 - <<'PY'
-          import zipfile
-          from pathlib import Path
-          root = Path("candidate-out")
-          with zipfile.ZipFile("polycode-windows-wsl-candidate.zip", "w", compression=zipfile.ZIP_STORED) as archive:
-              for path in sorted(root.iterdir()):
-                  if path.is_file():
-                      archive.write(path, path.name)
-          PY
-
-      - name: Publish GitHub prerelease
+          ./integrations/package-release.ps1 -Binary "$PWD/target/x86_64-pc-windows-msvc/release/xai-grok-pager.exe" -Runtime (Get-Command bun.exe).Source -BuildReport "$PWD/native-build.json" -Output "$PWD/candidate-out" -Version $env:CANDIDATE_VERSION
+      - name: Install and run candidate in a real Windows terminal
+        shell: pwsh
+        run: |
+          node integrations/tests/windows-candidate-smoke.mjs candidate-out
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node integrations/tests/windows-native-tools.mjs target/x86_64-pc-windows-msvc/release/xai-grok-pager.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: polycode-windows-candidate
+          path: candidate-out/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-build-evidence
+          path: |
+            cargo-build.jsonl
+            native-build.json
+            windows-smoke-report.json
+            windows-tools-report.json
+  publish:
+    if: inputs.action == 'publish'
+    runs-on: windows-2022
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Download and verify previously accepted bytes
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          CANDIDATE_RUN: ${{ inputs.candidate_run_id }}
+          ACCEPTANCE_PATH: ${{ inputs.acceptance_path }}
+          CANDIDATE_VERSION: ${{ inputs.version }}
         run: |
-          TAG="${{ steps.meta.outputs.version }}"
-          cat > /tmp/polycode-release-notes.md <<EOF
-          Unpublished Polycode candidate for Windows + existing WSL Arch.
-
-          One-command install (hash-checked, **not** live OAuth/billing acceptance):
-
-          \`\`\`powershell
-          irm https://raw.githubusercontent.com/Miku0139oao/Polycode/main/install.ps1 | iex
-          \`\`\`
-
-          This prerelease does not include parent authorization sidecars and is not an official public release.
-          EOF
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" candidate-out/* polycode-windows-wsl-candidate.zip --clobber
-          else
-            gh release create "$TAG" candidate-out/* polycode-windows-wsl-candidate.zip --prerelease --title "Polycode $TAG candidate" --notes-file /tmp/polycode-release-notes.md
-          fi
+          if ($env:CANDIDATE_RUN -notmatch '^[0-9]+$') { throw 'An accepted build run ID is required.' }
+          if ($env:CANDIDATE_VERSION -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw 'Invalid version.' }
+          gh run download $env:CANDIDATE_RUN -n polycode-windows-candidate -D candidate-out
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node integrations/candidate-readiness.mjs candidate-out $env:ACCEPTANCE_PATH $env:CANDIDATE_VERSION
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Publish new prerelease without rebuilding or replacing assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          CANDIDATE_VERSION: ${{ inputs.version }}
+        run: |
+          gh release view $env:CANDIDATE_VERSION *> $null
+          if ($LASTEXITCODE -eq 0) { throw 'Release already exists. Accepted assets are immutable.' }
+          $assets = Get-ChildItem candidate-out -File | ForEach-Object FullName
+          $manifest = Get-Content candidate-out/manifest.json -Raw | ConvertFrom-Json
+          gh release create $env:CANDIDATE_VERSION @assets --target $manifest.native.revision --prerelease --title "Polycode $env:CANDIDATE_VERSION Windows candidate" --notes "Windows x64 native prerelease. Install the version-specific install.ps1 with -GitHubCandidate. No WSL required. This is not an authorized stable release."
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

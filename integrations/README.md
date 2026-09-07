@@ -6,10 +6,11 @@
 
 ## 安裝與啟動
 
-[根目錄 README](../README.md#install-polycode-windows--wsl) 提供預定的一行 PowerShell 安裝指令，來源是本專案 [Miku0139oao/Polycode](https://github.com/Miku0139oao/Polycode)。**請等 native 驗證及 v0.2.0 資產發佈完成，勿把現有公開原型視為可用的原生版本。**
+目前 v0.2.0 是 WSL 包，使用者回報三個 provider 無法使用。新的 Windows 原生包通過真實驗收前，暫停推薦公開一鍵安裝。
 
-目標環境限定 **Windows + 已安裝的 WSL Arch Linux x64、glibc 2.43 以上**，並需 zlib、libgcc 與 Windows interop；預設 distro 為 `archlinux`。不宣稱 Ubuntu、macOS 或 Windows 原生 binary 相容。預定套件內含 Rust binary、Bun 與本地 provider service，不要求安裝 Codex／Cursor CLI，也不要求先執行任何 CLI login。
+目標為 Windows 10 22H2／Windows 11 x64、PowerShell 5.1／7。套件包含 MSVC 原生 TUI、Windows Bun 與本地 provider service，不要求 WSL、Rust、Node 或外部 provider CLI。
 
+[根目錄 README](../README.md#install-polycode-windows-native) 說明隔離安裝；[Windows validation](WINDOWS_VALIDATION.md) 記錄驗收門檻。舊 WSL 開發紀錄不能代表新包的驗收結果。
 以下為待驗證的原生版使用方式：
 
 ```powershell

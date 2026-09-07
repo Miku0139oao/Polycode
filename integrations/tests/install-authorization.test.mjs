@@ -71,10 +71,10 @@ Write-Output ("PS " + $PSVersionTable.PSVersion + " legacyDateParser=" + $Legacy
 const installerSource = readFileSync(source, 'utf8');
 put('install.ps1', installerSource.slice(installerSource.indexOf('function Get-Sha256('), installerSource.indexOf('function Quote-Argument(')));
 put('SHA256SUMS', 'SYNTHETIC validator-only checksum bytes, not a distributable package\n');
-const paths = ['install.ps1', 'polycode-bun-wsl-x64.gz', 'polycode-runtime.zip', 'polycode-wsl-x64.gz'];
+const paths = ['install.ps1', 'polycode-bun-windows-x64.gz', 'polycode-runtime.zip', 'polycode-windows-x64.gz'];
 for (const path of paths.slice(1)) put(path, 'SYNTHETIC validator-only asset ' + path);
-const manifest = { schemaVersion: 2, classification: 'immutable-candidate', provenance: 'build-report', version: 'v0.2.0',
-  architecture: 'x86_64', minimumGlibc: '2.43', protocol: 'native-model-bridge',
+const manifest = { schemaVersion: 3, classification: 'immutable-candidate', provenance: 'build-report', version: 'v0.2.0',
+  architecture: 'x86_64', platform: 'windows', target: 'x86_64-pc-windows-msvc', executableFormat: 'PE32+', protocol: 'native-model-bridge',
   native: { sha256: 'a'.repeat(64), bytes: 42, transformed: false, profile: { opt_level: '2', debug_assertions: false, test: false } },
   bun: { sha256: 'b'.repeat(64), bytes: 42, version: '1.3.14' },
   files: [{ path: 'release-manifest.json', sha256: 'c'.repeat(64), bytes: 0 }],
@@ -115,7 +115,7 @@ const documents = { manifest, readiness: ready, authorization };
 const scalarPaths = {
   authorization: ['schemaVersion', 'kind', 'decision', 'scope', 'version', 'candidateSha256', 'nativeSha256', 'checksumsSha256', 'readinessSha256', 'acceptanceSha256', 'parentAttestationSha256', 'parent.role', 'parent.reviewer', 'parent.authorizedAt'],
   readiness: ['schemaVersion', 'kind', 'policyVersion', 'status', 'publicUrlGate', 'checkedAt', 'candidateSha256', 'nativeSha256', 'acceptanceSha256', 'parentAttestationSha256', 'publicationAuthorized', 'gates.0.id', 'gates.0.status', 'gates.0.verified'],
-  manifest: ['schemaVersion', 'classification', 'provenance', 'version', 'architecture', 'minimumGlibc', 'protocol', 'native.sha256', 'native.bytes', 'native.transformed', 'native.profile.opt_level', 'native.profile.debug_assertions', 'native.profile.test', 'bun.sha256', 'bun.bytes', 'bun.version', 'files.0.path', 'files.0.sha256', 'files.0.bytes', 'artifacts.0.path', 'artifacts.0.sha256', 'artifacts.0.bytes'],
+  manifest: ['schemaVersion', 'classification', 'provenance', 'version', 'architecture', 'platform', 'target', 'executableFormat', 'protocol', 'native.sha256', 'native.bytes', 'native.transformed', 'native.profile.opt_level', 'native.profile.debug_assertions', 'native.profile.test', 'bun.sha256', 'bun.bytes', 'bun.version', 'files.0.path', 'files.0.sha256', 'files.0.bytes', 'artifacts.0.path', 'artifacts.0.sha256', 'artifacts.0.bytes'],
 };
 for (const [target, fields] of Object.entries(scalarPaths)) for (const field of fields) {
   const path = field.split('.'), original = get(documents[target], path);
@@ -148,7 +148,7 @@ for (const field of ['status', 'classification']) {
 }
 for (const value of [[], ['error'], {}, null, false, 1]) add('readiness.errors invalid entry ' + JSON.stringify(value), 'readiness', ['errors'], [value]);
 // Additional explicit integer bounds/shape and optimization-level controls.
-for (const [field, values] of [['schemaVersion', [0, 3]], ['native.bytes', [0]], ['bun.bytes', [0]], ['native.profile.opt_level', [4, -1, 0.5, true, '02', '2.0', '4', 'TRUE', {}]]]) {
+for (const [field, values] of [['schemaVersion', [0, 1, 2, 4]], ['native.bytes', [0]], ['bun.bytes', [0]], ['native.profile.opt_level', [4, -1, 0.5, true, '02', '2.0', '4', 'TRUE', {}]]]) {
   for (const value of values) add(`manifest.${field} range ${JSON.stringify(value)}`, 'manifest', field.split('.'), value);
 }
 for (const target of ['authorization', 'readiness']) for (const value of [0, 3]) add(`${target}.schema range ${value}`, target, ['schemaVersion'], value);
@@ -160,7 +160,7 @@ for (const level of [0, 1, '0', '1']) {
 }
 add('local unattested profile null', 'manifest', [], { ...manifest, provenance: 'fixture-unattested', native: { ...manifest.native, profile: null } }, null, true);
 const legacy = { ...manifest, schemaVersion: 1, status: 'unpublished-candidate' }; delete legacy.classification;
-add('local historical schema1 shape', 'manifest', [], legacy, null, true);
+add('local historical schema1 shape', 'manifest', [], legacy, '^Invalid JSON shape:', true);
 for (const [target, field, value, error] of [
   ['authorization', 'decision', 'FAIL', 'authorization'], ['authorization', 'schemaVersion', 2, 'authorization'],
   ['authorization', 'parent.role', 'child', 'authorization'], ['authorization', 'version', 'v0.3.0', 'authorization'],
@@ -178,7 +178,7 @@ add('readiness wire hash mutation', 'stale readiness', [], null, 'authorization'
 for (const value of ['d'.repeat(64) + '\n', 'D'.repeat(64), 'd'.repeat(63)]) add('strict SHA format ' + JSON.stringify(value), 'readiness', ['acceptanceSha256'], value);
 for (const number of ['2.0', '2e0', '9223372036854775808']) {
   add('JSON numeric spelling ' + number, '', [], null);
-  cases.at(-1).manifest = cases.at(-1).manifest.replace('"schemaVersion":2', '"schemaVersion":' + number);
+  cases.at(-1).manifest = cases.at(-1).manifest.replace('"schemaVersion":3', '"schemaVersion":' + number);
 }
 put('cases.json', JSON.stringify({ cases }));
 for (const [runtime, legacy] of [['powershell.exe', false], ['pwsh.exe', false], ['pwsh.exe', true]]) test(`${runtime}${legacy ? ' pre-DateKind fallback' : ''}: strict scalar/container matrix and valid/FAIL/stale/hash controls`, () => {

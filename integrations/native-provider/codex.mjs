@@ -195,7 +195,7 @@ export async function translateResponses(response, body, originals) {
 export function createCodexProvider({ fetchImpl = fetch, httpFactory = createServer } = {}) {
   async function token(fields, signal) {
     const response = await fetchImpl(ISSUER + '/oauth/token', { redirect: 'error', method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: CLIENT, ...fields }), signal });
-    if (!response.ok) throw new Error(`OpenAI authorization failed (HTTP ${response.status})`);
+    if (!response.ok) throw Object.assign(new Error(`OpenAI authorization failed (HTTP ${response.status})`), { code: 'upstream_http_error', status: response.status });
     return credential(await response.json());
   }
   return {
@@ -230,7 +230,7 @@ export function createCodexProvider({ fetchImpl = fetch, httpFactory = createSer
     },
     async models(c, { signal } = {}) {
       const r = await fetchImpl(API + '/models?client_version=0.153.4', { redirect: 'error', headers: headers(c), signal });
-      if (!r.ok) throw new Error(`ChatGPT model discovery failed (HTTP ${r.status})`);
+      if (!r.ok) throw Object.assign(new Error(`ChatGPT model discovery failed (HTTP ${r.status})`), { code: 'upstream_http_error', status: r.status });
       const data = await r.json(), models = data.models ?? data.data;
       if (!Array.isArray(models)) throw new Error('Invalid ChatGPT model catalog');
       return models.filter(m => m.visibility !== 'hide').map(m => ({ id: m.slug ?? m.id ?? m.model, name: m.display_name ?? m.displayName ?? m.slug ?? m.id, contextWindow: m.context_window ?? m.contextWindow ?? 128000, ...codexReasoningMetadata(m) }));

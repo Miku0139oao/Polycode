@@ -42,12 +42,13 @@ export function verifyReadiness({ candidate, acceptance, attestation, now = Date
     const candidateSha256 = sha(readFileSync(manifestPath));
     output.candidateSha256 = candidateSha256;
     const manifest = json(manifestPath);
-    requireThat(manifest.schemaVersion === 2 && manifest.classification === 'immutable-candidate' && !Object.hasOwn(manifest, 'status') && manifest.provenance === 'build-report', 'Not a provenance-attested immutable candidate (legacy v1 preparation is not promotable)');
+    requireThat([2, 3].includes(manifest.schemaVersion) && manifest.classification === 'immutable-candidate' && !Object.hasOwn(manifest, 'status') && manifest.provenance === 'build-report', 'Not a provenance-attested immutable candidate (legacy v1 preparation is not promotable)');
     output.nativeSha256 = manifest.native?.sha256;
     output.acceptanceSha256 = sha(readFileSync(acceptance));
     output.parentAttestationSha256 = sha(readFileSync(attestation));
     requireThat(/^[a-f0-9]{64}$/.test(manifest.native?.sha256) && /^[a-f0-9]{40}$/.test(manifest.native?.revision) && manifest.native?.transformed === false, 'Missing exact native provenance');
-    const assets = ['install.ps1', 'polycode-bun-wsl-x64.gz', 'polycode-runtime.zip', 'polycode-wsl-x64.gz'];
+    if (manifest.schemaVersion === 3) requireThat(manifest.platform === 'windows' && manifest.target === 'x86_64-pc-windows-msvc' && manifest.executableFormat === 'PE32+', 'Invalid Windows candidate target');
+    const assets = manifest.schemaVersion === 3 ? ['install.ps1', 'polycode-bun-windows-x64.gz', 'polycode-runtime.zip', 'polycode-windows-x64.gz'] : ['install.ps1', 'polycode-bun-wsl-x64.gz', 'polycode-runtime.zip', 'polycode-wsl-x64.gz'];
     requireThat(Array.isArray(manifest.artifacts) && JSON.stringify(manifest.artifacts.map(a => a.path).sort()) === JSON.stringify(assets), 'Incomplete/duplicate/unsafe asset inventory');
     const sums = new Map();
     for (const line of readFileSync(resolve(candidate, 'SHA256SUMS'), 'ascii').trim().split(/\r?\n/)) {

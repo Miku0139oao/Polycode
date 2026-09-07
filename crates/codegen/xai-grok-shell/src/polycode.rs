@@ -54,7 +54,8 @@ pub struct Provider {
 pub struct Model {
     pub id: String,
     pub name: String,
-    pub context_window: u64,
+    #[serde(default)]
+    pub context_window: Option<u64>,
     #[serde(default)]
     pub reasoning_efforts: Vec<xai_grok_sampling_types::ReasoningEffortOption>,
     #[serde(default)]
@@ -306,7 +307,7 @@ impl Bridge {
                     || model.id.chars().any(char::is_control)
                     || !self.safe_text(&model.id)
                     || !self.safe_text(&model.name)
-                    || model.context_window == 0
+                    || model.context_window == Some(0)
                     || !ids.insert(&model.id)
                     || !valid_reasoning_metadata(model)
                 {
@@ -483,7 +484,7 @@ impl Bridge {
                 let mut entry = ConfigModelOverride {
                     model: Some(model.id),
                     name: Some(format!("{} / {}", provider.name, model.name)),
-                    context_window: Some(model.context_window),
+                    context_window: model.context_window,
                     supports_reasoning_effort: Some(!model.reasoning_efforts.is_empty()),
                     reasoning_efforts: model.reasoning_efforts.clone(),
                     reasoning_effort: model.default_reasoning_effort,
@@ -733,6 +734,28 @@ mod tests {
         }
         assert!(loopback_origin("http://127.0.0.1:1234").is_ok());
         assert!(loopback_origin("http://[::1]:1234").is_ok());
+    }
+    #[test]
+    fn unknown_context_window_does_not_reject_subscription_catalog() {
+        let bridge = Bridge::new("http://127.0.0.1:1234", "context-fixture-token".into()).unwrap();
+        let mut catalog: Catalog = serde_json::from_value(serde_json::json!({"providers":[{
+            "id":"cursor","name":"Cursor","loggedIn":true,
+            "models":[{"id":"unknown-context","name":"Unknown","contextWindow":null}]
+        }]}))
+        .unwrap();
+        bridge.validate_catalog(&catalog).unwrap();
+        assert_eq!(catalog.providers[0].models[0].context_window, None);
+        *bridge.catalog.write().unwrap() = catalog.clone();
+        let mut models = IndexMap::new();
+        bridge.inject(
+            &mut models,
+            &crate::agent::config::Config::default().endpoints,
+        );
+        // The catalog does not fabricate upstream capacity. The native engine
+        // still applies its own existing default budget when no override exists.
+        assert!(bridge.ready_model("cursor/unknown-context", &models["cursor/unknown-context"]));
+        catalog.providers[0].models[0].context_window = Some(0);
+        assert!(bridge.validate_catalog(&catalog).is_err());
     }
     #[test]
     fn overlay_keeps_native_models_and_native_config() {
