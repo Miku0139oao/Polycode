@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, exist
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomBytes, createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { CredentialStore, NativeProviderService } from '../native-provider/service.mjs';
 import { WindowsTerminal, plain } from './windows-terminal.mjs';
 assert.equal(plain('\x1b]8;;file:///fixture\x1b\\link\x1b]8;;\x1b\\ Yes \x1b]0;title\x07 visible'),'link Yes  visible');
@@ -14,6 +15,15 @@ const workspace = join(root,'workspace'), home=join(root,'home');
 mkdirSync(workspace); mkdirSync(home);
 const nonce=randomBytes(20).toString('hex'), file=join(workspace,'fixture.txt');
 writeFileSync(file,nonce);
+const testMcp=process.argv.includes('--mcp');
+const testTask=process.argv.includes('--task');
+const taskState=Object.fromEntries(['codex','cursor'].map(p=>[p,{nonce:randomBytes(24).toString('hex'),childCalls:0,verified:false}]));
+const mcpLog=join(root,'mcp-events.jsonl'),mcpFile=join(workspace,'mcp-fixture.txt');
+const mcpNonces=Object.fromEntries(['codex','cursor'].map(p=>[p,randomBytes(24).toString('hex')]));
+if(testMcp) {
+  writeFileSync(mcpFile,mcpNonces.codex);
+  writeFileSync(join(workspace,'.mcp.json'),JSON.stringify({mcpServers:{fixture:{command:process.execPath,args:[fileURLToPath(new URL('./windows-mcp-fixture.mjs',import.meta.url)),mcpFile,mcpLog]}}}));
+}
 const store=new CredentialStore(join(home,'auth'));
 const requests=[], failures=[], permissions=[];
 let cancelledStreams=0;
@@ -35,13 +45,63 @@ for(const provider of ['codex','cursor']) {
     async complete(body, _credential, {signal}) {
       try {
         const last=[...(body.messages||[])].reverse().find(m=>m.role==='user'), prompt=content(last?.content);
-        const auxiliary=prompt.startsWith('<system-reminder>') || prompt.startsWith('CWD:') || !(body.tools||[]).length;
-        const taskPrompt=!auxiliary && (prompt.match(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/)?.[1]
-          || (['Read the isolated fixture.','Read the resumed fixture.','Wait until cancelled.','Write the isolated output.','Run the isolated Windows command.'].includes(prompt.trim())?prompt.trim():null));
         const tools=(body.tools||[]).map(t=>t.function);
-        requests.push({provider,model:body.model,prompt:taskPrompt||'[auxiliary]',...(!taskPrompt?{promptPrefix:prompt.slice(0,240)}:{}),tools:tools.map(t=>t.name)});
         if(tools.length===1 && tools[0].name==='session_title') return call(body,tools[0],{session_title:'Windows fixture session'},'fixture-title');
+        const auxiliary=prompt.startsWith('<system-reminder>') || prompt.startsWith('CWD:') || !(body.tools||[]).length;
+        if(!auxiliary && prompt.includes('WINDOWS_CHILD_REQUEST_')) {
+          assert.ok(testTask,'Unexpected child request');
+          const owner=['codex','cursor'].find(p=>prompt.includes('WINDOWS_CHILD_REQUEST_'+p.toUpperCase()));
+          assert.equal(owner,provider,'Native Task child changed provider');
+          const state=taskState[provider];
+          assert.ok(state.issued,'Native Task child arrived before parent tool call');
+          assert.equal(body.model,state.model,'Native Task child changed model');
+          assert.equal(state.childCalls,0,'Native Task child requested twice');
+          assert.ok(!JSON.stringify(body).includes(state.nonce),'Child nonce leaked before generation');
+          state.childCalls++;
+          return completion(body,{content:state.nonce});
+        }
+        const taskPrompt=!auxiliary && (prompt.match(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/)?.[1]
+          || (['Read the isolated fixture.','Read the resumed fixture.','Wait until cancelled.','Write the isolated output.','Run the isolated Windows command.','Discover and call the local MCP probe.','Run the native Task probe.'].includes(prompt.trim())?prompt.trim():null));
+        requests.push({provider,model:body.model,prompt:taskPrompt||'[auxiliary]',...(!taskPrompt?{promptPrefix:prompt.slice(0,240)}:{}),tools:tools.map(t=>t.name)});
         if(!taskPrompt)return completion(body,{content:'Windows fixture ready'});
+        if(taskPrompt==='Run the native Task probe.') {
+          const state=taskState[provider],id='task-'+provider;
+          const results=body.messages.filter(m=>m.role==='tool' && m.tool_call_id===id);
+          if(results.length) {
+            assert.equal(results.length,1,'Duplicate native Task result');
+            assert.equal(state.childCalls,1,'Native child did not generate its reply');
+            assert.ok(content(results[0].content).includes(state.nonce),'Native Task lost child response');
+            const footer=content(results[0].content).match(/<subagent_result>\s*subagent_id: ([A-Za-z0-9_-]+)\s*subagent_type: general-purpose\s*To continue this subagent's conversation, use resume_from="\1"\.\s*<\/subagent_result>/);
+            assert.ok(footer,'Native Task result lacks typed resume identity');
+            state.subagentId=footer[1];state.verified=true;
+            return completion(body,{content:'WINDOWS_TASK_'+provider.toUpperCase()+'_PASS'});
+          }
+          assert.ok(!state.issued,'Native Task call was replayed');
+          assert.ok(!JSON.stringify(body).includes(state.nonce),'Child response leaked before invocation');
+          const definition=tools.find(t=>t.name==='spawn_subagent');
+          assert.ok(definition,'Native Task tool missing');
+          const args={prompt:'WINDOWS_CHILD_REQUEST_'+provider.toUpperCase()+'\nReply briefly without calling tools.',description:'Native Windows Task probe',subagent_type:'general-purpose',background:false};
+          assert.ok((definition.parameters.required||[]).every(key=>key in args),'Unknown required native Task argument');
+          assert.ok(Object.keys(args).every(key=>key in definition.parameters.properties),'Unknown supplied native Task argument');
+          state.issued=true;state.model=body.model;
+          return call(body,definition,args,id);
+        }
+        if(taskPrompt==='Discover and call the local MCP probe.') {
+          const mcpNonce=mcpNonces[provider];
+          const id='mcp-call-'+provider;
+          const result=body.messages.find(m=>m.role==='tool' && m.tool_call_id===id);
+          if(result) {
+            assert.ok(JSON.stringify(result).includes(mcpNonce),'Native MCP result lacks fixture bytes');
+            return completion(body,{content:'WINDOWS_MCP_'+provider.toUpperCase()+'_PASS'});
+          }
+          assert.ok(!JSON.stringify(body).includes(mcpNonce),'MCP fixture leaked before native invocation');
+          const searched=body.messages.find(m=>m.role==='tool' && m.tool_call_id==='mcp-search-'+provider);
+          if(searched)assert.ok(JSON.stringify(searched).includes('fixture__probe'),'MCP discovery did not find the fixture');
+          const name=searched?'use_tool':'search_tool';
+          const definition=tools.find(t=>t.name===name);
+          assert.ok(definition,'Native MCP discovery/invocation tool missing');
+          return call(body,definition,searched?{tool_name:'fixture__probe',tool_input:{}}:{query:'fixture probe'},searched?id:'mcp-search-'+provider);
+        }
         if(taskPrompt==='Wait until cancelled.') {
           const stream=new ReadableStream({start(controller){
             controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({id:'cancel',object:'chat.completion.chunk',created:1,model:body.model,choices:[{index:0,delta:{role:'assistant',content:'WINDOWS_CANCEL_READY'},finish_reason:null}]})+'\n\n'));
@@ -131,6 +191,8 @@ const pause=ms=>new Promise(r=>setTimeout(r,ms));
 async function text(value){await t.until(()=>plain(t.output).includes(value),90000);}
 async function command(value){t.write(value+'\r');await pause(800);}
 async function toolTurn(prompt,marker) {
+  const mcpCalls=()=>existsSync(mcpLog)?readFileSync(mcpLog,'utf8').trim().split(/\r?\n/).map(JSON.parse).filter(e=>e.method==='tools/call').length:0;
+  const beforeMcp=prompt==='Discover and call the local MCP probe.'?mcpCalls():null;
   const offset=t.output.length;await command(prompt);
   const deadline=Date.now()+60000;let approved=false;
   while(!plain(t.output.slice(offset)).includes(marker)) {
@@ -139,13 +201,20 @@ async function toolTurn(prompt,marker) {
     if(Date.now()>deadline)throw new Error('Native tool/permission observation timed out');
     const recent=plain(t.output.slice(offset));
     const match=recent.match(/([1-9])\s+\([○●•]\)\s+Yes(?:, proceed)?(?=\s{2,}|\n|$|│)/);
-    if(match && recent.includes('No, reject') && !approved){permissions.push({prompt,choice:match[1],scope:'once'});t.write(match[1]);approved=true;await pause(800);}
+    if(match && recent.includes('No, reject') && !approved){
+      if(beforeMcp!==null)assert.equal(mcpCalls(),beforeMcp,'MCP executed before single-operation approval');
+      permissions.push({prompt,choice:match[1],scope:'once'});t.write(match[1]);approved=true;await pause(800);
+    }
     else await pause(200);
   }
+  if(beforeMcp!==null){assert.ok(approved,'Native MCP execution did not request approval');assert.equal(mcpCalls(),beforeMcp+1,'MCP invocation missing or replayed');}
 }
 const report={passed:false,binarySha256:createHash('sha256').update(readFileSync(binary)).digest('hex'),scope:'Mock transport, actual Windows native TUI/tools, default leader and permissions',root};
 try {
   await text('Choose a provider');
+  // The first menu renders before its asynchronous catalog arrives. Dismissing
+  // it early cancels that refresh and can incorrectly exercise OAuth instead.
+  await text('choose a model (use /login to sign in again)');
   for(const provider of ['codex','cursor']) {
     t.write('\x1b');await pause(500);
     const offset=t.output.length;
@@ -160,7 +229,25 @@ try {
     assert.equal(readFileSync(join(workspace,provider+'-written.txt'),'utf8'),nonce+'-'+provider);
     await pause(700);
     await toolTurn('Run the isolated Windows command.','WINDOWS_SHELL_'+provider.toUpperCase()+'_PASS');
+    if(testMcp) {
+      writeFileSync(mcpFile,mcpNonces[provider]);
+      await pause(700);
+      await toolTurn('Discover and call the local MCP probe.','WINDOWS_MCP_'+provider.toUpperCase()+'_PASS');
+    }
+    if(testTask) {
+      await pause(700);
+      await toolTurn('Run the native Task probe.','WINDOWS_TASK_'+provider.toUpperCase()+'_PASS');
+      assert.ok(taskState[provider].verified);
+    }
   }
+  if(testMcp) {
+    const events=readFileSync(mcpLog,'utf8').trim().split(/\r?\n/).map(JSON.parse);
+    assert.equal(events.filter(e=>e.method==='tools/call').length,2,'MCP calls missing or replayed');
+    assert.ok(events.some(e=>e.event==='environment'),'MCP environment observation missing');
+    assert.ok(events.filter(e=>e.event==='environment').every(e=>!e.bridgeTokenPresent),'Bridge token leaked to MCP subprocess');
+    report.mcp={calls:2,bridgeTokenLeaked:false};
+  }
+  if(testTask)report.nativeTasks=Object.fromEntries(Object.entries(taskState).map(([provider,state])=>[provider,{childCalls:state.childCalls,verified:state.verified,model:state.model,subagentId:state.subagentId}]));
   await pause(1000);
   await command('Wait until cancelled.');
   await text('WINDOWS_CANCEL_READY');
@@ -197,5 +284,6 @@ finally {
   report.requests=requests;report.permissions=permissions;report.controlRequests=controlRequests;report.catalogs=catalogs;report.fixtureErrors=failures;
   writeFileSync(join(root,'terminal.txt'),plain(t.output).replaceAll(bridge.token,'[REDACTED]'));
   writeFileSync('windows-tools-report.json',JSON.stringify(report,null,2)+'\n');
+  writeFileSync(join(root,'report.json'),JSON.stringify(report,null,2)+'\n');
   console.log(JSON.stringify({passed:report.passed,failure:report.failure,root}));
 }

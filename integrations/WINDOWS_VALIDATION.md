@@ -44,6 +44,14 @@ only individual operations, cancels a streaming response, checks the persisted
 provider-qualified model ID, restarts the TUI and reads newly changed fixture
 bytes from the resumed session. These are offline integration observations.
 
+Add `--mcp --task` to exercise native MCP discovery/invocation and native Task
+children for both subscription routes. MCP uses a local Node stdio fixture with
+distinct unpredictable values, checks no invocation occurs before single-use
+approval, and verifies the bridge token is absent from its process environment.
+Task responses require an actual child model request on the parent's provider
+and model, its generated value in the correlated result, and a typed child ID.
+These flags still use synthetic model transport and do not satisfy live coding.
+
 ## Interactive login
 
 When the account owner is available, run each provider against the candidate:
@@ -99,6 +107,17 @@ This package is not a published or accepted GitHub artifact.
 - The resume defect was a persisted unqualified model ID. The fix preserves
   provider identity using the authenticated catalog and exact registered route;
   it does not relax native authentication checks.
+- Extended `--mcp --task` regression passed on that same native executable:
+  two MCP calls with individual approvals, no bridge token in the MCP child,
+  and one native Task child per provider with the expected provider/model.
+  Cancellation and session restart also passed in this run.
+- A preceding extended run observed leader disconnection during Read and failed
+  session reload. The IPC loop could cancel a partially consumed input frame
+  when an outbound message arrived. It now retains the same read future until
+  the frame completes. An isolated compilation of the production functions and
+  regression test fails with the original loop and passes with the fix, covering
+  interruptions in both the length prefix and body plus a subsequent frame.
+  Full-shell testing and a newly built executable remain required for this fix.
 - The old installed WSL package started ChatGPT/Cursor browser authorization and
   displayed Grok's browser approval screen. These observations do not reproduce
   or resolve the user's real account/generation failures.

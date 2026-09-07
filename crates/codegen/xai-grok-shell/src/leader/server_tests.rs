@@ -4,6 +4,107 @@ use super::*;
 use tempfile::TempDir;
 
 #[tokio::test]
+async fn outbound_messages_preserve_partial_inbound_frames() {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf};
+
+    struct ObservedReader {
+        inner: tokio::io::ReadHalf<tokio::io::DuplexStream>,
+        consumed: Arc<AtomicUsize>,
+        changed: Arc<tokio::sync::Notify>,
+    }
+    impl AsyncRead for ObservedReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let before = buf.filled().len();
+            let result = Pin::new(&mut self.inner).poll_read(cx, buf);
+            let count = buf.filled().len() - before;
+            if count > 0 {
+                self.consumed.fetch_add(count, Ordering::SeqCst);
+                self.changed.notify_one();
+            }
+            result
+        }
+    }
+
+    // Interrupt both the length prefix and the JSON body. The observed reader
+    // guarantees that bytes have actually been consumed before outbound work.
+    for split in [2, 9] {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (client, server) = tokio::io::duplex(4096);
+            let (mut client_read, mut client_write) = tokio::io::split(client);
+            let (server_read, mut server_write) = tokio::io::split(server);
+            let consumed = Arc::new(AtomicUsize::new(0));
+            let changed = Arc::new(tokio::sync::Notify::new());
+            let mut reader = ObservedReader {
+                inner: server_read,
+                consumed: consumed.clone(),
+                changed: changed.clone(),
+            };
+            let (out_tx, out_rx) = kanal::unbounded_async();
+            let (event_tx, event_rx) = kanal::unbounded_async();
+            let cancel = CancellationToken::new();
+            let server_cancel = cancel.clone();
+            let server_task = tokio::spawn(async move {
+                forward_client_messages(
+                    ClientId(7),
+                    &mut reader,
+                    &mut server_write,
+                    &out_rx,
+                    &event_tx,
+                    &server_cancel,
+                )
+                .await
+                .unwrap();
+            });
+            let payload = "fragmented-frame";
+            let body = serde_json::to_vec(&ClientMessage::Acp {
+                payload: payload.into(),
+            })
+            .unwrap();
+            let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+            frame.extend_from_slice(&body);
+            client_write.write_all(&frame[..split]).await.unwrap();
+            while consumed.load(Ordering::SeqCst) < split {
+                changed.notified().await;
+            }
+            out_tx.send(ServerMessage::Pong.into()).await.unwrap();
+            assert!(matches!(
+                read_message::<_, ServerMessage>(&mut client_read)
+                    .await
+                    .unwrap(),
+                ServerMessage::Pong
+            ));
+            client_write.write_all(&frame[split..]).await.unwrap();
+            match event_rx.recv().await.unwrap() {
+                ServerEvent::Message(ClientId(7), ClientMessage::Acp { payload: actual }) => {
+                    assert_eq!(actual, payload)
+                }
+                _ => panic!("Partial inbound frame was lost or corrupted"),
+            }
+            // A following frame must still be aligned.
+            write_message(&mut client_write, &ClientMessage::Ping)
+                .await
+                .unwrap();
+            assert!(matches!(
+                read_message::<_, ServerMessage>(&mut client_read)
+                    .await
+                    .unwrap(),
+                ServerMessage::Pong
+            ));
+            cancel.cancel();
+            server_task.await.unwrap();
+        })
+        .await
+        .expect("Fragmented IPC exchange stalled");
+    }
+}
+
+#[tokio::test]
 async fn polycode_reload_refreshes_leader_overlay_for_direct_and_wrapped_requests() {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
