@@ -214,6 +214,31 @@ test('candidate installation requires explicit local opt-in', () => {
   assert.notEqual(result.status, 0); assert.match(result.stderr, /explicit -AllowCandidate/); assertNoRelease(root);
 });
 
+test('one-key local install uses sibling candidate files without -ArtifactDirectory', () => {
+  const root = join(temp, 'one-key sibling install');
+  const result = powershell(join(assets, 'install.ps1'), '-Distro', distro, '-InstallRoot', root, '-LinuxRoot', linux + '/installs', '-AllowCandidate', '-NoPath');
+  ok(result);
+  assert.equal(releaseDirs(root).length, 1);
+  assert.match(result.stdout, /Installed v0\.2\.0/);
+  assert.match(result.stdout, /PATH unchanged/);
+});
+
+test('one-key sibling candidate still requires -AllowCandidate', () => {
+  const root = join(temp, 'one-key sibling no opt-in');
+  const result = powershell(join(assets, 'install.ps1'), '-Distro', distro, '-InstallRoot', root, '-LinuxRoot', linux + '/installs', '-NoPath');
+  assert.notEqual(result.status, 0); assert.match(result.stderr, /explicit -AllowCandidate/); assertNoRelease(root);
+});
+
+test('GitHub unpublished candidate downloads assets without authorization sidecars', () => {
+  const root = join(temp, 'github candidate install');
+  const result = remoteInstaller(root, assets, ps, '-GitHubCandidate');
+  ok(result);
+  const release = join(root, 'releases', releaseDirs(root)[0]);
+  assert.equal(existsSync(join(release, 'release-authorization.json')), false);
+  assert.equal(existsSync(join(release, 'release-readiness.json')), false);
+  assert.equal(JSON.parse(readFileSync(join(release, 'release-manifest.json'), 'utf8').replace(/^\uFEFF/, '')).classification, 'immutable-candidate');
+});
+
 test('manifest identity and runtime file integrity cannot be bypassed by recomputing transport checksums', () => {
   for (const scenario of ['wrong native identity', 'unsafe inventory path', 'changed file hash']) {
     const artifacts = cloneAssets(scenario), root = join(temp, scenario + ' install');

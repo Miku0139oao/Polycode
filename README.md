@@ -57,37 +57,45 @@ integration or release status.
 
 ## Install Polycode (Windows + WSL)
 
-**Candidate/unpublished — do not use the public command yet.** Cursor OAuth failure,
-real-provider Task/resume, permissions/billing, browser and integrated installed
-acceptance remain open. The available executable is dev opt0 with debug assertions,
-not release optimized. All necessary gates and parent review must pass before any
-publication; see the [fail-closed procedure](integrations/RELEASE_READINESS.md).
+**Unpublished candidate.** Cursor live OAuth, real-provider Task/resume, paid
+billing and authorized public distribution remain open. GitHub Actions can
+build and attach candidate assets; that is not live acceptance. See the
+[fail-closed procedure](integrations/RELEASE_READINESS.md).
 
-For maintainers with the historical c037/e8 preparation assets, this command uses
-fresh Windows/WSL roots and changes neither PATH nor existing installations.
-**That schema1 candidate remains untouched and is not promotable**; final Rust/JS
-changes require a new package and acceptance:
+### One-command from GitHub (candidate)
+
+Windows PowerShell 5.1 or 7, with an existing WSL Arch distro. This downloads
+the versioned `install.ps1` and the six hash-checked assets. It does **not**
+require authorization sidecars and does **not** claim a finished release:
 
 ```powershell
-$id=[guid]::NewGuid().ToString('N'); & D:/ai-harness/native-release-candidate-18d/install.ps1 -ArtifactDirectory D:/ai-harness/native-release-candidate-18d -AllowCandidate -InstallRoot "D:/ai-harness/polycode-candidate-install-$id" -LinuxRoot "/tmp/polycode-candidate-install-$id" -NoPath
+& { $ErrorActionPreference='Stop'; $p=Join-Path $env:TEMP ('polycode-install-'+[guid]::NewGuid().ToString('N')+'.ps1'); iwr -UseBasicParsing https://github.com/Miku0139oao/Polycode/releases/download/v0.2.0/install.ps1 -OutFile $p; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $p -Version v0.2.0 -GitHubCandidate }
 ```
 
-Use the printed isolated launcher path, not an existing `polycode` from PATH.
-This is local candidate installation, **not OAuth/live acceptance**. Add
-`-StageOnly` to stage without activating even the isolated launcher.
+Add `-NoPath` to leave user PATH unchanged, or `-InstallRoot`/`-LinuxRoot` for
+an isolated copy. Review the downloaded `install.ps1` before executing it.
+Rebuilds are published by [the candidate-release workflow](.github/workflows/candidate-release.yml)
+(`workflow_dispatch` or a `vX.Y.Z` tag).
 
-**Deferred public one-command flow (NOT validated; assets are not published):**
+### Local candidate folder
+
+If `install.ps1` already sits next to the six candidate files, run that file
+with `-AllowCandidate`. `-ArtifactDirectory` is optional in that case:
+
+```powershell
+$id=[guid]::NewGuid().ToString('N'); & D:/ai-harness/native-release-candidate-18d/install.ps1 -AllowCandidate -InstallRoot "D:/ai-harness/polycode-candidate-install-$id" -LinuxRoot "/tmp/polycode-candidate-install-$id" -NoPath
+```
+
+That historical schema1 18d/e8 folder remains untouched and is not promotable.
+
+**Authorized public command (sidecars required, not enabled yet):**
 
 ```powershell
 & { $ErrorActionPreference='Stop'; $p=Join-Path $env:TEMP ('polycode-install-'+[guid]::NewGuid().ToString('N')+'.ps1'); iwr -UseBasicParsing https://github.com/Miku0139oao/Polycode/releases/download/v0.2.0/install.ps1 -OutFile $p; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $p -Version v0.2.0 }
 ```
 
-That command downloads and executes the exact version-specific installer file;
-review it first. Remote installation also requires matching parent authorization
-and complete PASS readiness sidecars. It cannot be enabled with `-AllowCandidate`.
-Its final public-URL gate is **DEFERRED_UNTIL_PUBLICATION**, not PASS. Do not remove
-this warning until the parent has authorized a release and verified the actual
-public command against the published assets in another fresh install root.
+That path still needs matching parent authorization and complete PASS
+readiness sidecars. Its public-URL gate is **DEFERRED_UNTIL_PUBLICATION**.
 
 Target: **Windows with an existing WSL Arch Linux x86_64 distribution**, glibc
 2.43 or newer, zlib, libgcc, libstdc++, ICU 78 and Windows interop enabled; default distro name

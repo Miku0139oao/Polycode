@@ -136,10 +136,11 @@ try {
         packagingScriptSha256 = (Get-Sha256 $PSCommandPath)
         acceptance = @{
             oauthChatGPT = 'USER_REPORTED_WORKING; candidate-bound formal acceptance still required'
-            oauthCursor = 'FAIL_USER_REPORTED_WEB_SUCCESS_TUI_LOGIN_FAILURE; not fixed or accepted'
+            oauthCursor = 'UNPROVEN; unix-second expiresAt poll rejection fixed in JS, live TUI login not re-run'
             liveGates = 'NOT_ACCEPTED'; installedIntegrated = 'NOT_ACCEPTED'
+            mockBillingPreflight = 'PASS_8_OF_8_ON_2fbf_BINARY'
             publicationAuthorized = $false; publicUrl = 'DEFERRED_UNTIL_PUBLICATION'
-            pendingSourceChanges = 'Final Rust/JS changes including OAuth, usage/branding, prompt identity, reasoning effort, session resume and queued model switching require new build/package/hash-bound acceptance'
+            pendingSourceChanges = 'Live Cursor OAuth, paid billing observer, real Task/resume and official publication remain open'
         }
     }
     $manifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $stage 'release-manifest.json') -Encoding UTF8

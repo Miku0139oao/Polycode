@@ -1,0 +1,141 @@
+name: Candidate release
+
+# Builds the native Linux pager on GitHub-hosted Ubuntu (faster than local
+# Windows/DrvFS) and uploads an unpublished candidate GitHub Release.
+# This is not live OAuth/billing acceptance and does not authorize public
+# distribution sidecars. Users install with install.ps1 -GitHubCandidate.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag (vX.Y.Z)
+        required: true
+        default: v0.2.0
+      profile:
+        description: Cargo profile
+        type: choice
+        options:
+          - release
+          - debug
+        default: release
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config libssl-dev zlib1g-dev curl unzip ca-certificates file
+
+      - name: Install protoc 29.3
+        run: |
+          curl -fsSL -o /tmp/protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-linux-x86_64.zip
+          sudo unzip -o /tmp/protoc.zip -d /usr/local
+          echo "PROTOC=/usr/local/bin/protoc" >> "$GITHUB_ENV"
+
+      - name: Install Rust 1.94.0
+        uses: dtolnay/rust-toolchain@1.94.0
+
+      - name: Install Bun 1.3.14
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install native-provider lockfile dependencies
+        run: npm ci --ignore-scripts --prefix integrations/native-provider
+
+      - name: Determine version and profile
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "profile=${{ inputs.profile }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "profile=release" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build native pager
+        run: |
+          if [ "${{ steps.meta.outputs.profile }}" = "release" ]; then
+            cargo build --locked -p xai-grok-pager-bin --bin xai-grok-pager --release -j 2
+            BINARY="$PWD/target/release/xai-grok-pager"
+            PROFILE='{"opt_level":"3","debuginfo":null,"debug_assertions":false,"overflow_checks":false,"test":false}'
+          else
+            cargo build --locked -p xai-grok-pager-bin --bin xai-grok-pager -j 2
+            BINARY="$PWD/target/debug/xai-grok-pager"
+            PROFILE='{"opt_level":"0","debuginfo":"line-tables-only","debug_assertions":true,"overflow_checks":true,"test":false}'
+          fi
+          python3 - <<PY
+          import hashlib, json, os, pathlib
+          binary = pathlib.Path(os.environ["BINARY"])
+          data = binary.read_bytes()
+          report = {
+            "revision": os.environ["GITHUB_SHA"],
+            "exit": 0,
+            "timeout": False,
+            "binary": str(binary),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": len(data),
+            "profile": json.loads(os.environ["PROFILE"]),
+            "scope": "GitHub Actions unpublished candidate build; not live acceptance",
+          }
+          pathlib.Path("native-app-build-gha.json").write_text(json.dumps(report, indent=2) + "\n")
+          print(json.dumps({"sha256": report["sha256"], "bytes": report["bytes"]}))
+          PY
+        env:
+          BINARY: ${{ github.workspace }}/target/${{ steps.meta.outputs.profile }}/xai-grok-pager
+          PROFILE: ${{ steps.meta.outputs.profile == 'release' && '{"opt_level":"3","debuginfo":null,"debug_assertions":false,"overflow_checks":false,"test":false}' || '{"opt_level":"0","debuginfo":"line-tables-only","debug_assertions":true,"overflow_checks":true,"test":false}' }}
+
+      - name: Package unpublished candidate
+        run: |
+          python3 integrations/package-release.py \
+            --binary "$PWD/target/${{ steps.meta.outputs.profile }}/xai-grok-pager" \
+            --runtime "$(command -v bun)" \
+            --build-report "$PWD/native-app-build-gha.json" \
+            --output "$PWD/candidate-out" \
+            --version "${{ steps.meta.outputs.version }}" \
+            --source "$PWD"
+          python3 - <<'PY'
+          import zipfile
+          from pathlib import Path
+          root = Path("candidate-out")
+          with zipfile.ZipFile("polycode-windows-wsl-candidate.zip", "w", compression=zipfile.ZIP_STORED) as archive:
+              for path in sorted(root.iterdir()):
+                  if path.is_file():
+                      archive.write(path, path.name)
+          PY
+
+      - name: Publish GitHub prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.meta.outputs.version }}"
+          cat > /tmp/polycode-release-notes.md <<EOF
+          Unpublished Polycode candidate for Windows + existing WSL Arch.
+
+          One-command install (hash-checked, **not** live OAuth/billing acceptance):
+
+          \`\`\`powershell
+          & { \$ErrorActionPreference='Stop'; \$p=Join-Path \$env:TEMP ('polycode-install-'+[guid]::NewGuid().ToString('N')+'.ps1'); iwr -UseBasicParsing https://github.com/Miku0139oao/Polycode/releases/download/${TAG}/install.ps1 -OutFile \$p; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \$p -Version ${TAG} -GitHubCandidate }
+          \`\`\`
+
+          This prerelease does not include parent authorization sidecars and is not an official public release.
+          EOF
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" candidate-out/* polycode-windows-wsl-candidate.zip --clobber
+          else
+            gh release create "$TAG" candidate-out/* polycode-windows-wsl-candidate.zip --prerelease --title "Polycode $TAG candidate" --notes-file /tmp/polycode-release-notes.md
+          fi

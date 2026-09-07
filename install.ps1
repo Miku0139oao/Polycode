@@ -2,9 +2,13 @@
 x86_64 with glibc >= 2.43 (Arch Linux), zlib, libgcc, libstdc++, ICU78 and Windows interop.
 No provider login, browser, external agent CLI, Rust compiler or administrator needed.
 -ArtifactDirectory installs local UNPUBLISHED CANDIDATE assets (still hash checked).
-Requires -AllowCandidate: local preflight never means release/live acceptance.
-Without -ArtifactDirectory, an immutable candidate requires separate parent
-release authorization + PASS readiness, both bound to the exact accepted bytes.
+If this script sits next to the six candidate files, the same directory is used
+automatically; still requires -AllowCandidate. -GitHubCandidate downloads those
+same hash-checked files from this repository's GitHub Release and treats them as
+an unpublished candidate (no authorization sidecars). Local or GitHub candidate
+preflight never means release/live acceptance. Without a candidate opt-in, an
+immutable package requires separate parent release authorization + PASS
+readiness, both bound to the exact accepted bytes.
 Classification never means published. Sidecars do not repack the runtime.
 -InstallRoot/-LinuxRoot allow isolated installs; -NoPath never changes either PATH.
 -StageOnly verifies/stages a release without changing the active launcher or PATH.
@@ -17,6 +21,7 @@ param(
     [string]$LinuxRoot,
     [string]$ArtifactDirectory,
     [switch]$AllowCandidate,
+    [switch]$GitHubCandidate,
     [switch]$NoPath,
     [switch]$StageOnly
 )
@@ -24,6 +29,19 @@ $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $assets = @('polycode-wsl-x64.gz', 'polycode-bun-wsl-x64.gz', 'polycode-runtime.zip', 'manifest.json', 'install.ps1')
+# One-key local install: running the accepted install.ps1 from a complete
+# candidate folder does not require repeating -ArtifactDirectory.
+if (-not $ArtifactDirectory -and $PSCommandPath) {
+    $here = [IO.Path]::GetFullPath((Split-Path -Parent $PSCommandPath))
+    $complete = $true
+    foreach ($name in @('SHA256SUMS') + $assets) {
+        if (-not (Test-Path -LiteralPath (Join-Path $here $name) -PathType Leaf)) { $complete = $false; break }
+    }
+    if ($complete) { $ArtifactDirectory = $here }
+}
+if ($GitHubCandidate -and $ArtifactDirectory) {
+    throw 'This installer is already next to local candidate files. Omit -GitHubCandidate and pass -AllowCandidate.'
+}
 # Kept in lockstep with release-readiness.mjs by a contract test. Self-contained
 # installer: never trusts a downloaded policy to remove a necessary gate.
 $releasePolicyVersion = '2026-09-07.2'
@@ -303,10 +321,12 @@ try {
     New-Item -ItemType Directory -Path $temp | Out-Null
     $base = "https://github.com/Miku0139oao/Polycode/releases/download/$Version"
     if (-not $ArtifactDirectory) {
-        # Same version-specific trusted publisher origin as the assets. These are
-        # separate metadata, never inserted into ZIP/SHA256SUMS after acceptance.
-        foreach ($sidecar in @('release-readiness.json', 'release-authorization.json')) {
-            Invoke-WebRequest -UseBasicParsing "$base/$sidecar" -OutFile (Join-Path $temp $sidecar)
+        if (-not $GitHubCandidate) {
+            # Same version-specific trusted publisher origin as the assets. These are
+            # separate metadata, never inserted into ZIP/SHA256SUMS after acceptance.
+            foreach ($sidecar in @('release-readiness.json', 'release-authorization.json')) {
+                Invoke-WebRequest -UseBasicParsing "$base/$sidecar" -OutFile (Join-Path $temp $sidecar)
+            }
         }
     }
     foreach ($asset in @('SHA256SUMS') + $assets) {
@@ -340,9 +360,9 @@ try {
         ($manifest.schemaVersion -eq 2 -and ($outer.classification -cne $manifest.classification -or $outer.PSObject.Properties.Name -contains 'status')) -or
         ($manifest.schemaVersion -eq 1 -and $outer.status -cne $manifest.status) -or
         $outer.native.sha256 -cne $manifest.native.sha256 -or $outer.bun.sha256 -cne $manifest.bun.sha256) { throw 'Candidate manifest identity mismatch.' }
-    if ($ArtifactDirectory) {
-        if (-not $AllowCandidate) { throw 'Local candidate requires explicit -AllowCandidate. Sidecars cannot bypass local opt-in; no release/live acceptance is implied.' }
-        Write-Warning 'LOCAL CANDIDATE PREFLIGHT: publication and OAuth/live acceptance are not implied.'
+    if ($ArtifactDirectory -or $GitHubCandidate) {
+        if ($ArtifactDirectory -and -not $AllowCandidate) { throw 'Local candidate requires explicit -AllowCandidate. Sidecars cannot bypass local opt-in; no release/live acceptance is implied.' }
+        Write-Warning 'UNPUBLISHED CANDIDATE PREFLIGHT: publication and OAuth/live acceptance are not implied.'
     } else {
         Assert-DistributionAuthorization $outer (Get-Sha256 (Join-Path $temp 'manifest.json'))
     }
@@ -356,7 +376,7 @@ try {
         if (-not (Test-Path -LiteralPath $actual -PathType Leaf) -or (Get-Sha256 $actual) -ne $file.sha256 -or (Get-Item -LiteralPath $actual).Length -ne $file.bytes) { throw "Runtime file integrity mismatch: $($file.path)" }
     }
     Copy-Item -LiteralPath (Join-Path $temp 'manifest.json') -Destination (Join-Path $runtimeStage 'candidate-manifest.json')
-    if (-not $ArtifactDirectory) {
+    if (-not $ArtifactDirectory -and -not $GitHubCandidate) {
         foreach ($sidecar in @('release-readiness.json', 'release-authorization.json')) {
             if (Test-Path -LiteralPath (Join-Path $runtimeStage $sidecar)) { throw 'Distribution metadata must not be embedded inside the accepted runtime ZIP.' }
             Copy-Item -LiteralPath (Join-Path $temp $sidecar) -Destination (Join-Path $runtimeStage $sidecar)
