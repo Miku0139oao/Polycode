@@ -35,6 +35,11 @@ pub enum RegisteredModelProvider {
 pub fn registered_model_provider(id: &str) -> Option<RegisteredModelProvider> {
     bridge().and_then(|b| b.registered_model_provider(id))
 }
+/// Recover the catalog identity from an exact registered subscription route.
+/// Upstream model slugs alone are not identities: two providers can share one.
+pub(crate) fn canonical_model_id(base: &str, model: &str) -> Option<String> {
+    bridge().and_then(|b| b.canonical_model_id(base, model))
+}
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Catalog {
     pub providers: Vec<Provider>,
@@ -395,6 +400,17 @@ impl Bridge {
                         && entry.info.id.as_deref() == Some(id)
                         && entry.info.model == m.id
                 })
+        })
+    }
+    fn canonical_model_id(&self, base: &str, model: &str) -> Option<String> {
+        self.catalog().providers.iter().find_map(|provider| {
+            if base != self.model_base(provider.id)
+                || !provider.models.iter().any(|entry| entry.id == model) {
+                return None;
+            }
+            let id = format!("{}/{}", provider.id.as_str(), model);
+            (self.registered_model_provider(&id)
+                == Some(RegisteredModelProvider::Subscription(provider.id))).then_some(id)
         })
     }
     fn registered_model_provider(&self, id: &str) -> Option<RegisteredModelProvider> {
@@ -896,6 +912,11 @@ mod tests {
             bridge.registered_model_provider("cursor/b"),
             Some(RegisteredModelProvider::Subscription(ProviderId::Cursor))
         );
+        assert_eq!(bridge.canonical_model_id(&bridge.model_base(ProviderId::Codex), "a"), Some("codex/a".into()));
+        assert_eq!(bridge.canonical_model_id(&bridge.model_base(ProviderId::Cursor), "b"), Some("cursor/b".into()));
+        assert_eq!(bridge.canonical_model_id(&bridge.model_base(ProviderId::Cursor), "a"), None);
+        assert_eq!(bridge.canonical_model_id("http://127.0.0.1:9999/codex/v1", "a"), None);
+        assert_eq!(bridge.canonical_model_id(&bridge.model_base(ProviderId::Codex), "forged"), None);
         for unknown in [
             "grok-forged",
             "codex/forged",
@@ -918,6 +939,7 @@ mod tests {
         );
         restored.catalog.write().unwrap().providers[0].logged_in = false;
         assert_eq!(restored.registered_model_provider("codex/a"), None);
+        assert_eq!(restored.canonical_model_id(&restored.model_base(ProviderId::Codex), "a"), None);
         assert_eq!(
             restored.registered_model_provider("cursor/b"),
             Some(RegisteredModelProvider::Subscription(ProviderId::Cursor))

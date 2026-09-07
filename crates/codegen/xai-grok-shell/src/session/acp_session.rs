@@ -1218,14 +1218,14 @@ impl SessionActor {
     ) {
         self.events.emit_turn_ended(outcome, category, context);
     }
-    /// Current model ID for OTLP span attributes.
+    /// Current catalog identity for session persistence and OTLP span attributes.
     /// Reads from chat_state_handle so it always reflects the latest model override; no stale cached field.
     /// Returns "unknown" if no sampling config is set.
     async fn current_model_id(&self) -> String {
         self.chat_state_handle
             .get_sampling_config()
             .await
-            .map(|c| c.model)
+            .map(|c| crate::polycode::canonical_model_id(&c.base_url, &c.model).unwrap_or(c.model))
             .filter(|m| !m.is_empty())
             .unwrap_or_else(|| "unknown".to_string())
     }

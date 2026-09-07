@@ -215,7 +215,10 @@ impl SessionActor {
         }
         let (summary_client, summary_model) = self.selected_summary_client(&sampling_config)?;
         self.abort_title_refresh();
-        let model_id = acp::ModelId::new(sampling_config.model.clone());
+        let model_id = acp::ModelId::new(
+            crate::polycode::canonical_model_id(&sampling_config.base_url, &sampling_config.model)
+                .unwrap_or_else(|| sampling_config.model.clone()),
+        );
         let new_context_window = self.compaction.context_window_override.unwrap_or_else(|| {
             std::num::NonZeroU64::new(sampling_config.context_window).unwrap_or_else(|| {
                 std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW)
@@ -383,7 +386,10 @@ impl SessionActor {
             cfg.model = routed;
         }
         cfg.reasoning_effort = Some(effort);
-        let model_id = acp::ModelId::new(cfg.model.clone());
+        let model_id = acp::ModelId::new(
+            crate::polycode::canonical_model_id(&cfg.base_url, &cfg.model)
+                .unwrap_or_else(|| cfg.model.clone()),
+        );
         let mut primary = self.reconstruct_full_config().await;
         primary.model = cfg.model.clone();
         primary.reasoning_effort = cfg.reasoning_effort;
