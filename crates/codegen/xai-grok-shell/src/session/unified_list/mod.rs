@@ -988,10 +988,11 @@ mod tests {
             );
         }
     }
-    /// `parse_list_req` forces the conversations-only `kind` exactly when process chat mode is on; otherwise the client request is untouched.
+    /// This build disables process chat mode, even with its legacy env flag.
+    /// Preserve client filters exactly instead of expecting an inactive rewrite.
     #[test]
     #[serial_test::serial]
-    fn parse_list_req_forces_kind_under_process_chat_mode_only() {
+    fn parse_list_req_preserves_filters_while_process_chat_mode_is_disabled() {
         use crate::agent::chat_modes::GROK_CHAT_MODE_ENV;
         let raw = serde_json::json!({
             "_meta": { "x.ai/facetFilters": { "kind": ["build"], "starred": [true] } },
@@ -1011,11 +1012,8 @@ mod tests {
             let _on = xai_grok_test_support::EnvGuard::set(GROK_CHAT_MODE_ENV, "1");
             let req = parse_list_req(&raw).expect("parse");
             let parsed = ParsedMeta::parse(req.meta.as_ref());
-            let expected_build = if cfg!(feature = "local-workspace") {
-                Some(&vec![serde_json::json!("build")])
-            } else {
-                Some(&vec![serde_json::json!("build")])
-            };
+            assert!(!crate::agent::chat_modes::process_chat_mode_enabled());
+            let expected_build = Some(&vec![serde_json::json!("build")]);
             assert_eq!(
                 parsed.facet_filters.get(KIND_FACET_KEY),
                 expected_build,
@@ -1032,19 +1030,28 @@ mod tests {
             assert_eq!(
                 parsed.facet_filters.get(KIND_FACET_KEY),
                 expected,
-                "absent client kind still forces chat under process chat mode"
+                "absent client kind remains absent while process chat is disabled"
             );
-            for bad in [
-                serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": [] } } }),
-                serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": null } } }),
-                serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": ["other"] } } }),
+            for (input, expected_kind) in [
+                (
+                    serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": [] } } }),
+                    Some(vec![]),
+                ),
+                (
+                    serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": null } } }),
+                    None,
+                ),
+                (
+                    serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": ["other"] } } }),
+                    Some(vec![serde_json::json!("other")]),
+                ),
             ] {
-                let req = parse_list_req(&bad.to_string()).expect("parse");
+                let req = parse_list_req(&input.to_string()).expect("parse");
                 let parsed = ParsedMeta::parse(req.meta.as_ref());
                 assert_eq!(
                     parsed.facet_filters.get(KIND_FACET_KEY),
-                    expected,
-                    "empty/null/unknown kind must still force chat: {bad}"
+                    expected_kind.as_ref(),
+                    "inactive chat mode must preserve the parsed client kind: {input}"
                 );
             }
         }

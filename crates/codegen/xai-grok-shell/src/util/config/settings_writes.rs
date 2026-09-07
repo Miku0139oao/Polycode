@@ -45,6 +45,26 @@ pub fn set_follow_up_steer_cache(steer: bool) {
     FOLLOW_UP_STEER_MTIME_NS.store(follow_up_config_mtime_ns(), Ordering::Relaxed);
 }
 
+/// Preserve both cache atomics for serialized configuration fixtures.
+#[cfg(test)]
+pub(crate) struct FollowUpSteerCacheRestore(u8, u64);
+#[cfg(test)]
+impl FollowUpSteerCacheRestore {
+    pub(crate) fn capture() -> Self {
+        Self(
+            FOLLOW_UP_STEER_CACHE.load(Ordering::Relaxed),
+            FOLLOW_UP_STEER_MTIME_NS.load(Ordering::Relaxed),
+        )
+    }
+}
+#[cfg(test)]
+impl Drop for FollowUpSteerCacheRestore {
+    fn drop(&mut self) {
+        FOLLOW_UP_STEER_CACHE.store(self.0, Ordering::Relaxed);
+        FOLLOW_UP_STEER_MTIME_NS.store(self.1, Ordering::Relaxed);
+    }
+}
+
 /// Whether Steer is enabled in this process.
 ///
 /// Hits disk only when the cache is cold or the `config.toml` mtime has changed since the last resolve.

@@ -2,6 +2,33 @@
 use super::support::*;
 use super::*;
 
+// Restore the environment before its cache, then remove the temporary config.
+// Call only from serialized tests.
+struct FollowUpPolicyFixture {
+    _env: xai_grok_test_support::EnvGuard,
+    _cache: crate::util::config::FollowUpSteerCacheRestore,
+    _home: tempfile::TempDir,
+}
+impl FollowUpPolicyFixture {
+    fn new(steer: bool) -> Self {
+        let cache = crate::util::config::FollowUpSteerCacheRestore::capture();
+        let home = tempfile::tempdir().expect("follow-up config home");
+        let behavior = if steer { "steer" } else { "queue" };
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!("[ui]\nfollow_up_behavior = \"{behavior}\"\n"),
+        )
+        .unwrap();
+        let env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        crate::util::config::set_follow_up_steer_cache(steer);
+        Self {
+            _env: env,
+            _cache: cache,
+            _home: home,
+        }
+    }
+}
+
 /// The shared-queue text must use a block's compact `displayText` (e.g. a locally-expanded `/loop` invocation) rather than the raw wire text.
 /// Other clients' turn-start shim renders that text as the user block, and the raw text is the full skill instruction.
 #[test]
@@ -1689,11 +1716,12 @@ async fn promote_queued_as_interjections_stops_at_send_now() {
 
 /// A follow-up queued behind an auto-wake must stay queued; Steer must not inject it into the wake.
 #[tokio::test]
+#[serial_test::serial]
 async fn promote_queued_as_interjections_skips_auto_wake() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            crate::util::config::set_follow_up_steer_cache(true);
+            let _policy = FollowUpPolicyFixture::new(true);
             let (actor, _rx) = build_actor().await;
             {
                 let mut state = actor.state.lock().await;
@@ -1724,11 +1752,12 @@ async fn promote_queued_as_interjections_skips_auto_wake() {
 
 /// Product gate: with Steer off, a held plain row must not promote at a safe point (queue stays; no interjection in conversation).
 #[tokio::test]
+#[serial_test::serial]
 async fn drain_at_safe_point_with_steer_off_does_not_promote_held_row() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            crate::util::config::set_follow_up_steer_cache(false);
+            let _policy = FollowUpPolicyFixture::new(false);
             let (actor, _rx) = build_actor().await;
             {
                 let mut state = actor.state.lock().await;
@@ -1756,11 +1785,12 @@ async fn drain_at_safe_point_with_steer_off_does_not_promote_held_row() {
 
 /// Product gate: with Steer on, a held plain row promotes and drains into a synthetic interjection user item.
 #[tokio::test]
+#[serial_test::serial]
 async fn drain_at_safe_point_with_steer_on_promotes_and_drains_held_row() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            crate::util::config::set_follow_up_steer_cache(true);
+            let _policy = FollowUpPolicyFixture::new(true);
             let (actor, _rx) = build_actor().await;
             {
                 let mut state = actor.state.lock().await;
@@ -1990,11 +2020,12 @@ async fn promote_queued_as_interjections_stops_when_protected_is_next() {
 
 /// Steer-on safe-point drain must not treat a protected pin as promotable held work (pair with direct promote tests above).
 #[tokio::test]
+#[serial_test::serial]
 async fn drain_at_safe_point_with_steer_on_leaves_protected_row_queued() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            crate::util::config::set_follow_up_steer_cache(true);
+            let _policy = FollowUpPolicyFixture::new(true);
             let (actor, _rx) = build_actor().await;
             {
                 let mut state = actor.state.lock().await;

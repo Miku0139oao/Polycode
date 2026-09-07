@@ -1375,6 +1375,15 @@ mod tests {
             &session
         ));
     }
+    // Relay resolution reads ambient proxies once at startup. Keep loopback
+    // fixtures direct for their whole lifetime; callers hold the serial lock.
+    fn direct_relay_env() -> [xai_grok_test_support::EnvGuard; 2] {
+        [
+            xai_grok_test_support::EnvGuard::set("NO_PROXY", "127.0.0.1,localhost,::1"),
+            xai_grok_test_support::EnvGuard::set("no_proxy", "127.0.0.1,localhost,::1"),
+        ]
+    }
+
     /// Mock relay WS server: counts accepted WebSocket connections and holds each open so the relay loop doesn't immediately reconnect.
     #[tracing::instrument(level = "debug", skip_all)]
     async fn spawn_mock_relay_server() -> (std::net::SocketAddr, Arc<AtomicU32>) {
@@ -1493,8 +1502,10 @@ mod tests {
     /// Remote prompts arrive *through* the relay, so on such a leader no headless-registration demand signal can ever fire.
     /// Gating the relay on it means the agent never registers with the backend ("No online agents") even though the box is healthy.
     #[tokio::test]
+    #[serial_test::serial]
     #[tracing::instrument(level = "debug", skip_all)]
     async fn eager_relay_connects_without_any_ipc_client() {
+        let _proxy = direct_relay_env();
         let (addr, count) = spawn_mock_relay_server().await;
         let config = test_relay_config(addr);
         let cancel = CancellationToken::new();
@@ -1531,8 +1542,10 @@ mod tests {
     /// With `relay_on_demand == true` (leader auto-spawned by an interactive client), the relay must stay off.
     /// It connects only when the first headless registration flips the demand watch.
     #[tokio::test]
+    #[serial_test::serial]
     #[tracing::instrument(level = "debug", skip_all)]
     async fn on_demand_relay_waits_for_headless_demand_signal() {
+        let _proxy = direct_relay_env();
         let (addr, count) = spawn_mock_relay_server().await;
         let config = test_relay_config(addr);
         let cancel = CancellationToken::new();
@@ -1571,8 +1584,10 @@ mod tests {
     /// The arm fires when a relay-eligible token is later hot-reloaded.
     /// For a non-eligible token it must hand the parts back (not consume them), so a later eligible one can still arm.
     #[tokio::test]
+    #[serial_test::serial]
     #[tracing::instrument(level = "debug", skip_all)]
     async fn deferred_arm_connects_relay_when_auth_appears() {
+        let _proxy = direct_relay_env();
         let (addr, count) = spawn_mock_relay_server().await;
         let cancel = CancellationToken::new();
         let (ws_to_agent_tx, _ws_to_agent_rx) = mpsc::unbounded_channel();
@@ -1635,9 +1650,11 @@ mod tests {
     /// End-to-end for the merge reconciliation: a background cold-mint persists a relay-eligible session to auth.json.
     /// The config watcher emits `ConfigUpdate::Auth`, and that arms the deferred relay.
     #[tokio::test]
+    #[serial_test::serial]
     #[tracing::instrument(level = "debug", skip_all)]
     async fn cold_mint_auth_write_arms_deferred_relay() {
         use crate::config::reloader::{ConfigReloader, ConfigUpdate, hash_auth_key};
+        let _proxy = direct_relay_env();
         let (addr, _count) = spawn_mock_relay_server().await;
         let grok_com_config = crate::auth::GrokComConfig {
             grok_ws_url: format!("ws://{addr}"),
@@ -1854,7 +1871,7 @@ mod tests {
             .expect("checker should exit within timeout after external cancel")
             .expect("checker task should not panic");
     }
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     #[tracing::instrument(level = "debug", skip_all)]
     async fn auto_update_calls_check_fn_multiple_times() {
         let call_count = Arc::new(AtomicU32::new(0));
@@ -1879,6 +1896,8 @@ mod tests {
             cancel.clone(),
             dummy_shutdown_tx(),
         ));
+        // Virtual time drives each interval even when the host is busy; a
+        // wall-clock sleep can expire before the checker is first scheduled.
         tokio::time::sleep(Duration::from_millis(200)).await;
         let calls = call_count.load(Ordering::Relaxed);
         assert!(
