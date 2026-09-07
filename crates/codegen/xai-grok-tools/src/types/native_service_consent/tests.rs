@@ -10,7 +10,7 @@ use crate::implementations::grok_build::{
     },
     web_search::{WebSearchInput, WebSearchTool},
 };
-use crate::implementations::web_search::{client::WebSearchClient, types::WebSearchConfig};
+use crate::implementations::{WebSearchConfig, web_search::client::WebSearchClient};
 use crate::types::tool_metadata::test_ctx_with_call_id;
 use indexmap::IndexMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
