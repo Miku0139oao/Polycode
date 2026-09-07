@@ -832,8 +832,8 @@ impl ScrollbackState {
     /// An immediate scroll-up then reveals already-exact heights instead of triggering an estimate-to-exact rebuild (which could jump).
     ///
     /// Only safe while the viewport is pinned to the bottom: measuring above shifts every offset uniformly, which the following re-pin cancels.
-    /// Skipped in `follow_preserve_scroll` (a prompt pinned at the top).
-    /// There `follow_scroll_to_bottom` keeps the prompt put, so the shift would move it down: a jump.
+    /// Skipped in `follow_preserve_scroll`: page-flip only needs the viewport measured,
+    /// and synthetic preserve may have no stable prompt anchor to compensate upstream shifts.
     /// Also skipped outside `follow_mode` (a manual top-anchored scroll position).
     pub(super) fn warm_measure_pages_above(&mut self, width: u16) {
         if !self.follow_mode
@@ -1006,6 +1006,102 @@ impl ScrollbackState {
         self.rebuild_layout_cache(width);
     }
 
+    /// Prompt origin relative to the visible range, resolved only by the armed id.
+    /// Never substitute a newer prompt when an interjection arrives or the armed prompt is removed.
+    fn pin_reserve_prompt_y(&self) -> Option<usize> {
+        let idx = self.index_of_id(self.pin_reserve_prompt_id?)?;
+        let range = self.visible_entry_range();
+        if !range.contains(&idx) {
+            return None;
+        }
+        let cache = self.layout_cache.as_ref()?;
+        Some(
+            cache
+                .virtual_y
+                .get(idx)?
+                .saturating_sub(*cache.virtual_y.get(range.start)?),
+        )
+    }
+
+    pub(super) fn capture_pin_reserve_prompt_screen_row(&mut self) {
+        self.pin_reserve_prompt_screen_row = self
+            .pin_reserve_prompt_y()
+            .zip(self.pin_reserve_target)
+            .map_or(0, |(y, target)| y.saturating_sub(target));
+    }
+
+    /// Translate the reserved pose into the current geometry before padding/release/follow decisions.
+    /// Full rebuilds replace exact historical heights with estimates even at an unchanged width;
+    /// subsequent lazy measurements (and gap/fold changes) can move the same prompt again.
+    /// The captured screen row, not a newly computed sticky fixed point, is the same-width invariant.
+    pub(super) fn rebase_pin_reserve_to_prompt(&mut self) {
+        if !self.pin_reserve_active || self.layout_cache.is_none() {
+            return;
+        }
+        let (Some(old_target), Some(prompt_id)) =
+            (self.pin_reserve_target, self.pin_reserve_prompt_id)
+        else {
+            return; // Arming is still measuring/positioning the new prompt.
+        };
+        if self.index_of_id(prompt_id).is_none() {
+            // Cancellation/removal cannot retarget a different prompt.
+            self.clear_pin_reserve();
+            self.follow_preserve_scroll = false;
+            return;
+        }
+        let Some(prompt_y) = self.pin_reserve_prompt_y() else {
+            return; // The armed prompt is outside the currently viewed turn.
+        };
+        let target = prompt_y.saturating_sub(self.pin_reserve_prompt_screen_row);
+        self.pin_reserve_target = Some(target);
+        // Manual scrolling owns its viewport anchor. Move only the follow-preserve pose here.
+        // Dirty-height updates may already have shifted it; applying only the residual delta
+        // makes this idempotent across incremental updates and repeated layout/settle passes.
+        if self.follow_mode && self.follow_preserve_scroll {
+            self.scroll_offset = if target >= old_target {
+                self.scroll_offset.saturating_add(target - old_target)
+            } else {
+                self.scroll_offset.saturating_sub(old_target - target)
+            };
+        }
+        if target != old_target {
+            tracing::trace!(
+                target: "polycode_layout_probe",
+                prompt_id = prompt_id.value(),
+                old_target,
+                pin_target = target,
+                prompt_y,
+                prompt_screen_row = self.pin_reserve_prompt_screen_row,
+                scroll_offset = self.scroll_offset,
+                width = self.last_width,
+                height = self.viewport_height,
+                "pin_rebase"
+            );
+        }
+    }
+
+    /// Opt-in geometry-only diagnostics; no transcript, provider, model, or account data.
+    pub(super) fn trace_layout_probe(&self) {
+        tracing::trace!(
+            target: "polycode_layout_probe",
+            width = self.last_width,
+            height = self.viewport_height,
+            entries = self.entries.len(),
+            scroll_offset = self.scroll_offset,
+            total_height = self.total_height,
+            pin_pad = self.pin_reserve_pad,
+            pin_target = self.pin_reserve_target.unwrap_or(0),
+            prompt_id = self.pin_reserve_prompt_id.map_or(0, EntryId::value),
+            prompt_y = self.pin_reserve_prompt_y().unwrap_or(0),
+            prompt_screen_row = self.pin_reserve_prompt_screen_row,
+            follow = u8::from(self.follow_mode),
+            preserve = u8::from(self.follow_preserve_scroll),
+            pin_active = u8::from(self.pin_reserve_active),
+            after_turn = u8::from(self.pin_reserve_after_turn),
+            "layout_final"
+        );
+    }
+
     /// Compute total content height from the layout cache.
     ///
     /// Call after `ensure_layout_cache()` to derive total_height from cached entry heights.
@@ -1017,6 +1113,7 @@ impl ScrollbackState {
     /// Capping the total at `u16::MAX` here is what stranded the bottom of very long sessions.
     /// Once content exceeded 65 535 rows, `scroll_offset`/`max_offset` could not point past the cap and the last rows were unreachable.
     pub(super) fn compute_total_height_from_cache(&mut self) {
+        self.rebase_pin_reserve_to_prompt();
         let Some(cache) = self.layout_cache.as_ref() else {
             return;
         };

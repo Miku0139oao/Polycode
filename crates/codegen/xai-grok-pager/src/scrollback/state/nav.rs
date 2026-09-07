@@ -571,6 +571,7 @@ impl ScrollbackState {
                 self.scroll_to_entry_top(idx);
                 self.pin_reserve_target = Some(self.scroll_offset);
                 self.pin_reserve_prompt_id = self.entries.get_index(idx).map(|(id, _)| *id);
+                self.capture_pin_reserve_prompt_screen_row();
                 self.compute_total_height_from_cache();
             }
             self.enable_follow_with_preserve();
@@ -1558,9 +1559,9 @@ mod tests {
         h.assert_at_bottom("finish shrink remains at the real tail");
     }
 
-    /// A height shrink above a pinned interjection must re-clamp the offset so later rows remain paintable without input.
+    /// A full rebuild after a height shrink above a surviving pinned prompt must rebase its pose, not abandon it.
     #[test]
-    fn page_flip_pin_reclamps_after_shrink_past_end() {
+    fn page_flip_pin_rebases_after_shrink_above_prompt() {
         let mut h = ScrollTestHarness::new(80, 10);
         for i in 0..20 {
             h.push_agent(&format!("history {i}"));
@@ -1598,10 +1599,13 @@ mod tests {
             h.state.scroll_offset,
             h.max_offset(),
         );
+        assert!(h.is_preserve(), "the pinned prompt still exists");
+        assert!(h.state.is_pin_reserve_active());
         assert!(
-            !h.is_preserve(),
-            "the wedged pin's referent is gone — it must be consumed"
+            h.state.scroll_offset < pin,
+            "the pin must move with the shrink"
         );
+        h.assert_entry_at_top(h.state.len() - 1, "surviving prompt remains pinned");
 
         h.push_agent("task completed");
         h.push_agent("final answer");

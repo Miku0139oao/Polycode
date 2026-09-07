@@ -128,15 +128,20 @@ pub struct ScrollbackState {
     /// Kept beside the flag so follow-preserve can still detect real overflow against the unpadded content height.
     pin_reserve_pad: usize,
 
-    /// Scroll offset of the page-flip pin, captured when the reserve is armed.
-    /// Re-deriving it from the last user prompt after a finish-time rebuild can disagree with the pose we scrolled to and drop the pad.
-    /// (Finish-time rebuilds: thinking collapse, the "Worked for…" marker, a group fold.)
+    /// Scroll offset of the page-flip pin in the current layout's coordinates.
+    /// Rebased from the captured prompt id and screen row when estimates, measurements, or folds move the prompt.
     pin_reserve_target: Option<usize>,
 
     /// Stable id of the prompt the pin targets, captured when armed.
     /// The pin tracks this specific prompt, not "the last user prompt".
     /// A mid-turn interjection therefore cannot move the above/below boundary the pad shift uses.
     pin_reserve_prompt_id: Option<EntryId>,
+
+    /// Prompt's row relative to the reserved viewport top (including any sticky-header space).
+    /// Captured with the prompt id when arming; unlike an absolute offset it survives same-width cache rebuilds.
+    /// Resize recaptures it using the new width's sticky-header geometry.
+    /// Only meaningful while the reserve has both an active target and a prompt id.
+    pin_reserve_prompt_screen_row: usize,
 
     /// The turn that armed the pin has finished.
     /// Midstream overflow still chases the tail; after this, a remeasure or terminal marker must not.
@@ -257,6 +262,7 @@ impl ScrollbackState {
             pin_reserve_pad: 0,
             pin_reserve_target: None,
             pin_reserve_prompt_id: None,
+            pin_reserve_prompt_screen_row: 0,
             pin_reserve_after_turn: false,
             selected: None,
             selection_box: None,
@@ -1529,7 +1535,7 @@ impl ScrollbackState {
             // The absolute wrapped-row scroll_offset would then point at different content after the rebuild (the resize jump)
             // While the old cache is still valid, anchor the viewport-top content; restore it below
             // Anchoring is intentionally limited to the not-following path
-            // Follow mode (including the follow_preserve_scroll page-flip) re-pins each frame, so it needs no anchor
+            // Plain follow re-pins the bottom; page-flip uses its separately captured stable prompt id and screen row
             let scroll_anchor =
                 if width != self.last_width && !self.follow_mode && self.scroll_offset > 0 {
                     self.capture_scroll_anchor()
@@ -1554,6 +1560,7 @@ impl ScrollbackState {
                 if let Some(target) = self.pin_reserve_target {
                     self.scroll_offset = target;
                 }
+                self.capture_pin_reserve_prompt_screen_row();
             }
             self.compute_total_height_from_cache();
             // Re-pin the anchored content to the viewport top now that virtual_y is rebuilt at the new width (before settle clamps / re-pins to it)
@@ -1580,6 +1587,7 @@ impl ScrollbackState {
             }
             self.dirty_heights.clear();
             self.gaps_may_be_dirty = false;
+            self.trace_layout_probe();
             return true;
         }
 
@@ -1607,6 +1615,7 @@ impl ScrollbackState {
                     // Streamed growth must shrink the reserve rather than inflate max_offset.
                     let content = self.total_height.saturating_sub(self.pin_reserve_pad);
                     let new_content = (content as i64 + total_delta as i64).max(0) as usize;
+                    self.rebase_pin_reserve_to_prompt();
                     self.release_pin_reserve_if_below_fold();
                     self.pin_reserve_pad = self.pin_reserve_pad_rows(new_content);
                     self.total_height = new_content.saturating_add(self.pin_reserve_pad);
@@ -1632,6 +1641,7 @@ impl ScrollbackState {
             // A scroll/content change may have brought estimated entries into view (e.g. streaming while scrolled up); measure them exactly.
             self.settle_visible_measurements(width);
             self.run_pending_warm_above(width);
+            self.trace_layout_probe();
             return !changes.is_empty();
         }
 
@@ -1648,6 +1658,7 @@ impl ScrollbackState {
         // Scroll-up (no dirty heights) reveals estimated off-screen entries; this is the on-demand measurement path for plain scrolling
         self.settle_visible_measurements(width);
         self.run_pending_warm_above(width);
+        self.trace_layout_probe();
         false
     }
 

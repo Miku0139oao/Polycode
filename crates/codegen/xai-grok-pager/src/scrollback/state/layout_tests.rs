@@ -1065,6 +1065,314 @@ fn resize_keeps_follow_mode_pinned_to_bottom() {
     );
 }
 
+const PIN_REBASE_WIDTH: u16 = 40;
+const PIN_REBASE_HEIGHT: u16 = 18;
+
+/// Exact, word-wrapped old prompts plus collapsed foldables, as in a history that
+/// has already been visited. A same-width rebuild forgets these exact heights.
+fn page_flip_rebase_fixture() -> (ScrollbackState, EntryId, EntryId) {
+    let mut state = no_vpad_no_sticky_state();
+    state.begin_batch();
+    for _ in 0..24 {
+        state.push(
+            ScrollbackEntry::new(user_block(&"abcdefghijklmnopqrst ".repeat(12)))
+                .with_display_mode(DisplayMode::Expanded),
+        );
+        state.push(
+            ScrollbackEntry::new(RenderBlock::thinking("old reasoning\nmore reasoning"))
+                .with_display_mode(DisplayMode::Collapsed),
+        );
+        state.push(
+            ScrollbackEntry::new(tool_block("old tool")).with_display_mode(DisplayMode::Collapsed),
+        );
+    }
+    // A stable, non-wrapping neighbor for the small manual-scroll anchor test.
+    state.push_block(stub_block(
+        "history row one\nhistory row two\nhistory row three",
+    ));
+    let prompt_id = state.push_block(user_block("current question"));
+    state.end_batch();
+    state.prepare_layout(PIN_REBASE_WIDTH, PIN_REBASE_HEIGHT);
+    state.measure_span_and_rebuild(0, state.len() - 1, PIN_REBASE_WIDTH);
+    assert!(
+        state
+            .entries
+            .values()
+            .any(|e| e.display_mode == DisplayMode::Collapsed && e.block.is_foldable())
+    );
+    assert!(state.get_cached_entry_height(0).unwrap() > 1);
+    assert!(measured_at(&state, 0));
+
+    let prompt_idx = state.index_of_id(prompt_id).unwrap();
+    state.follow_new_turn(Some(prompt_idx), true);
+    state.prepare_layout(PIN_REBASE_WIDTH, PIN_REBASE_HEIGHT);
+    let thinking_id = state.push(ScrollbackEntry::running(RenderBlock::thinking("")));
+    state.prepare_layout(PIN_REBASE_WIDTH, PIN_REBASE_HEIGHT);
+    assert!(state.pin_reserve_active);
+    assert!(state.follow_preserve_scroll);
+    (state, prompt_id, thinking_id)
+}
+
+fn assert_page_flip_rebase_pose(state: &ScrollbackState, prompt_id: EntryId, row: i64) {
+    assert!(state.follow_mode);
+    assert!(state.follow_preserve_scroll);
+    assert!(state.pin_reserve_active);
+    assert_eq!(state.pin_reserve_prompt_id, Some(prompt_id));
+    let idx = state.index_of_id(prompt_id).unwrap();
+    assert_eq!(screen_row_of(state, idx), row);
+    assert_eq!(state.pin_reserve_target, Some(state.scroll_offset));
+    assert_eq!(state.scroll_offset, state.max_scroll_offset());
+}
+
+fn assert_rebase_answer_visible(state: &ScrollbackState, answer_id: EntryId, width: u16) {
+    let idx = state.index_of_id(answer_id).unwrap();
+    let (window, _) = state.paint_window(
+        state.visible_entry_range(),
+        state.scroll_offset,
+        state.viewport_height as usize,
+    );
+    assert!(window.contains(&idx), "answer must enter the paint window");
+    assert!(measured_at(state, idx), "paint must use an exact height");
+    let (area, top_clipped, bottom_clipped) = state
+        .entry_screen_area(idx, Rect::new(0, 0, width, state.viewport_height))
+        .expect("answer must have a visible screen area");
+    assert!(area.height > 0);
+    assert!(
+        !top_clipped && !bottom_clipped,
+        "short answer must fit entirely"
+    );
+}
+
+#[test]
+fn page_flip_rebase_same_width_empty_thinking_removal_keeps_streamed_answer_visible() {
+    let _theme = pin_theme();
+    let (mut state, prompt_id, thinking_id) = page_flip_rebase_fixture();
+    let row = screen_row_of(&state, state.index_of_id(prompt_id).unwrap());
+    let old_pin = state.scroll_offset;
+    assert!(state.remove_entry(thinking_id));
+    assert!(
+        state.layout_cache.is_none(),
+        "removal forces the full rebuild"
+    );
+    assert!(
+        state.structural_scroll_anchor.is_none(),
+        "follow has no manual anchor"
+    );
+    state.prepare_layout(PIN_REBASE_WIDTH, PIN_REBASE_HEIGHT);
+    assert!(
+        state.scroll_offset < old_pin,
+        "fixture must shrink the historical prefix"
+    );
+    assert!(
+        !measured_at(&state, 0),
+        "offscreen history must remain lazy"
+    );
+    assert_page_flip_rebase_pose(&state, prompt_id, row);
+
+    let answer_id = state.start_streaming_agent();
+    for chunk in ["ANSWER", "_VISIBLE"] {
+        assert!(state.push_chunk_to_agent(answer_id, chunk));
+        state.prepare_layout(PIN_REBASE_WIDTH, PIN_REBASE_HEIGHT);
+        assert_page_flip_rebase_pose(&state, prompt_id, row);
+        assert_rebase_answer_visible(&state, answer_id, PIN_REBASE_WIDTH);
+    }
+    state.finish_running(answer_id);
+    state.note_pin_reserve_turn_finished();
+    state.push_block(RenderBlock::session_event(
+        crate::scrollback::blocks::SessionEvent::TurnCompleted {
+            elapsed: Some(std::time::Duration::from_secs(1)),
+        },
+    ));
+    for _ in 0..3 {
+        state.prepare_layout(PIN_REBASE_WIDTH, PIN_REBASE_HEIGHT);
+        assert_page_flip_rebase_pose(&state, prompt_id, row);
+        assert_rebase_answer_visible(&state, answer_id, PIN_REBASE_WIDTH);
+    }
+}
+
+#[test]
+fn page_flip_rebase_lazy_history_measurements_keep_the_prompt_pose() {
+    let _theme = pin_theme();
+    let (mut state, prompt_id, thinking_id) = page_flip_rebase_fixture();
+    assert!(state.remove_entry(thinking_id));
+    state.prepare_layout(PIN_REBASE_WIDTH, PIN_REBASE_HEIGHT);
+    let row = screen_row_of(&state, state.index_of_id(prompt_id).unwrap());
+    let pin = state.scroll_offset;
+    assert!(state.dirty_heights.is_empty());
+    // No dirty-height deltas: exercise estimate -> exact via the lazy measure path.
+    for idx in [0, 3, 6] {
+        assert!(!measured_at(&state, idx));
+        let before = state.scroll_offset;
+        state.measure_span_and_rebuild(idx, idx, PIN_REBASE_WIDTH);
+        assert!(
+            state.scroll_offset > before,
+            "word wrapping must change prefix height"
+        );
+        assert_page_flip_rebase_pose(&state, prompt_id, row);
+        state.prepare_layout(PIN_REBASE_WIDTH, PIN_REBASE_HEIGHT);
+        assert_page_flip_rebase_pose(&state, prompt_id, row);
+    }
+    assert!(state.scroll_offset > pin);
+    assert!(
+        !measured_at(&state, 9),
+        "do not eagerly measure all history"
+    );
+}
+
+#[test]
+fn page_flip_rebase_preserves_a_nonzero_captured_screen_row() {
+    let _theme = pin_theme();
+    for header_rows in [2, 14] {
+        let (mut state, prompt_id, thinking_id) = page_flip_rebase_fixture();
+        // Model reserved header space rather than assuming every pin is row zero.
+        // The 14-row pose brings a wrapping prior prompt into the settle window.
+        state.scroll_offset -= header_rows;
+        state.pin_reserve_target = Some(state.scroll_offset);
+        state.capture_pin_reserve_prompt_screen_row();
+        let row = screen_row_of(&state, state.index_of_id(prompt_id).unwrap());
+        assert!(row >= header_rows as i64);
+        assert!(state.remove_entry(thinking_id));
+        state.prepare_layout(PIN_REBASE_WIDTH, PIN_REBASE_HEIGHT);
+        assert_page_flip_rebase_pose(&state, prompt_id, row);
+        if header_rows == 14 {
+            let previous_prompt = state.index_of_id(prompt_id).unwrap() - 4;
+            assert!(
+                measured_at(&state, previous_prompt),
+                "settle must measure above the pin"
+            );
+        }
+        state.measure_span_and_rebuild(0, 3, PIN_REBASE_WIDTH);
+        assert_page_flip_rebase_pose(&state, prompt_id, row);
+    }
+}
+
+#[test]
+fn page_flip_rebase_manual_scroll_keeps_its_own_entry_anchor() {
+    let _theme = pin_theme();
+    let (mut state, prompt_id, thinking_id) = page_flip_rebase_fixture();
+    state.scroll_up(2);
+    assert!(!state.follow_mode);
+    assert!(
+        state.pin_reserve_active,
+        "small scroll retains reserve padding"
+    );
+    let (idx, rows_into_span) = state.viewport_top_anchor_point().unwrap();
+    let anchor_id = *state.entries.get_index(idx).unwrap().0;
+    let prompt_row = screen_row_of(&state, state.index_of_id(prompt_id).unwrap());
+    assert!(state.remove_entry(thinking_id));
+    state.prepare_layout(PIN_REBASE_WIDTH, PIN_REBASE_HEIGHT);
+    assert!(!state.follow_mode, "geometry cannot re-enable follow");
+    assert!(state.pin_reserve_active);
+    assert_eq!(state.pin_reserve_prompt_id, Some(prompt_id));
+    let (idx, rows) = state.viewport_top_anchor_point().unwrap();
+    assert_eq!(*state.entries.get_index(idx).unwrap().0, anchor_id);
+    assert_eq!(rows, rows_into_span);
+    assert_eq!(
+        screen_row_of(&state, state.index_of_id(prompt_id).unwrap()),
+        prompt_row
+    );
+    for width in [80, 30] {
+        state.prepare_layout(width, PIN_REBASE_HEIGHT);
+        assert!(!state.follow_mode);
+        let (idx, rows) = state.viewport_top_anchor_point().unwrap();
+        assert_eq!(*state.entries.get_index(idx).unwrap().0, anchor_id);
+        assert_eq!(
+            rows, rows_into_span,
+            "resize must keep the manual logical-line anchor"
+        );
+    }
+}
+
+#[test]
+fn page_flip_rebase_explicit_navigation_after_removal_wins() {
+    let _theme = pin_theme();
+    let (mut state, _, thinking_id) = page_flip_rebase_fixture();
+    state.scroll_up(2);
+    assert!(state.remove_entry(thinking_id));
+    state.goto_top();
+    state.prepare_layout(PIN_REBASE_WIDTH, PIN_REBASE_HEIGHT);
+    assert!(!state.follow_mode);
+    assert!(!state.pin_reserve_active);
+    assert_eq!(state.scroll_offset, 0);
+}
+
+#[test]
+fn page_flip_rebase_end_releases_and_page_down_does_not_rearm() {
+    let _theme = pin_theme();
+    for release_before_rebuild in [false, true] {
+        let (mut state, _, thinking_id) = page_flip_rebase_fixture();
+        assert!(state.remove_entry(thinking_id));
+        if !release_before_rebuild {
+            state.prepare_layout(PIN_REBASE_WIDTH, PIN_REBASE_HEIGHT);
+        }
+        state.goto_bottom(); // End's state operation, including the cache-missing path.
+        state.prepare_layout(PIN_REBASE_WIDTH, PIN_REBASE_HEIGHT);
+        assert!(!state.pin_reserve_active);
+        assert!(!state.follow_preserve_scroll);
+        assert_eq!(state.pin_reserve_pad, 0);
+        assert_eq!(state.scroll_offset, state.max_scroll_offset());
+        state.scroll_up(2);
+        state.page_down(); // Ordinary paging must not resurrect the captured prompt anchor.
+        state.prepare_layout(PIN_REBASE_WIDTH, PIN_REBASE_HEIGHT);
+        assert!(!state.pin_reserve_active);
+        assert!(!state.follow_preserve_scroll);
+        assert_eq!(state.pin_reserve_pad, 0);
+    }
+}
+
+#[test]
+fn page_flip_rebase_width_resize_then_lazy_measurement_keeps_same_prompt() {
+    let _theme = pin_theme();
+    let (mut state, prompt_id, thinking_id) = page_flip_rebase_fixture();
+    assert!(state.remove_entry(thinking_id));
+    state.prepare_layout(PIN_REBASE_WIDTH, PIN_REBASE_HEIGHT);
+    for width in [80, 30, PIN_REBASE_WIDTH] {
+        state.prepare_layout(width, PIN_REBASE_HEIGHT);
+        let row = screen_row_of(&state, state.index_of_id(prompt_id).unwrap());
+        assert!(row >= 0 && row < PIN_REBASE_HEIGHT as i64);
+        assert_eq!(row, state.pin_reserve_prompt_screen_row as i64);
+        assert_page_flip_rebase_pose(&state, prompt_id, row);
+        assert!(!measured_at(&state, 0));
+        state.measure_span_and_rebuild(0, 6, width);
+        state.prepare_layout(width, PIN_REBASE_HEIGHT);
+        assert_page_flip_rebase_pose(&state, prompt_id, row);
+    }
+}
+
+#[test]
+fn page_flip_rebase_never_retargets_an_interjection_after_prompt_removal() {
+    let _theme = pin_theme();
+    let (mut state, prompt_id, thinking_id) = page_flip_rebase_fixture();
+    let row = screen_row_of(&state, state.index_of_id(prompt_id).unwrap());
+    state.push_block(user_block("interjection"));
+    assert!(state.remove_entry(thinking_id));
+    state.prepare_layout(PIN_REBASE_WIDTH, PIN_REBASE_HEIGHT);
+    assert_page_flip_rebase_pose(&state, prompt_id, row);
+    assert!(state.remove_entry(prompt_id));
+    state.prepare_layout(PIN_REBASE_WIDTH, PIN_REBASE_HEIGHT);
+    assert!(!state.pin_reserve_active);
+    assert!(!state.follow_preserve_scroll);
+    assert_eq!(state.pin_reserve_prompt_id, None);
+    assert_eq!(state.pin_reserve_pad, 0);
+    assert_eq!(state.scroll_offset, state.max_scroll_offset());
+}
+
+#[test]
+fn page_flip_rebase_streaming_overflow_still_releases_to_tail() {
+    let _theme = pin_theme();
+    let (mut state, _, thinking_id) = page_flip_rebase_fixture();
+    assert!(state.remove_entry(thinking_id));
+    state.prepare_layout(PIN_REBASE_WIDTH, PIN_REBASE_HEIGHT);
+    let answer_id = state.start_streaming_agent();
+    assert!(state.push_chunk_to_agent(answer_id, &"answer line\n\n".repeat(40)));
+    state.prepare_layout(PIN_REBASE_WIDTH, PIN_REBASE_HEIGHT);
+    assert!(state.follow_mode);
+    assert!(!state.follow_preserve_scroll);
+    assert!(!state.pin_reserve_active);
+    assert_eq!(state.pin_reserve_pad, 0);
+    assert_eq!(state.scroll_offset, state.max_scroll_offset());
+}
+
 fn no_vpad_no_sticky_state() -> ScrollbackState {
     use crate::appearance::AppearanceConfig;
     let mut state = ScrollbackState::new();
