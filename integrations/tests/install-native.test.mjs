@@ -292,8 +292,10 @@ test('remote path rejects absent/FAIL/stale authorization even with AllowCandida
     f.save();
     if (scenario === 'absent') rmSync(f.authorizationPath);
     if (scenario === 'stale readiness') writeFileSync(f.readinessPath, readFileSync(f.readinessPath, 'utf8') + ' ');
-    const before = linuxReleases(), result = remoteInstaller(root, f.directory, ps, '-AllowCandidate');
-    assert.notEqual(result.status, 0, scenario); assert.match(result.stderr, /authorization/); assertNoRelease(root); assert.deepEqual(linuxReleases(), before);
+    for (const runtime of ['powershell.exe', 'pwsh.exe']) {
+      const before = linuxReleases(), result = remoteInstaller(root, f.directory, runtime, '-AllowCandidate');
+      assert.notEqual(result.status, 0, scenario); assert.match(result.stderr, /authorization/); assertNoRelease(root); assert.deepEqual(linuxReleases(), before);
+    }
   }
 });
 
@@ -306,8 +308,10 @@ test('remote authorization cannot hide missing/FAIL/new gates or an old policy',
     if (scenario === 'old policy') f.readiness.policyVersion = 'old';
     if (scenario === 'BLOCKED readiness') f.readiness.status = 'BLOCKED';
     f.save();
-    const before = linuxReleases(), result = remoteInstaller(root, f.directory);
-    assert.notEqual(result.status, 0); assert.match(result.stderr, /acceptance/); assertNoRelease(root); assert.deepEqual(linuxReleases(), before);
+    for (const runtime of ['powershell.exe', 'pwsh.exe']) {
+      const before = linuxReleases(), result = remoteInstaller(root, f.directory, runtime);
+      assert.notEqual(result.status, 0); assert.match(result.stderr, /acceptance/); assertNoRelease(root); assert.deepEqual(linuxReleases(), before);
+    }
   }
 });
 
@@ -316,9 +320,36 @@ test('post-acceptance asset mutations are rejected even if transport sums and th
   const path = join(f.directory, 'polycode-wsl-x64.gz');
   writeFileSync(path, Buffer.concat([readFileSync(path), Buffer.from('not accepted bytes')]));
   checksum(f.directory); f.authorization.checksumsSha256 = sha(readFileSync(join(f.directory, 'SHA256SUMS'))); f.save();
-  const before = linuxReleases(), result = remoteInstaller(root, f.directory);
-  assert.notEqual(result.status, 0); assert.match(result.stderr, /Authorized asset bytes changed/);
-  assertNoRelease(root); assert.deepEqual(linuxReleases(), before);
+  for (const runtime of ['powershell.exe', 'pwsh.exe']) {
+    const before = linuxReleases(), result = remoteInstaller(root, f.directory, runtime);
+    assert.notEqual(result.status, 0); assert.match(result.stderr, /Authorized asset bytes changed/);
+    assertNoRelease(root); assert.deepEqual(linuxReleases(), before);
+  }
+});
+
+test('remote production branch rejects collection/null/object authorization bypasses on PS5.1/7', () => {
+  // Reuse accepted fixture bytes; only synthetic sidecars change. The exhaustive
+  // all-field shape/container/numeric matrix lives in install-authorization.test.
+  const f = authorizedFixture('remote JSON shape matrix'), acceptedBefore = snapshot(assets), beforeLinux = linuxReleases();
+  let count = 0;
+  for (const runtime of ['powershell.exe', 'pwsh.exe']) for (const field of ['decision', 'readinessSha256', 'readiness status', 'gate status']) {
+    const original = field === 'decision' ? 'AUTHORIZED' : field === 'readinessSha256' ? f.authorization.readinessSha256 : 'PASS';
+    for (const value of [[], [original], [original, original], {}, null]) {
+      const ready = structuredClone(f.readiness), auth = structuredClone(f.authorization);
+      if (field === 'readiness status') ready.status = value;
+      if (field === 'gate status') ready.gates[0].status = value;
+      writeFileSync(f.readinessPath, JSON.stringify(ready)); auth.readinessSha256 = sha(readFileSync(f.readinessPath));
+      if (field === 'decision' || field === 'readinessSha256') auth[field] = value;
+      writeFileSync(f.authorizationPath, JSON.stringify(auth));
+      const root = join(temp, 'remote JSON rejection ' + count++), result = remoteInstaller(root, f.directory, runtime, '-AllowCandidate');
+      assert.notEqual(result.status, 0, `${runtime} ${field} ${JSON.stringify(value)}`);
+      assert.match(result.stderr, /Invalid JSON shape/); assertNoRelease(root);
+    }
+  }
+  assert.deepEqual(linuxReleases(), beforeLinux);
+  assert.deepEqual(snapshot(assets), acceptedBefore);
+  for (const name of readdirSync(assets)) assert.deepEqual(readFileSync(join(f.directory, name)), readFileSync(join(assets, name)), name);
+  console.log(`${count} production remote JSON-shape rejections PASS on PS5.1/7; accepted fixture bytes unchanged`);
 });
 
 test('matching fixture authorization installs exact accepted bytes on PS5.1/7 without repack or reclassification', () => {

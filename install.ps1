@@ -57,9 +57,149 @@ function Get-Sha256([string]$Path) {
     try { return [BitConverter]::ToString($hash.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
     finally { $hash.Dispose(); $stream.Dispose() }
 }
+# Do not coerce untrusted JSON values or pipe them through an enumerating helper.
+# PowerShell comparisons FILTER a collection on the left; [] can otherwise make
+# a rejection condition false, and ["PASS"] can masquerade as a scalar.
+function Assert-JsonObject($Value, [string]$Name) {
+    if ($Value -isnot [PSCustomObject]) { throw "Invalid JSON shape: $Name must be an object." }
+}
+function Assert-JsonArray($Value, [string]$Name) {
+    if ($Value -isnot [array]) { throw "Invalid JSON shape: $Name must be an array." }
+}
+function Assert-JsonString($Value, [string]$Name) {
+    if ($Value -isnot [string]) { throw "Invalid JSON shape: $Name must be a string." }
+}
+function Assert-JsonBoolean($Value, [string]$Name) {
+    if ($Value -isnot [bool]) { throw "Invalid JSON shape: $Name must be a boolean." }
+}
+function Assert-JsonInteger($Value, [string]$Name, [long]$Minimum = 0, [long]$Maximum = [long]::MaxValue) {
+    # ConvertFrom-Json uses Int32/Int64 for JSON integers on both PS5.1 and PS7.
+    # Reject null, bool, strings, floating point, huge integers and collections
+    # BEFORE numeric comparisons (no truncation or implicit numeric conversion).
+    if ($Value -isnot [int] -and $Value -isnot [long]) { throw "Invalid JSON shape: $Name must be an integer." }
+    if ($Value -lt $Minimum -or $Value -gt $Maximum) { throw "Invalid JSON shape: $Name is outside its integer range." }
+}
+function Assert-JsonHash($Value, [string]$Name) {
+    Assert-JsonString $Value $Name
+    if ($Value -cnotmatch '^[a-f0-9]{64}\z') { throw "Invalid JSON shape: $Name must be a lowercase SHA256 string." }
+}
+function Convert-JsonToken($Token, [ref]$Result) {
+    # Used only for PS7 before -DateKind existed. Newtonsoft ships with PS7.
+    # A ref result preserves [] / [one] / nested arrays without pipeline unroll.
+    switch ($Token.get_Type().ToString()) {
+        'Object' {
+            $object = [ordered]@{}
+            foreach ($property in $Token.Properties()) {
+                if ($object.Contains($property.Name)) { throw 'Invalid JSON shape: duplicate object property.' }
+                $value = $null; Convert-JsonToken $property.Value ([ref]$value)
+                $object[$property.Name] = $value
+            }
+            $Result.Value = [PSCustomObject]$object
+        }
+        'Array' {
+            $array = [object[]]::new($Token.Count)
+            for ($i = 0; $i -lt $Token.Count; $i++) {
+                $value = $null; Convert-JsonToken $Token[$i] ([ref]$value)
+                $array[$i] = $value
+            }
+            $Result.Value = $array
+        }
+        { $_ -in @('String', 'Integer', 'Float', 'Boolean', 'Null') } { $Result.Value = $Token.Value }
+        default { throw 'Invalid JSON shape: unsupported JSON token.' }
+    }
+}
+function Convert-JsonWithoutDateCoercion([string]$Text) {
+    $inputText = New-Object IO.StringReader($Text)
+    $reader = New-Object Newtonsoft.Json.JsonTextReader($inputText)
+    try {
+        $reader.DateParseHandling = 'None'; $reader.MaxDepth = 128
+        $token = [Newtonsoft.Json.Linq.JToken]::ReadFrom($reader)
+        if ($reader.Read()) { throw 'Invalid JSON shape: trailing JSON content.' }
+        $document = $null; Convert-JsonToken $token ([ref]$document)
+        Assert-JsonObject $document 'document'
+        return $document
+    } finally { $reader.Close(); $inputText.Dispose() }
+}
+function Read-JsonObject([string]$Path) {
+    $text = Get-Content -LiteralPath $Path -Raw
+    # PS5.1 lacks -NoEnumerate: reject a root array BEFORE ConvertFrom-Json can
+    # unwrap a singleton (or discard an empty array). Nested properties are kept
+    # as-is and checked directly, never returned through an enumerating pipeline.
+    if ($text -isnot [string] -or $text -cnotmatch '^\s*\{') { throw "Invalid JSON shape: $Path must contain a root object." }
+    # PS7 otherwise turns ISO JSON strings into DateTime values. Keep the actual
+    # serialized string type, including on PS7 versions predating -DateKind.
+    if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) {
+        $document = ConvertFrom-Json -InputObject $text -DateKind String
+    } elseif ($PSVersionTable.PSVersion.Major -ge 7) {
+        $document = Convert-JsonWithoutDateCoercion $text
+    } else { $document = ConvertFrom-Json -InputObject $text }
+    Assert-JsonObject $document $Path
+    return $document
+}
+function Assert-CandidateManifest($Manifest, [bool]$Outer) {
+    Assert-JsonObject $Manifest 'manifest'
+    Assert-JsonInteger $Manifest.schemaVersion 'manifest.schemaVersion' 1 2
+    foreach ($field in @('version', 'architecture', 'minimumGlibc', 'protocol', 'provenance')) { Assert-JsonString $Manifest.$field "manifest.$field" }
+    if ($Manifest.schemaVersion -eq 2) { Assert-JsonString $Manifest.classification 'manifest.classification' }
+    else { Assert-JsonString $Manifest.status 'manifest.status' }
+    foreach ($field in @('classification', 'status')) {
+        if ($Manifest.PSObject.Properties.Name -contains $field) { Assert-JsonString $Manifest.$field "manifest.$field" }
+    }
+    foreach ($name in @('native', 'bun')) {
+        $executable = $Manifest.$name
+        Assert-JsonObject $executable "manifest.$name"
+        Assert-JsonHash $executable.sha256 "manifest.$name.sha256"
+        Assert-JsonInteger $executable.bytes "manifest.$name.bytes" 1
+    }
+    Assert-JsonString $Manifest.bun.version 'manifest.bun.version'
+    Assert-JsonBoolean $Manifest.native.transformed 'manifest.native.transformed'
+    # The packager deliberately emits profile:null for fixture-unattested local
+    # preparation. Build-report candidates must have the actual profile object.
+    if ($Manifest.provenance -ceq 'build-report' -or $null -ne $Manifest.native.profile) {
+        $profile = $Manifest.native.profile
+        Assert-JsonObject $profile 'manifest.native.profile'
+        if ($profile.opt_level -is [string]) {
+            if ($profile.opt_level -cnotmatch '^[0-3sz]\z') { throw 'Invalid JSON shape: manifest.native.profile.opt_level is not a Rust optimization level.' }
+        } else { Assert-JsonInteger $profile.opt_level 'manifest.native.profile.opt_level' 0 3 }
+        Assert-JsonBoolean $profile.debug_assertions 'manifest.native.profile.debug_assertions'
+        Assert-JsonBoolean $profile.test 'manifest.native.profile.test'
+    }
+    if ($Outer) {
+        foreach ($name in @('files', 'artifacts')) {
+            Assert-JsonArray $Manifest.$name "manifest.$name"
+            foreach ($entry in $Manifest.$name) {
+                Assert-JsonObject $entry "manifest.$name entry"
+                Assert-JsonString $entry.path "manifest.$name.path"
+                Assert-JsonHash $entry.sha256 "manifest.$name.sha256"
+                Assert-JsonInteger $entry.bytes "manifest.$name.bytes" 0
+            }
+        }
+    }
+}
 function Assert-DistributionAuthorization($Manifest, [string]$CandidateHash) {
-    $authorization = Get-Content -LiteralPath (Join-Path $temp 'release-authorization.json') -Raw | ConvertFrom-Json
-    $ready = Get-Content -LiteralPath (Join-Path $temp 'release-readiness.json') -Raw | ConvertFrom-Json
+    $authorization = Read-JsonObject (Join-Path $temp 'release-authorization.json')
+    $ready = Read-JsonObject (Join-Path $temp 'release-readiness.json')
+    # Validate the entire consumed shape first, including nested objects/arrays;
+    # only then perform authorization, readiness, gate or manifest comparisons.
+    Assert-CandidateManifest $Manifest $true
+    Assert-JsonInteger $authorization.schemaVersion 'authorization.schemaVersion' 1 2
+    foreach ($field in @('kind', 'decision', 'scope', 'version')) { Assert-JsonString $authorization.$field "authorization.$field" }
+    foreach ($field in @('candidateSha256', 'nativeSha256', 'checksumsSha256', 'readinessSha256', 'acceptanceSha256', 'parentAttestationSha256')) { Assert-JsonHash $authorization.$field "authorization.$field" }
+    Assert-JsonObject $authorization.parent 'authorization.parent'
+    foreach ($field in @('role', 'reviewer', 'authorizedAt')) { Assert-JsonString $authorization.parent.$field "authorization.parent.$field" }
+    Assert-JsonInteger $ready.schemaVersion 'readiness.schemaVersion' 1 2
+    foreach ($field in @('kind', 'policyVersion', 'status', 'publicUrlGate', 'checkedAt')) { Assert-JsonString $ready.$field "readiness.$field" }
+    foreach ($field in @('candidateSha256', 'nativeSha256', 'acceptanceSha256', 'parentAttestationSha256')) { Assert-JsonHash $ready.$field "readiness.$field" }
+    Assert-JsonBoolean $ready.publicationAuthorized 'readiness.publicationAuthorized'
+    Assert-JsonArray $ready.errors 'readiness.errors'
+    foreach ($message in $ready.errors) { Assert-JsonString $message 'readiness.errors entry' }
+    Assert-JsonArray $ready.gates 'readiness.gates'
+    foreach ($gate in $ready.gates) {
+        Assert-JsonObject $gate 'readiness.gates entry'
+        Assert-JsonString $gate.id 'readiness.gates.id'
+        Assert-JsonString $gate.status 'readiness.gates.status'
+        Assert-JsonBoolean $gate.verified 'readiness.gates.verified'
+    }
     if ($Manifest.schemaVersion -ne 2 -or $Manifest.classification -cne 'immutable-candidate' -or $Manifest.PSObject.Properties.Name -contains 'status' -or $Manifest.provenance -cne 'build-report') { throw 'Remote installation requires a provenance-attested immutable candidate; legacy or relabeled manifests cannot be promoted.' }
     if ($authorization.schemaVersion -ne 1 -or $authorization.kind -cne 'polycode-distribution-authorization' -or $authorization.decision -cne 'AUTHORIZED' -or $authorization.scope -cne 'public-distribution' -or
         $authorization.parent.role -cne 'parent' -or [string]::IsNullOrWhiteSpace($authorization.parent.reviewer) -or $authorization.version -cne $Version -or
@@ -188,13 +328,18 @@ try {
     }
     $runtimeStage = Join-Path $temp 'runtime'
     Expand-SafeZip (Join-Path $temp 'polycode-runtime.zip') $runtimeStage
-    $manifest = Get-Content -LiteralPath (Join-Path $runtimeStage 'release-manifest.json') -Raw | ConvertFrom-Json
+    $manifest = Read-JsonObject (Join-Path $runtimeStage 'release-manifest.json')
+    $outer = Read-JsonObject (Join-Path $temp 'manifest.json')
+    Assert-CandidateManifest $manifest $false
+    Assert-CandidateManifest $outer $true
     if ($manifest.version -ne $Version -or $manifest.architecture -ne 'x86_64' -or $manifest.minimumGlibc -ne '2.43' -or $manifest.protocol -ne 'native-model-bridge') { throw 'Runtime release manifest does not match the requested native release.' }
-    $outer = Get-Content -LiteralPath (Join-Path $temp 'manifest.json') -Raw | ConvertFrom-Json
     $immutable = $manifest.schemaVersion -eq 2 -and $manifest.classification -ceq 'immutable-candidate' -and $manifest.PSObject.Properties.Name -notcontains 'status'
     $legacyLocal = $ArtifactDirectory -and $manifest.schemaVersion -eq 1 -and $manifest.status -ceq 'unpublished-candidate'
     if (-not $immutable -and -not $legacyLocal) { throw 'Unknown or relabeled candidate classification.' }
-    if ($outer.schemaVersion -ne $manifest.schemaVersion -or $outer.classification -cne $manifest.classification -or $outer.status -cne $manifest.status -or $outer.native.sha256 -cne $manifest.native.sha256 -or $outer.bun.sha256 -cne $manifest.bun.sha256) { throw 'Candidate manifest identity mismatch.' }
+    if ($outer.schemaVersion -ne $manifest.schemaVersion -or
+        ($manifest.schemaVersion -eq 2 -and ($outer.classification -cne $manifest.classification -or $outer.PSObject.Properties.Name -contains 'status')) -or
+        ($manifest.schemaVersion -eq 1 -and $outer.status -cne $manifest.status) -or
+        $outer.native.sha256 -cne $manifest.native.sha256 -or $outer.bun.sha256 -cne $manifest.bun.sha256) { throw 'Candidate manifest identity mismatch.' }
     if ($ArtifactDirectory) {
         if (-not $AllowCandidate) { throw 'Local candidate requires explicit -AllowCandidate. Sidecars cannot bypass local opt-in; no release/live acceptance is implied.' }
         Write-Warning 'LOCAL CANDIDATE PREFLIGHT: publication and OAuth/live acceptance are not implied.'

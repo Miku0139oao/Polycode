@@ -1,5 +1,7 @@
 # c037 followup: required gates + immutable promotion
 
+Latest installer security correction: see [d92 JSON shape followup](#d92-json-shape-followup) below. The original 30-test record is historical.
+
 Scope: `acceptance/package-ready`, same owned worktree. No Rust/bridge edits,
 publication, remote activity, push/tag, real parent authorization or rebuild /
 recompression of the 552923744-byte application was performed.
@@ -127,3 +129,87 @@ Changed files: `README.md`, `install.ps1`, `integrations/package-release.ps1`,
 `integrations/release-readiness.mjs`, `integrations/RELEASE_READINESS.md`,
 `integrations/PACKAGE_CANDIDATE_REPORT.md`, this report, and installer-specific
 `install-native.test.mjs`, `release-readiness.test.mjs`, `install-candidate.mjs`.
+
+## d92 JSON shape followup
+
+Independent review confirmed that PowerShell `-cne`/`-ne` with a collection on
+its left filters that collection instead of returning a scalar Boolean. Empty
+arrays could bypass AUTHORIZED/PASS and hash rejection tests. This is fixed in
+`install.ps1` by validating every consumed manifest/authorization/readiness field
+before its value comparisons, not by changing an operator or coercing to string.
+
+- Root JSON arrays are rejected before `ConvertFrom-Json` can unwrap a singleton.
+  Objects, inventory/gate/error arrays, and each nested entry have explicit shape
+  checks. Required strings/hashes are actual strings, booleans actual booleans.
+- Schema numbers are Int32/Int64 integers in 1..2; executable sizes are positive
+  Int64-range integers; inventory sizes allow zero. Null, arrays, objects,
+  numeric strings, booleans, fractions, floating-point spellings and overflowing
+  integers cannot substitute. Enum/schema/hash/value checks still follow.
+- Rust `opt_level` retains actual serialized strings `0`..`3`/`s`/`z` and integer
+  0..3. Development levels remain local-only; remote requires 2/3/s/z and false
+  debug/test/transformed flags. Unattested local fixtures may retain profile:null.
+  Historical schema1 stays local-only and still requires `-AllowCandidate`.
+- PS7's automatic timestamp-to-DateTime conversion is suppressed with
+  `-DateKind String`. For pre-DateKind PS7, the in-box Newtonsoft reader disables
+  date coercion and transfers tokens through ref outputs, preserving nested,
+  empty and singleton arrays. PS5.1 keeps its original string-preserving parser.
+  No external JSON library, download or install is needed.
+
+### Final verification (exit 0)
+
+Run from `D:/ai-harness/polycode-accept-package`:
+
+```text
+node --test integrations/tests/install-authorization.test.mjs integrations/tests/install-native.test.mjs integrations/tests/release-readiness.test.mjs > integrations/tests/installer-authorization-full-results.log 2>&1
+git diff --check
+```
+
+**34 tests PASS, 0 FAIL, 0 SKIP**, including:
+
+- **780 shape/control cases each** on PS5.1.26100.9168 and PS7.6.5, plus the same
+  780 through the pre-DateKind parser branch forced on installed PS7. Production
+  function bodies/policy are AST-checked against the source and run unchanged.
+  Real older PS7 executables were not available/run; this is branch coverage,
+  not a claim of testing every historical shell version.
+- Empty/singleton/multi arrays, objects, null, missing fields, wrong primitive
+  types, nested/root containers, integer bounds/spellings and all consumed hash
+  fields. Valid profile/schema controls plus FAIL, stale, duplicate/missing gates
+  and readiness-byte hash mutation controls remain exercised.
+- **40 full production remote-branch rejections** for decision, readiness status,
+  gate status and readinessSha256 shape attacks across PS5.1/7. Local transport
+  only replaces `Invoke-WebRequest` with strict URL-checked copies; no HTTP call.
+- Existing FAIL/stale/timeline/policy/post-acceptance-gzip mutation controls now
+  run on both shells. Valid synthetic authorization still installs the **exact
+  same six accepted fixture files**, native/Bun bytes and runtime inventory on
+  both shells in isolated Windows/WSL roots. Sidecars stay separate; local opt-in
+  cannot be bypassed. Existing Windows user installation and user PATH snapshots
+  match after the suite; WSL writes are confined to disposable `/tmp` test roots.
+
+Additional commands executed: `node --test integrations/tests/install-authorization.test.mjs`
+(targeted matrix), shell version probes, and a read-only Node checksum/inventory
+check against the historical schema1 candidate. Retained local logs (ignored by
+Git, under this worktree):
+
+- `integrations/tests/installer-authorization-full-results.log` — final 34/0/0 run.
+- `integrations/tests/install-authorization-results.log` — final targeted 3/0/0 run.
+- `integrations/tests/historical-candidate-unchanged.log` — all five sums match,
+  exactly six original files/no sidecars; manifest SHA256 still
+  `7819c5c7cffede5fd4524a3444c1acf74553dfa976c6a471912a1b526fe32e76`.
+
+### Scope and remaining release risks
+
+Only `install.ps1`, `integrations/tests/install-authorization.test.mjs`,
+`integrations/tests/install-native.test.mjs` and this report change in this
+security followup. `release-readiness.mjs` and `package-release.ps1` were fully
+reviewed but remain unchanged; this is not a general hardening pass over the
+local evidence producer/build-report reader. No root-main/other-worktree edits,
+Rust build, real-candidate recompression/overwrite, network, agent, publication,
+push or tag occurred. Only the existing small C test fixture is compiled.
+
+The old schema1/e8 preparation is untouched and not made promotable. This new
+installer changes candidate identity: final source integration needs a **fresh**
+package and real candidate-bound acceptance; no existing accepted package may be
+patched/rehashed into approval. These synthetic tests confer no vendor/live
+acceptance or publishing permission. All actual shipping gates and final review
+remain parent-owned. The trusted publisher/HTTPS boundary remains intentional,
+not a cryptographic signature or protection against a compromised publisher.
