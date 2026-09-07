@@ -567,51 +567,61 @@ impl SessionActor {
         self: &Arc<Self>,
         user_context: Option<String>,
     ) -> Result<(), acp::Error> {
-        let (_cancel, _cancel_scope) = self.compaction.cancel.enter();
-        self.record_compaction_variant();
-        let total_tokens = self.chat_state_handle.get_total_tokens().await;
-        tracing::Span::current().record("pre_tokens", total_tokens as i64);
-        let sampling_config = self.chat_state_handle.get_sampling_config().await;
-        let context_window = sampling_config
-            .as_ref()
-            .map(|c| c.context_window.get())
-            .unwrap_or(DEFAULT_CONTEXT_WINDOW);
-        self.maybe_pre_compaction_flush(total_tokens, context_window, "pre_compaction")
-            .await;
-        if let Err(e) = self
-            .run_compact_inner(
-                user_context,
-                None,
-                xai_grok_telemetry::events::CompactionTrigger::Manual,
-                false,
-            )
-            .await
-        {
+        self.run_compact_boxed(user_context).await
+    }
+
+    // Keep the instrumented wrapper small while constructing its body on the heap.
+    fn run_compact_boxed(
+        self: &Arc<Self>,
+        user_context: Option<String>,
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<(), acp::Error>> + '_>> {
+        Box::pin(async move {
+            let (_cancel, _cancel_scope) = self.compaction.cancel.enter();
+            self.record_compaction_variant();
+            let total_tokens = self.chat_state_handle.get_total_tokens().await;
+            tracing::Span::current().record("pre_tokens", total_tokens as i64);
+            let sampling_config = self.chat_state_handle.get_sampling_config().await;
+            let context_window = sampling_config
+                .as_ref()
+                .map(|c| c.context_window.get())
+                .unwrap_or(DEFAULT_CONTEXT_WINDOW);
+            self.maybe_pre_compaction_flush(total_tokens, context_window, "pre_compaction")
+                .await;
+            if let Err(e) = self
+                .run_compact_inner(
+                    user_context,
+                    None,
+                    xai_grok_telemetry::events::CompactionTrigger::Manual,
+                    false,
+                )
+                .await
+            {
+                let span = tracing::Span::current();
+                span.record("success", false);
+                span.record("error", e.to_string().as_str());
+                let kind = crate::session::helpers::session_compact::compact_error_kind(&e)
+                    .unwrap_or(crate::session::helpers::session_compact::CompactErrorKind::Failed);
+                let detail =
+                    Self::user_facing_compact_error(&crate::sampling::error::acp_error_message(&e));
+                return Err(e.data(
+                    crate::session::helpers::session_compact::compact_error_data(kind, &detail),
+                ));
+            }
+            use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
+            let tokens_after = self.chat_state_handle.get_total_tokens().await;
             let span = tracing::Span::current();
-            span.record("success", false);
-            span.record("error", e.to_string().as_str());
-            let kind = crate::session::helpers::session_compact::compact_error_kind(&e)
-                .unwrap_or(crate::session::helpers::session_compact::CompactErrorKind::Failed);
-            let detail =
-                Self::user_facing_compact_error(&crate::sampling::error::acp_error_message(&e));
-            return Err(e.data(
-                crate::session::helpers::session_compact::compact_error_data(kind, &detail),
-            ));
-        }
-        use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
-        let tokens_after = self.chat_state_handle.get_total_tokens().await;
-        let span = tracing::Span::current();
-        span.record("post_tokens", tokens_after as i64);
-        span.record("success", true);
-        self.send_xai_notification(XaiSessionUpdate::AutoCompactCompleted {
-            tokens_before: Some(total_tokens),
-            tokens_after,
-            elapsed_ms: None,
-            summary_preview: None,
+            span.record("post_tokens", tokens_after as i64);
+            span.record("success", true);
+            self.send_xai_notification(XaiSessionUpdate::AutoCompactCompleted {
+                tokens_before: Some(total_tokens),
+                tokens_after,
+                elapsed_ms: None,
+                summary_preview: None,
+            })
+            .await;
+            self.emit_status_snapshot_detached();
+            Ok(())
         })
-        .await;
-        self.emit_status_snapshot_detached();
-        Ok(())
     }
     async fn emit_compact_cancelled(&self, auto_trigger: bool) -> Result<(), acp::Error> {
         if auto_trigger {
@@ -898,316 +908,330 @@ impl SessionActor {
         trigger: xai_grok_telemetry::events::CompactionTrigger,
         lossy_input: bool,
     ) -> Result<(), acp::Error> {
-        let (cancel, _cancel_scope) = self.compaction.cancel.enter();
-        let tokens_before = self.chat_state_handle.get_total_tokens().await;
-        tracing::Span::current().record("compaction_tokens_before", tokens_before as i64);
-        self.signals_handle().record_compaction(tokens_before);
-        let trigger_str = match trigger {
-            xai_grok_telemetry::events::CompactionTrigger::Manual => "manual",
-            xai_grok_telemetry::events::CompactionTrigger::Auto => "auto",
-        };
-        let sampling_config = self.chat_state_handle.get_sampling_config().await;
-        let context_window = sampling_config
-            .as_ref()
-            .map(|c| c.context_window.get())
-            .unwrap_or(DEFAULT_CONTEXT_WINDOW);
-        {
-            let span = tracing::Span::current();
-            let trigger_pct = if context_window == 0 {
-                0
-            } else {
-                ((tokens_before as f64 / context_window as f64) * 100.0).round() as i64
+        self.run_compact_inner_boxed(user_context, auto_continue, trigger, lossy_input)
+            .await
+    }
+
+    fn run_compact_inner_boxed(
+        &self,
+        user_context: Option<String>,
+        auto_continue: Option<crate::extensions::notification::AutoContinueInfo>,
+        trigger: xai_grok_telemetry::events::CompactionTrigger,
+        lossy_input: bool,
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<(), acp::Error>> + '_>> {
+        Box::pin(async move {
+            let (cancel, _cancel_scope) = self.compaction.cancel.enter();
+            let tokens_before = self.chat_state_handle.get_total_tokens().await;
+            tracing::Span::current().record("compaction_tokens_before", tokens_before as i64);
+            self.signals_handle().record_compaction(tokens_before);
+            let trigger_str = match trigger {
+                xai_grok_telemetry::events::CompactionTrigger::Manual => "manual",
+                xai_grok_telemetry::events::CompactionTrigger::Auto => "auto",
             };
-            span.record("compaction_trigger_pct", trigger_pct);
-            span.record(
-                "compaction_threshold_pct",
-                self.compaction.threshold_percent.get() as i64,
-            );
-            span.record("compaction_trigger", trigger_str);
-        }
-        let summary_strips_reasoning = sampling_config
-            .as_ref()
-            .map(|c| c.api_backend == ApiBackend::Messages)
-            .unwrap_or(false);
-        let model_id = sampling_config.map(|c| c.model).unwrap_or_default();
-        let compaction = xai_grok_telemetry::events::CompactionScope::begin(
-            xai_grok_telemetry::events::CompactionBeginParams {
-                trigger,
-                tokens_used: tokens_before,
-                context_window,
-                model_id: model_id.clone(),
-                user_context_provided: user_context.is_some(),
-                compaction_mode: match self.compaction.compaction_mode {
-                    xai_chat_state::CompactionMode::Summary => {
-                        xai_grok_telemetry::events::CompactionModeLabel::Summary
-                    }
-                    xai_chat_state::CompactionMode::Transcript => {
-                        xai_grok_telemetry::events::CompactionModeLabel::Transcript
-                    }
-                    xai_chat_state::CompactionMode::Segments(_) => {
-                        xai_grok_telemetry::events::CompactionModeLabel::Segments
-                    }
+            let sampling_config = self.chat_state_handle.get_sampling_config().await;
+            let context_window = sampling_config
+                .as_ref()
+                .map(|c| c.context_window.get())
+                .unwrap_or(DEFAULT_CONTEXT_WINDOW);
+            {
+                let span = tracing::Span::current();
+                let trigger_pct = if context_window == 0 {
+                    0
+                } else {
+                    ((tokens_before as f64 / context_window as f64) * 100.0).round() as i64
+                };
+                span.record("compaction_trigger_pct", trigger_pct);
+                span.record(
+                    "compaction_threshold_pct",
+                    self.compaction.threshold_percent.get() as i64,
+                );
+                span.record("compaction_trigger", trigger_str);
+            }
+            let summary_strips_reasoning = sampling_config
+                .as_ref()
+                .map(|c| c.api_backend == ApiBackend::Messages)
+                .unwrap_or(false);
+            let model_id = sampling_config.map(|c| c.model).unwrap_or_default();
+            let compaction = xai_grok_telemetry::events::CompactionScope::begin(
+                xai_grok_telemetry::events::CompactionBeginParams {
+                    trigger,
+                    tokens_used: tokens_before,
+                    context_window,
+                    model_id: model_id.clone(),
+                    user_context_provided: user_context.is_some(),
+                    compaction_mode: match self.compaction.compaction_mode {
+                        xai_chat_state::CompactionMode::Summary => {
+                            xai_grok_telemetry::events::CompactionModeLabel::Summary
+                        }
+                        xai_chat_state::CompactionMode::Transcript => {
+                            xai_grok_telemetry::events::CompactionModeLabel::Transcript
+                        }
+                        xai_chat_state::CompactionMode::Segments(_) => {
+                            xai_grok_telemetry::events::CompactionModeLabel::Segments
+                        }
+                    },
+                    two_pass_enabled: self.two_pass_active(),
+                    is_subagent: self.startup_hints.is_subagent,
                 },
-                two_pass_enabled: self.two_pass_active(),
-                is_subagent: self.startup_hints.is_subagent,
-            },
-        );
-        let compact_source = trigger_str;
-        self.dispatch_hook(
-            xai_grok_hooks::event::HookEventName::PreCompact,
-            xai_grok_hooks::event::HookPayload::PreCompact {
-                source: compact_source.into(),
-            },
-            None,
-            None,
-        )
-        .await;
-        let max_retries = 3u32;
-        let retry_delay_secs = 3u64;
-        let (conv_len, system_message, full_conversation) = tokio::join!(
-            self.chat_state_handle.get_conversation_len(),
-            self.chat_state_handle.get_system_message(),
-            self.chat_state_handle.get_conversation(),
-        );
-        let assembly_start = std::time::Instant::now();
-        let segment_messages = if self.compaction.compaction_mode.writes_segments() {
-            xai_chat_state::compaction_utils::prepare_conversation_for_segment(
-                full_conversation.clone(),
-            )
-        } else {
-            Vec::new()
-        };
-        const SUMMARY_BUDGET_RESERVE_TOKENS: u64 = 32_768;
-        let verbatim_input_enabled = self.compaction.verbatim_input && !lossy_input;
-        let mut simplified_messages = if verbatim_input_enabled {
-            xai_chat_state::compaction_utils::prepare_conversation_for_verbatim_summarization(
-                full_conversation,
-                summary_strips_reasoning,
-            )
-        } else {
-            xai_chat_state::compaction_utils::prepare_conversation_for_summarization(
-                full_conversation,
-            )
-        };
-        let pre_compaction_ms = assembly_start.elapsed().as_millis() as u64;
-        if conv_len == 0 {
-            tracing::error!(
-                session_id = %self.session_info.id.0,
-                "Compaction failed: conversation is empty (ChatStateActor may have died)"
             );
-            return Err(acp::Error::internal_error().data(format!(
-                "{COMPACTION_FAILED_GUARD_PREFIX}conversation is empty"
-            )));
-        }
-        let system_message = match system_message {
-            Some(msg) => msg,
-            None => {
+            let compact_source = trigger_str;
+            self.dispatch_hook(
+                xai_grok_hooks::event::HookEventName::PreCompact,
+                xai_grok_hooks::event::HookPayload::PreCompact {
+                    source: compact_source.into(),
+                },
+                None,
+                None,
+            )
+            .await;
+            let max_retries = 3u32;
+            let retry_delay_secs = 3u64;
+            let (conv_len, system_message, full_conversation) = tokio::join!(
+                self.chat_state_handle.get_conversation_len(),
+                self.chat_state_handle.get_system_message(),
+                self.chat_state_handle.get_conversation(),
+            );
+            let assembly_start = std::time::Instant::now();
+            let segment_messages = if self.compaction.compaction_mode.writes_segments() {
+                xai_chat_state::compaction_utils::prepare_conversation_for_segment(
+                    full_conversation.clone(),
+                )
+            } else {
+                Vec::new()
+            };
+            const SUMMARY_BUDGET_RESERVE_TOKENS: u64 = 32_768;
+            let verbatim_input_enabled = self.compaction.verbatim_input && !lossy_input;
+            let mut simplified_messages = if verbatim_input_enabled {
+                xai_chat_state::compaction_utils::prepare_conversation_for_verbatim_summarization(
+                    full_conversation,
+                    summary_strips_reasoning,
+                )
+            } else {
+                xai_chat_state::compaction_utils::prepare_conversation_for_summarization(
+                    full_conversation,
+                )
+            };
+            let pre_compaction_ms = assembly_start.elapsed().as_millis() as u64;
+            if conv_len == 0 {
+                tracing::error!(
+                    session_id = %self.session_info.id.0,
+                    "Compaction failed: conversation is empty (ChatStateActor may have died)"
+                );
+                return Err(acp::Error::internal_error().data(format!(
+                    "{COMPACTION_FAILED_GUARD_PREFIX}conversation is empty"
+                )));
+            }
+            let system_message = match system_message {
+                Some(msg) => msg,
+                None => {
+                    tracing::error!(
+                        session_id = %self.session_info.id.0,
+                        conversation_len = conv_len,
+                        "Compaction failed: no system message in conversation history"
+                    );
+                    return Err(acp::Error::internal_error().data(format!(
+                        "{COMPACTION_FAILED_GUARD_PREFIX}no system message in conversation history"
+                    )));
+                }
+            };
+            if simplified_messages.is_empty() {
                 tracing::error!(
                     session_id = %self.session_info.id.0,
                     conversation_len = conv_len,
-                    "Compaction failed: no system message in conversation history"
+                    "Compaction failed: simplified conversation is empty"
                 );
                 return Err(acp::Error::internal_error().data(format!(
-                    "{COMPACTION_FAILED_GUARD_PREFIX}no system message in conversation history"
+                    "{COMPACTION_FAILED_GUARD_PREFIX}simplified conversation is empty"
                 )));
             }
-        };
-        if simplified_messages.is_empty() {
-            tracing::error!(
-                session_id = %self.session_info.id.0,
-                conversation_len = conv_len,
-                "Compaction failed: simplified conversation is empty"
+            if !simplified_messages
+                .iter()
+                .any(|msg| matches!(msg, ConversationItem::System(_)))
+            {
+                tracing::error!(
+                    session_id = %self.session_info.id.0,
+                    conversation_len = conv_len,
+                    simplified_len = simplified_messages.len(),
+                    "Compaction failed: no system message in simplified conversation"
+                );
+                return Err(acp::Error::internal_error().data(format!(
+                    "{COMPACTION_FAILED_GUARD_PREFIX}no system message in simplified conversation"
+                )));
+            }
+            let sampling_config = self.reconstruct_full_config().await;
+            let sampling_client = self.prepare_chat_completion(false).await?;
+            let backend_search_active = self.backend_search_active();
+            let effective_tool_defs: Vec<xai_grok_sampling_types::ToolDefinition> = self
+                .prepare_tool_definitions()
+                .await
+                .into_iter()
+                .filter(|td| !backend_search_active || td.function.name != "web_search")
+                .collect();
+            let compaction_tool_tokens =
+                xai_chat_state::estimate_tool_definitions_tokens(&effective_tool_defs);
+            let compaction_tools: Vec<xai_grok_sampling_types::ToolSpec> = effective_tool_defs
+                .into_iter()
+                .map(xai_grok_sampling_types::ToolSpec::from)
+                .collect();
+            let compaction_hosted_tools: Vec<xai_grok_sampling_types::HostedTool> =
+                self.hosted_tools_for_turn();
+            if lossy_input {
+                simplified_messages = xai_chat_state::compaction_utils::fit_conversation_to_budget(
+                    simplified_messages,
+                    lossy_input_budget(context_window, compaction_tool_tokens),
+                );
+            }
+            tracing::info!(
+                num_tools = compaction_tools.len(),
+                tool_tokens = compaction_tool_tokens,
+                "Running compact with model '{}' (user model: '{}')",
+                &sampling_config.model,
+                &sampling_config.model
             );
-            return Err(acp::Error::internal_error().data(format!(
-                "{COMPACTION_FAILED_GUARD_PREFIX}simplified conversation is empty"
-            )));
-        }
-        if !simplified_messages
-            .iter()
-            .any(|msg| matches!(msg, ConversationItem::System(_)))
-        {
-            tracing::error!(
-                session_id = %self.session_info.id.0,
-                conversation_len = conv_len,
-                simplified_len = simplified_messages.len(),
-                "Compaction failed: no system message in simplified conversation"
-            );
-            return Err(acp::Error::internal_error().data(format!(
-                "{COMPACTION_FAILED_GUARD_PREFIX}no system message in simplified conversation"
-            )));
-        }
-        let sampling_config = self.reconstruct_full_config().await;
-        let sampling_client = self.prepare_chat_completion(false).await?;
-        let backend_search_active = self.backend_search_active();
-        let effective_tool_defs: Vec<xai_grok_sampling_types::ToolDefinition> = self
-            .prepare_tool_definitions()
-            .await
-            .into_iter()
-            .filter(|td| !backend_search_active || td.function.name != "web_search")
-            .collect();
-        let compaction_tool_tokens =
-            xai_chat_state::estimate_tool_definitions_tokens(&effective_tool_defs);
-        let compaction_tools: Vec<xai_grok_sampling_types::ToolSpec> = effective_tool_defs
-            .into_iter()
-            .map(xai_grok_sampling_types::ToolSpec::from)
-            .collect();
-        let compaction_hosted_tools: Vec<xai_grok_sampling_types::HostedTool> =
-            self.hosted_tools_for_turn();
-        if lossy_input {
-            simplified_messages = xai_chat_state::compaction_utils::fit_conversation_to_budget(
-                simplified_messages,
-                lossy_input_budget(context_window, compaction_tool_tokens),
-            );
-        }
-        tracing::info!(
-            num_tools = compaction_tools.len(),
-            tool_tokens = compaction_tool_tokens,
-            "Running compact with model '{}' (user model: '{}')",
-            &sampling_config.model,
-            &sampling_config.model
-        );
-        let mut last_error: Option<acp::Error> = None;
-        let mut last_failure_outcome = CompactionOutcome::Failed;
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-        enum InputStage {
-            Verbatim,
-            VerbatimFitted,
-            Lossy,
-        }
-        impl InputStage {
-            fn as_str(self) -> &'static str {
-                match self {
-                    Self::Verbatim => "verbatim",
-                    Self::VerbatimFitted => "verbatim_fitted",
-                    Self::Lossy => "lossy",
+            let mut last_error: Option<acp::Error> = None;
+            let mut last_failure_outcome = CompactionOutcome::Failed;
+            #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+            enum InputStage {
+                Verbatim,
+                VerbatimFitted,
+                Lossy,
+            }
+            impl InputStage {
+                fn as_str(self) -> &'static str {
+                    match self {
+                        Self::Verbatim => "verbatim",
+                        Self::VerbatimFitted => "verbatim_fitted",
+                        Self::Lossy => "lossy",
+                    }
                 }
             }
-        }
-        let mut input_stage = if verbatim_input_enabled {
-            InputStage::Verbatim
-        } else {
-            InputStage::Lossy
-        };
-        let use_short_prompt = false;
-        let started_at = chrono::Utc::now().to_rfc3339();
-        let estimated_input_tokens =
-            xai_chat_state::estimate_conversation_tokens(&simplified_messages);
-        let auto_trigger = matches!(trigger, xai_grok_telemetry::events::CompactionTrigger::Auto);
-        let wall_clock_budget_secs = self
-            .agent
-            .borrow()
-            .compaction_policy()
-            .wall_clock_budget_secs;
-        let sampler = crate::session::helpers::full_replace_compaction::ShellCompactionSampler::new(
-            use_short_prompt,
-            user_context.clone(),
-            compaction_tools.clone(),
-            compaction_hosted_tools.clone(),
-            compaction_tool_tokens,
-            sampling_client,
-            self.session_info.id.clone(),
-            sampling_config.clone(),
-            self.inference_idle_timeout,
-            wall_clock_budget_secs,
-            self.compaction.tool_choice,
-            cancel.clone(),
-        );
-        let observer =
-            crate::session::helpers::full_replace_compaction::ShellFullReplaceObserver::new(
-                trigger,
-                context_window,
-                compaction.compaction_id.clone(),
-                self.session_info.id.0.to_string(),
-                estimated_input_tokens,
+            let mut input_stage = if verbatim_input_enabled {
+                InputStage::Verbatim
+            } else {
+                InputStage::Lossy
+            };
+            let use_short_prompt = false;
+            let started_at = chrono::Utc::now().to_rfc3339();
+            let estimated_input_tokens =
+                xai_chat_state::estimate_conversation_tokens(&simplified_messages);
+            let auto_trigger =
+                matches!(trigger, xai_grok_telemetry::events::CompactionTrigger::Auto);
+            let wall_clock_budget_secs = self
+                .agent
+                .borrow()
+                .compaction_policy()
+                .wall_clock_budget_secs;
+            let sampler =
+                crate::session::helpers::full_replace_compaction::ShellCompactionSampler::new(
+                    use_short_prompt,
+                    user_context.clone(),
+                    compaction_tools.clone(),
+                    compaction_hosted_tools.clone(),
+                    compaction_tool_tokens,
+                    sampling_client,
+                    self.session_info.id.clone(),
+                    sampling_config.clone(),
+                    self.inference_idle_timeout,
+                    wall_clock_budget_secs,
+                    self.compaction.tool_choice,
+                    cancel.clone(),
+                );
+            let observer =
+                crate::session::helpers::full_replace_compaction::ShellFullReplaceObserver::new(
+                    trigger,
+                    context_window,
+                    compaction.compaction_id.clone(),
+                    self.session_info.id.0.to_string(),
+                    estimated_input_tokens,
+                    retry_delay_secs,
+                );
+            let fr_config = xai_grok_compaction::FullReplaceConfig {
+                max_attempts: max_retries,
                 retry_delay_secs,
-            );
-        let fr_config = xai_grok_compaction::FullReplaceConfig {
-            max_attempts: max_retries,
-            retry_delay_secs,
-            sampling_timeout_secs: 0,
-        };
-        let mut request_turns = simplified_messages.clone();
-        let mut input_overflow_rejections: u32 = 0;
-        let two_pass_output = self
-            .try_two_pass_pass2_apply(user_context.as_deref(), summary_strips_reasoning)
-            .await;
-        let two_pass_used = two_pass_output.is_some();
-        let mut compact_summary: Option<String> =
-            two_pass_output.as_ref().map(|o| o.content.clone());
-        while compact_summary.is_none() {
-            match xai_grok_compaction::sample_full_replace_summary(
-                &sampler,
-                &request_turns,
-                user_context.as_deref(),
-                &fr_config,
-                &observer,
-            )
-            .await
-            {
-                Ok(summary) => {
-                    compact_summary = Some(summary.summary);
-                    break;
-                }
-                Err(xai_grok_compaction::FullReplaceError::NothingToCompact) => {
-                    last_error = Some(
-                        acp::Error::internal_error()
-                            .data(format!("{COMPACT_FAILED_PREFIX}nothing to compact")),
-                    );
-                    break;
-                }
-                Err(xai_grok_compaction::FullReplaceError::EmptyResponse) => {
-                    last_failure_outcome = if observer.degenerate_seen() {
-                        CompactionOutcome::Degenerate
-                    } else {
-                        CompactionOutcome::Transient
-                    };
-                    last_error = Some(acp::Error::internal_error().data(
-                        observer.last_error_message().unwrap_or_else(|| {
-                            format!("{COMPACT_FAILED_PREFIX}model returned empty response")
-                        }),
-                    ));
-                    break;
-                }
-                Err(xai_grok_compaction::FullReplaceError::Sampler {
-                    message,
-                    deterministic,
-                    context_overflow,
-                }) => {
-                    if cancel.is_cancelled()
-                        || message.contains(
-                            crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG,
-                        )
-                    {
-                        return self.emit_compact_cancelled(auto_trigger).await;
+                sampling_timeout_secs: 0,
+            };
+            let mut request_turns = simplified_messages.clone();
+            let mut input_overflow_rejections: u32 = 0;
+            let two_pass_output = self
+                .try_two_pass_pass2_apply(user_context.as_deref(), summary_strips_reasoning)
+                .await;
+            let two_pass_used = two_pass_output.is_some();
+            let mut compact_summary: Option<String> =
+                two_pass_output.as_ref().map(|o| o.content.clone());
+            while compact_summary.is_none() {
+                match xai_grok_compaction::sample_full_replace_summary(
+                    &sampler,
+                    &request_turns,
+                    user_context.as_deref(),
+                    &fr_config,
+                    &observer,
+                )
+                .await
+                {
+                    Ok(summary) => {
+                        compact_summary = Some(summary.summary);
+                        break;
                     }
-                    if context_overflow {
-                        let next_stage = match input_stage {
-                            InputStage::Verbatim => Some(InputStage::VerbatimFitted),
-                            InputStage::VerbatimFitted => Some(InputStage::Lossy),
-                            InputStage::Lossy => None,
+                    Err(xai_grok_compaction::FullReplaceError::NothingToCompact) => {
+                        last_error = Some(
+                            acp::Error::internal_error()
+                                .data(format!("{COMPACT_FAILED_PREFIX}nothing to compact")),
+                        );
+                        break;
+                    }
+                    Err(xai_grok_compaction::FullReplaceError::EmptyResponse) => {
+                        last_failure_outcome = if observer.degenerate_seen() {
+                            CompactionOutcome::Degenerate
+                        } else {
+                            CompactionOutcome::Transient
                         };
-                        if let Some(stage) = next_stage {
-                            input_overflow_rejections += 1;
-                            xai_grok_telemetry::session_ctx::log_event(
-                                xai_grok_telemetry::events::CompactionRetryDegraded {
-                                    trigger,
-                                    reason: "input_overflow",
-                                    from_stage: Some(input_stage.as_str()),
-                                    to_stage: Some(stage.as_str()),
-                                    summary_chars: None,
-                                    attempt: observer.attempt_count(),
-                                    context_window,
-                                    compaction_id: compaction.compaction_id.clone(),
-                                },
-                            );
-                            tracing::warn!(
-                                session_id = %self.session_info.id.0,
-                                ?stage,
-                                error = %message,
-                                "Compaction input overflowed deterministically; stepping down the input ladder to avoid an incompactable state"
-                            );
-                            let conv = self.chat_state_handle.get_conversation().await;
-                            request_turns = match stage {
+                        last_error = Some(acp::Error::internal_error().data(
+                            observer.last_error_message().unwrap_or_else(|| {
+                                format!("{COMPACT_FAILED_PREFIX}model returned empty response")
+                            }),
+                        ));
+                        break;
+                    }
+                    Err(xai_grok_compaction::FullReplaceError::Sampler {
+                        message,
+                        deterministic,
+                        context_overflow,
+                    }) => {
+                        if cancel.is_cancelled()
+                            || message.contains(
+                                crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG,
+                            )
+                        {
+                            return self.emit_compact_cancelled(auto_trigger).await;
+                        }
+                        if context_overflow {
+                            let next_stage = match input_stage {
+                                InputStage::Verbatim => Some(InputStage::VerbatimFitted),
+                                InputStage::VerbatimFitted => Some(InputStage::Lossy),
+                                InputStage::Lossy => None,
+                            };
+                            if let Some(stage) = next_stage {
+                                input_overflow_rejections += 1;
+                                xai_grok_telemetry::session_ctx::log_event(
+                                    xai_grok_telemetry::events::CompactionRetryDegraded {
+                                        trigger,
+                                        reason: "input_overflow",
+                                        from_stage: Some(input_stage.as_str()),
+                                        to_stage: Some(stage.as_str()),
+                                        summary_chars: None,
+                                        attempt: observer.attempt_count(),
+                                        context_window,
+                                        compaction_id: compaction.compaction_id.clone(),
+                                    },
+                                );
+                                tracing::warn!(
+                                    session_id = %self.session_info.id.0,
+                                    ?stage,
+                                    error = %message,
+                                    "Compaction input overflowed deterministically; stepping down the input ladder to avoid an incompactable state"
+                                );
+                                let conv = self.chat_state_handle.get_conversation().await;
+                                request_turns = match stage {
                                 InputStage::VerbatimFitted => {
                                     let budget = context_window
                                         .saturating_sub(SUMMARY_BUDGET_RESERVE_TOKENS)
@@ -1233,100 +1257,104 @@ impl SessionActor {
                                     unreachable!("ladder only steps forward")
                                 }
                             };
-                            input_stage = stage;
-                            continue;
+                                input_stage = stage;
+                                continue;
+                            }
+                            last_failure_outcome = CompactionOutcome::Deterministic;
+                            if auto_trigger {
+                                self.suppress_auto_compaction(
+                                    SuppressReason::Size,
+                                    &message,
+                                    estimated_input_tokens,
+                                    context_window,
+                                )
+                                .await;
+                            }
+                            last_error = Some(acp::Error::internal_error().data(message));
+                            break;
                         }
-                        last_failure_outcome = CompactionOutcome::Deterministic;
-                        if auto_trigger {
-                            self.suppress_auto_compaction(
-                                SuppressReason::Size,
-                                &message,
-                                estimated_input_tokens,
-                                context_window,
-                            )
-                            .await;
+                        if deterministic {
+                            last_failure_outcome = CompactionOutcome::Deterministic;
+                            if auto_trigger {
+                                let reason = Self::classify_suppress_reason(&message);
+                                self.suppress_auto_compaction(
+                                    reason,
+                                    &message,
+                                    estimated_input_tokens,
+                                    context_window,
+                                )
+                                .await;
+                            }
+                            last_error = Some(acp::Error::internal_error().data(message));
+                            break;
                         }
+                        last_failure_outcome = CompactionOutcome::Transient;
                         last_error = Some(acp::Error::internal_error().data(message));
                         break;
                     }
-                    if deterministic {
-                        last_failure_outcome = CompactionOutcome::Deterministic;
-                        if auto_trigger {
-                            let reason = Self::classify_suppress_reason(&message);
-                            self.suppress_auto_compaction(
-                                reason,
-                                &message,
-                                estimated_input_tokens,
-                                context_window,
-                            )
-                            .await;
-                        }
-                        last_error = Some(acp::Error::internal_error().data(message));
-                        break;
-                    }
-                    last_failure_outcome = CompactionOutcome::Transient;
-                    last_error = Some(acp::Error::internal_error().data(message));
-                    break;
                 }
             }
-        }
-        let telemetry = observer.into_telemetry();
-        if two_pass_output.is_none()
-            && let Some(request_chat_history) = sampler.take_last_attempted_items()
-        {
-            self.persist_compaction_request_artifact(
-                request_chat_history,
-                compaction_tools,
-                user_context.as_deref(),
-                use_short_prompt,
-                &sampling_config.model,
-                trigger,
-                compact_summary
-                    .as_deref()
-                    .or(telemetry.last_rejected_summary.as_deref()),
-                last_error.as_ref(),
-                telemetry.attempts,
-                telemetry.attempt_details,
-                started_at,
-            );
-        }
-        let compact_output = match compact_summary {
-            Some(_) => match two_pass_output {
-                Some(tp) => tp,
-                None => sampler
-                    .take_last_success()
-                    .expect("a successful full-replace sample stashes its CompactOutput"),
-            },
-            None => {
-                let span = tracing::Span::current();
-                span.record("compaction_attempts", telemetry.attempts as i64);
-                span.record(
-                    "compaction_degenerate_rejections",
-                    telemetry.degenerate_rejections as i64,
+            let telemetry = observer.into_telemetry();
+            if two_pass_output.is_none()
+                && let Some(request_chat_history) = sampler.take_last_attempted_items()
+            {
+                self.persist_compaction_request_artifact(
+                    request_chat_history,
+                    compaction_tools,
+                    user_context.as_deref(),
+                    use_short_prompt,
+                    &sampling_config.model,
+                    trigger,
+                    compact_summary
+                        .as_deref()
+                        .or(telemetry.last_rejected_summary.as_deref()),
+                    last_error.as_ref(),
+                    telemetry.attempts,
+                    telemetry.attempt_details,
+                    started_at,
                 );
-                span.record(
-                    "compaction_input_overflow_rejections",
-                    input_overflow_rejections as i64,
-                );
-                span.record(
-                    "compaction_deterministic_rejections",
-                    telemetry.deterministic_rejections as i64,
-                );
-                span.record(
-                    "compaction_transient_rejections",
-                    telemetry.transient_rejections as i64,
-                );
-                span.record("compaction_outcome", last_failure_outcome.as_str());
-                return Err(last_error.unwrap_or_else(|| {
-                    acp::Error::internal_error().data("compaction failed: unknown error")
-                }));
             }
-        };
-        let generate_session_compact = compact_output.content.clone();
-        let user_message_prefix = self.build_user_message_prefix().await;
-        let conversation = self.chat_state_handle.get_conversation().await;
-        let (discovered_agents_md, all_skills_for_compaction, _agent_edited_paths, state_context) =
-            if use_short_prompt {
+            let compact_output = match compact_summary {
+                Some(_) => match two_pass_output {
+                    Some(tp) => tp,
+                    None => sampler
+                        .take_last_success()
+                        .expect("a successful full-replace sample stashes its CompactOutput"),
+                },
+                None => {
+                    let span = tracing::Span::current();
+                    span.record("compaction_attempts", telemetry.attempts as i64);
+                    span.record(
+                        "compaction_degenerate_rejections",
+                        telemetry.degenerate_rejections as i64,
+                    );
+                    span.record(
+                        "compaction_input_overflow_rejections",
+                        input_overflow_rejections as i64,
+                    );
+                    span.record(
+                        "compaction_deterministic_rejections",
+                        telemetry.deterministic_rejections as i64,
+                    );
+                    span.record(
+                        "compaction_transient_rejections",
+                        telemetry.transient_rejections as i64,
+                    );
+                    span.record("compaction_outcome", last_failure_outcome.as_str());
+                    return Err(last_error.unwrap_or_else(|| {
+                        acp::Error::internal_error().data("compaction failed: unknown error")
+                    }));
+                }
+            };
+            let generate_session_compact = compact_output.content.clone();
+            let user_message_prefix = self.build_user_message_prefix().await;
+            let conversation = self.chat_state_handle.get_conversation().await;
+            let (
+                discovered_agents_md,
+                all_skills_for_compaction,
+                _agent_edited_paths,
+                state_context,
+            ) = if use_short_prompt {
                 let empty_edited: std::collections::BTreeSet<String> = Default::default();
                 let ctx =
                     CompactionStateContext::build(&conversation, CompactionInputs::default()).await;
@@ -1531,400 +1559,401 @@ impl SessionActor {
                 };
                 (agents_md, skills, edited_paths, ctx)
             };
-        use crate::session::helpers::compaction_context::SubagentToolNames;
-        let subagent_tool_names: Option<SubagentToolNames> =
-            if use_short_prompt || state_context.running_subagents.is_empty() {
-                None
-            } else {
-                let agent_ref = self.agent.borrow();
-                let bridge = agent_ref.tool_bridge();
-                let empty = serde_json::json!({});
-                let poll_name = bridge
-                    .render_prompt("${{ tools.by_kind.background_task_action }}", &empty)
-                    .await
-                    .filter(|s| !s.is_empty() && !s.contains("by_kind"));
-                let cancel_name = bridge
-                    .render_prompt("${{ tools.by_kind.kill_task_action }}", &empty)
-                    .await
-                    .filter(|s| !s.is_empty() && !s.contains("by_kind"));
-                match (poll_name, cancel_name) {
-                    (Some(poll), Some(cancel)) => Some(SubagentToolNames { poll, cancel }),
-                    (poll, cancel) => {
-                        tracing::warn!(
-                            session_id = %self.session_info.id.0,
-                            poll_resolved = poll.is_some(),
-                            cancel_resolved = cancel.is_some(),
-                            "could not resolve subagent tool names, \
-                             omitting subagent reminder from compacted conversation"
-                        );
-                        None
-                    }
-                }
-            };
-        use crate::session::helpers::compaction_context::McpToolNames;
-        let mcp_tool_names: Option<McpToolNames> =
-            if use_short_prompt || state_context.connected_mcp_servers.is_empty() {
-                None
-            } else {
-                let agent_ref = self.agent.borrow();
-                let bridge = agent_ref.tool_bridge();
-                let empty = serde_json::json!({});
-                let search_name = bridge
-                    .render_prompt("${{ tools.by_kind.search_tool }}", &empty)
-                    .await
-                    .filter(|s| !s.is_empty() && !s.contains("by_kind"));
-                let call_name = bridge
-                    .render_prompt("${{ tools.by_kind.use_tool }}", &empty)
-                    .await
-                    .filter(|s| !s.is_empty() && !s.contains("by_kind"));
-                match (search_name, call_name) {
-                    (Some(search), Some(call)) => Some(McpToolNames { search, call }),
-                    _ => None,
-                }
-            };
-        let memory_backend_impl = {
-            let g = self.memory.storage.borrow();
-            g.as_ref()
-                .zip(self.memory.backend_params.as_ref())
-                .map(|(storage, params)| {
-                    crate::session::memory::MemoryBackendImpl::from_session_params(
-                        storage.clone(),
-                        &crate::session::memory::MemoryBackendParams {
-                            search_source:
-                                crate::session::memory::MemorySearchSource::CompactionRecovery,
-                            ..params.clone()
-                        },
-                    )
-                })
-        };
-        let memory_opt_out = false;
-        let memory_ref: Option<&dyn xai_grok_tools::types::memory_backend::MemoryBackend> =
-            if memory_opt_out {
-                None
-            } else {
-                memory_backend_impl
-                    .as_ref()
-                    .map(|b| b as &dyn xai_grok_tools::types::memory_backend::MemoryBackend)
-            };
-        let suppress_state_reminder = false;
-        let workflow_listing = self.workflow_listing_for_prompt();
-        let system_reminder = if suppress_state_reminder {
-            workflow_listing.as_deref().map(|listing| {
-                let tag = self.reminder_wrapper_tag();
-                format!("<{tag}>\n## Available Workflows\n{listing}\n</{tag}>")
-            })
-        } else {
-            to_system_reminder(
-                &state_context,
-                &discovered_agents_md,
-                &all_skills_for_compaction,
-                memory_ref,
-                subagent_tool_names.as_ref(),
-                mcp_tool_names.as_ref(),
-                workflow_listing.as_deref(),
-            )
-            .await
-        };
-        let system_reminder = {
-            let plan_path = {
-                let guard = self.plan_mode.lock();
-                guard
-                    .is_active()
-                    .then(|| guard.plan_file_path().to_path_buf())
-            };
-            if let Some(plan_path) = plan_path {
-                let plan_has_content =
-                    crate::session::plan_mode::plan_file_has_content(&plan_path).await;
-                let template = crate::session::plan_mode::plan_mode_reminder_full_template();
-                let wrapper = self.reminder_wrapper_tag();
-                let rendered = self
-                    .render_plan_template(template, &plan_path, plan_has_content)
-                    .await;
-                match (system_reminder, rendered) {
-                    (Some(mut existing), Some(plan_section)) => {
-                        if let Some(pos) = existing.rfind("</system-reminder>") {
-                            existing.insert_str(pos, &format!("\n\n{}\n", plan_section));
-                        } else {
-                            existing.push_str("\n\n");
-                            existing.push_str(&plan_section);
+            use crate::session::helpers::compaction_context::SubagentToolNames;
+            let subagent_tool_names: Option<SubagentToolNames> =
+                if use_short_prompt || state_context.running_subagents.is_empty() {
+                    None
+                } else {
+                    let agent_ref = self.agent.borrow();
+                    let bridge = agent_ref.tool_bridge();
+                    let empty = serde_json::json!({});
+                    let poll_name = bridge
+                        .render_prompt("${{ tools.by_kind.background_task_action }}", &empty)
+                        .await
+                        .filter(|s| !s.is_empty() && !s.contains("by_kind"));
+                    let cancel_name = bridge
+                        .render_prompt("${{ tools.by_kind.kill_task_action }}", &empty)
+                        .await
+                        .filter(|s| !s.is_empty() && !s.contains("by_kind"));
+                    match (poll_name, cancel_name) {
+                        (Some(poll), Some(cancel)) => Some(SubagentToolNames { poll, cancel }),
+                        (poll, cancel) => {
+                            tracing::warn!(
+                                session_id = %self.session_info.id.0,
+                                poll_resolved = poll.is_some(),
+                                cancel_resolved = cancel.is_some(),
+                                "could not resolve subagent tool names, \
+                                 omitting subagent reminder from compacted conversation"
+                            );
+                            None
                         }
-                        Some(existing)
                     }
-                    (None, Some(plan_section)) => Some(format!(
-                        "<{tag}>\n{body}\n</{tag}>",
-                        tag = wrapper,
-                        body = plan_section,
-                    )),
-                    (existing, None) => {
-                        tracing::warn!(
-                            session_id = %self.session_info.id.0,
-                            "compaction: plan mode active but template render failed"
-                        );
-                        existing
+                };
+            use crate::session::helpers::compaction_context::McpToolNames;
+            let mcp_tool_names: Option<McpToolNames> =
+                if use_short_prompt || state_context.connected_mcp_servers.is_empty() {
+                    None
+                } else {
+                    let agent_ref = self.agent.borrow();
+                    let bridge = agent_ref.tool_bridge();
+                    let empty = serde_json::json!({});
+                    let search_name = bridge
+                        .render_prompt("${{ tools.by_kind.search_tool }}", &empty)
+                        .await
+                        .filter(|s| !s.is_empty() && !s.contains("by_kind"));
+                    let call_name = bridge
+                        .render_prompt("${{ tools.by_kind.use_tool }}", &empty)
+                        .await
+                        .filter(|s| !s.is_empty() && !s.contains("by_kind"));
+                    match (search_name, call_name) {
+                        (Some(search), Some(call)) => Some(McpToolNames { search, call }),
+                        _ => None,
+                    }
+                };
+            let memory_backend_impl = {
+                let g = self.memory.storage.borrow();
+                g.as_ref()
+                    .zip(self.memory.backend_params.as_ref())
+                    .map(|(storage, params)| {
+                        crate::session::memory::MemoryBackendImpl::from_session_params(
+                            storage.clone(),
+                            &crate::session::memory::MemoryBackendParams {
+                                search_source:
+                                    crate::session::memory::MemorySearchSource::CompactionRecovery,
+                                ..params.clone()
+                            },
+                        )
+                    })
+            };
+            let memory_opt_out = false;
+            let memory_ref: Option<&dyn xai_grok_tools::types::memory_backend::MemoryBackend> =
+                if memory_opt_out {
+                    None
+                } else {
+                    memory_backend_impl
+                        .as_ref()
+                        .map(|b| b as &dyn xai_grok_tools::types::memory_backend::MemoryBackend)
+                };
+            let suppress_state_reminder = false;
+            let workflow_listing = self.workflow_listing_for_prompt();
+            let system_reminder = if suppress_state_reminder {
+                workflow_listing.as_deref().map(|listing| {
+                    let tag = self.reminder_wrapper_tag();
+                    format!("<{tag}>\n## Available Workflows\n{listing}\n</{tag}>")
+                })
+            } else {
+                to_system_reminder(
+                    &state_context,
+                    &discovered_agents_md,
+                    &all_skills_for_compaction,
+                    memory_ref,
+                    subagent_tool_names.as_ref(),
+                    mcp_tool_names.as_ref(),
+                    workflow_listing.as_deref(),
+                )
+                .await
+            };
+            let system_reminder = {
+                let plan_path = {
+                    let guard = self.plan_mode.lock();
+                    guard
+                        .is_active()
+                        .then(|| guard.plan_file_path().to_path_buf())
+                };
+                if let Some(plan_path) = plan_path {
+                    let plan_has_content =
+                        crate::session::plan_mode::plan_file_has_content(&plan_path).await;
+                    let template = crate::session::plan_mode::plan_mode_reminder_full_template();
+                    let wrapper = self.reminder_wrapper_tag();
+                    let rendered = self
+                        .render_plan_template(template, &plan_path, plan_has_content)
+                        .await;
+                    match (system_reminder, rendered) {
+                        (Some(mut existing), Some(plan_section)) => {
+                            if let Some(pos) = existing.rfind("</system-reminder>") {
+                                existing.insert_str(pos, &format!("\n\n{}\n", plan_section));
+                            } else {
+                                existing.push_str("\n\n");
+                                existing.push_str(&plan_section);
+                            }
+                            Some(existing)
+                        }
+                        (None, Some(plan_section)) => Some(format!(
+                            "<{tag}>\n{body}\n</{tag}>",
+                            tag = wrapper,
+                            body = plan_section,
+                        )),
+                        (existing, None) => {
+                            tracing::warn!(
+                                session_id = %self.session_info.id.0,
+                                "compaction: plan mode active but template render failed"
+                            );
+                            existing
+                        }
+                    }
+                } else {
+                    system_reminder
+                }
+            };
+            let system_reminder = if let Some(goal_section) = self.compaction_goal_section().await {
+                use crate::session::acp_session::splice_goal_section;
+                match system_reminder {
+                    Some(existing) => Some(splice_goal_section(&existing, &goal_section)),
+                    None => {
+                        let tag = self.reminder_wrapper_tag();
+                        Some(format!("<{tag}>\n{goal_section}\n</{tag}>"))
                     }
                 }
             } else {
                 system_reminder
-            }
-        };
-        let system_reminder = if let Some(goal_section) = self.compaction_goal_section().await {
-            use crate::session::acp_session::splice_goal_section;
-            match system_reminder {
-                Some(existing) => Some(splice_goal_section(&existing, &goal_section)),
-                None => {
-                    let tag = self.reminder_wrapper_tag();
-                    Some(format!("<{tag}>\n{goal_section}\n</{tag}>"))
+            };
+            if let Some(ref recovery_backend) = memory_backend_impl {
+                let n = recovery_backend
+                    .search_counter
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if n > 0 {
+                    self.memory
+                        .compaction_recovery_count
+                        .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                    tracing::debug!(
+                        target: xai_grok_telemetry::memory_log::TARGET,
+                        count = n,
+                        "MEMORY_COMPACTION_RECOVERY: {} search(es) performed",
+                        n,
+                    );
                 }
             }
-        } else {
-            system_reminder
-        };
-        if let Some(ref recovery_backend) = memory_backend_impl {
-            let n = recovery_backend
-                .search_counter
+            let agents_md_reminder = self.agent.borrow().agents_md_user_reminder();
+            let compaction_context = state_context.for_compaction();
+            let compaction_state_context: &CompactionStateContext = &compaction_context;
+            let transcript_hint = self.transcript_hint();
+            let summary_count = self
+                .compaction
+                .count
                 .load(std::sync::atomic::Ordering::Relaxed);
-            if n > 0 {
-                self.memory
-                    .compaction_recovery_count
-                    .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
-                tracing::debug!(
-                    target: xai_grok_telemetry::memory_log::TARGET,
-                    count = n,
-                    "MEMORY_COMPACTION_RECOVERY: {} search(es) performed",
-                    n,
-                );
-            }
-        }
-        let agents_md_reminder = self.agent.borrow().agents_md_user_reminder();
-        let compaction_context = state_context.for_compaction();
-        let compaction_state_context: &CompactionStateContext = &compaction_context;
-        let transcript_hint = self.transcript_hint();
-        let summary_count = self
-            .compaction
-            .count
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let apply_start = std::time::Instant::now();
-        let raw_compacted = build_compacted_history(CompactedHistoryInput {
-            system_message: system_message.clone(),
-            user_message_prefix: user_message_prefix.clone(),
-            agents_md_reminder: agents_md_reminder.clone(),
-            state_context: compaction_state_context,
-            compaction_summary: generate_session_compact.clone(),
-            system_reminder: system_reminder.clone(),
-            summary_before_recent: use_short_prompt,
-            transcript_hint: transcript_hint.clone(),
-            summary_count,
-        });
-        let sanitize_result = sanitize_compacted_history(raw_compacted);
-        let compacted_history = if sanitize_result.stripped_tool_call_ids.is_empty() {
-            sanitize_result.items
-        } else {
-            tracing::warn!(
-                session_id = %self.session_info.id,
-                stripped_count = sanitize_result.stripped_tool_call_ids.len(),
-                stripped_ids = ?sanitize_result.stripped_tool_call_ids,
-                "compaction: stripped orphaned ToolResults from compacted history"
-            );
-            sanitize_result.items
-        };
-        let remaining_violations = validate_compacted_history(&compacted_history);
-        let compacted_history = if remaining_violations.is_empty() {
-            compacted_history
-        } else {
-            tracing::error!(
-                session_id = %self.session_info.id,
-                violation_count = remaining_violations.len(),
-                violation_ids = ?remaining_violations,
-                "compaction: sanitized history still has invalid ToolResults -- \
-                 falling back to minimal compacted history (no recent_messages)"
-            );
-            build_compacted_history(CompactedHistoryInput {
-                system_message,
-                user_message_prefix,
-                agents_md_reminder,
-                state_context: &state_context.for_compaction(),
+            let apply_start = std::time::Instant::now();
+            let raw_compacted = build_compacted_history(CompactedHistoryInput {
+                system_message: system_message.clone(),
+                user_message_prefix: user_message_prefix.clone(),
+                agents_md_reminder: agents_md_reminder.clone(),
+                state_context: compaction_state_context,
                 compaction_summary: generate_session_compact.clone(),
-                system_reminder,
+                system_reminder: system_reminder.clone(),
                 summary_before_recent: use_short_prompt,
-                transcript_hint,
+                transcript_hint: transcript_hint.clone(),
                 summary_count,
-            })
-        };
-        let post_compaction_ms = apply_start.elapsed().as_millis() as u64;
-        let prompt_index_at_compaction = self.chat_state_handle.get_prompt_index().await;
-        let original_user_info = self
-            .chat_state_handle
-            .get_conversation_item_at(1)
-            .await
-            .and_then(|item| match item {
-                ConversationItem::User(parts) => {
-                    parts.content.into_iter().next().and_then(|p| match p {
-                        xai_grok_sampling_types::ContentPart::Text { text } => {
-                            Some(text.as_ref().to_owned())
-                        }
-                        _ => None,
-                    })
-                }
-                _ => None,
             });
-        if cancel.is_cancelled() {
-            return self.emit_compact_cancelled(auto_trigger).await;
-        }
-        let segments_queued = u32::from(
-            self.persist_compaction_segment(&segment_messages, &generate_session_compact),
-        );
-        self.chat_state_handle
-            .record_compaction_at(prompt_index_at_compaction);
-        self.persist_compaction_checkpoint(
-            &compacted_history,
-            prompt_index_at_compaction,
-            auto_continue,
-            original_user_info,
-        );
-        let prefix_len = if self
-            .compaction
-            .prefix_released
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            0
-        } else {
-            self.startup_hints.inherited_prefix_len.unwrap_or(0)
-        };
-        let compacted_history = if prefix_len == 0 {
-            compacted_history
-        } else {
-            self.resolve_forked_compacted_history(
-                compacted_history,
-                prefix_len,
-                tokens_before,
-                context_window,
-            )
-            .await
-        };
-        let new_len = compacted_history.len();
-        self.chat_state_handle
-            .replace_conversation_for_compaction(compacted_history);
-        if self.startup_hints.inherited_prefix_len.is_some() {
-            let post_replace_tokens = self.chat_state_handle.get_total_tokens().await;
-            if xai_token_estimation::exceeds_threshold(
-                post_replace_tokens,
-                context_window,
-                self.compaction.threshold_percent.get(),
-            ) {
-                self.compaction
-                    .auto_compact_suppressed
-                    .store(SUPPRESS_STICKY, std::sync::atomic::Ordering::Relaxed);
+            let sanitize_result = sanitize_compacted_history(raw_compacted);
+            let compacted_history = if sanitize_result.stripped_tool_call_ids.is_empty() {
+                sanitize_result.items
+            } else {
                 tracing::warn!(
-                    session_id = %self.session_info.id.0,
+                    session_id = %self.session_info.id,
+                    stripped_count = sanitize_result.stripped_tool_call_ids.len(),
+                    stripped_ids = ?sanitize_result.stripped_tool_call_ids,
+                    "compaction: stripped orphaned ToolResults from compacted history"
+                );
+                sanitize_result.items
+            };
+            let remaining_violations = validate_compacted_history(&compacted_history);
+            let compacted_history = if remaining_violations.is_empty() {
+                compacted_history
+            } else {
+                tracing::error!(
+                    session_id = %self.session_info.id,
+                    violation_count = remaining_violations.len(),
+                    violation_ids = ?remaining_violations,
+                    "compaction: sanitized history still has invalid ToolResults -- \
+                     falling back to minimal compacted history (no recent_messages)"
+                );
+                build_compacted_history(CompactedHistoryInput {
+                    system_message,
+                    user_message_prefix,
+                    agents_md_reminder,
+                    state_context: &state_context.for_compaction(),
+                    compaction_summary: generate_session_compact.clone(),
+                    system_reminder,
+                    summary_before_recent: use_short_prompt,
+                    transcript_hint,
+                    summary_count,
+                })
+            };
+            let post_compaction_ms = apply_start.elapsed().as_millis() as u64;
+            let prompt_index_at_compaction = self.chat_state_handle.get_prompt_index().await;
+            let original_user_info = self
+                .chat_state_handle
+                .get_conversation_item_at(1)
+                .await
+                .and_then(|item| match item {
+                    ConversationItem::User(parts) => {
+                        parts.content.into_iter().next().and_then(|p| match p {
+                            xai_grok_sampling_types::ContentPart::Text { text } => {
+                                Some(text.as_ref().to_owned())
+                            }
+                            _ => None,
+                        })
+                    }
+                    _ => None,
+                });
+            if cancel.is_cancelled() {
+                return self.emit_compact_cancelled(auto_trigger).await;
+            }
+            let segments_queued = u32::from(
+                self.persist_compaction_segment(&segment_messages, &generate_session_compact),
+            );
+            self.chat_state_handle
+                .record_compaction_at(prompt_index_at_compaction);
+            self.persist_compaction_checkpoint(
+                &compacted_history,
+                prompt_index_at_compaction,
+                auto_continue,
+                original_user_info,
+            );
+            let prefix_len = if self
+                .compaction
+                .prefix_released
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                0
+            } else {
+                self.startup_hints.inherited_prefix_len.unwrap_or(0)
+            };
+            let compacted_history = if prefix_len == 0 {
+                compacted_history
+            } else {
+                self.resolve_forked_compacted_history(
+                    compacted_history,
+                    prefix_len,
+                    tokens_before,
+                    context_window,
+                )
+                .await
+            };
+            let new_len = compacted_history.len();
+            self.chat_state_handle
+                .replace_conversation_for_compaction(compacted_history);
+            if self.startup_hints.inherited_prefix_len.is_some() {
+                let post_replace_tokens = self.chat_state_handle.get_total_tokens().await;
+                if xai_token_estimation::exceeds_threshold(
                     post_replace_tokens,
                     context_window,
-                    "compaction: released history still over threshold; suppressing AUTO to avoid a re-loop"
-                );
+                    self.compaction.threshold_percent.get(),
+                ) {
+                    self.compaction
+                        .auto_compact_suppressed
+                        .store(SUPPRESS_STICKY, std::sync::atomic::Ordering::Relaxed);
+                    tracing::warn!(
+                        session_id = %self.session_info.id.0,
+                        post_replace_tokens,
+                        context_window,
+                        "compaction: released history still over threshold; suppressing AUTO to avoid a re-loop"
+                    );
+                } else {
+                    self.compaction
+                        .auto_compact_suppressed
+                        .store(SUPPRESS_NONE, std::sync::atomic::Ordering::Relaxed);
+                }
             } else {
                 self.compaction
                     .auto_compact_suppressed
                     .store(SUPPRESS_NONE, std::sync::atomic::Ordering::Relaxed);
             }
-        } else {
-            self.compaction
-                .auto_compact_suppressed
-                .store(SUPPRESS_NONE, std::sync::atomic::Ordering::Relaxed);
-        }
-        self.last_idle_flush_conversation_len
-            .store(new_len, std::sync::atomic::Ordering::Relaxed);
-        self.memory
-            .context_injected
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        if self.memory.is_enabled() {
-            tracing::info!(target: xai_grok_telemetry::memory_log::TARGET, "MEMORY_COMPACT: post-compaction reset, next turn re-checks injection (search only if no block persisted)");
-        }
-        let _ = self
-            .notifications
-            .persistence_tx
-            .send(PersistenceMsg::PlanState(
-                crate::tools::todo::TodoState::default(),
-            ));
-        self.agent
-            .borrow()
-            .tool_bridge()
-            .on_agents_md_compaction()
+            self.last_idle_flush_conversation_len
+                .store(new_len, std::sync::atomic::Ordering::Relaxed);
+            self.memory
+                .context_injected
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            if self.memory.is_enabled() {
+                tracing::info!(target: xai_grok_telemetry::memory_log::TARGET, "MEMORY_COMPACT: post-compaction reset, next turn re-checks injection (search only if no block persisted)");
+            }
+            let _ = self
+                .notifications
+                .persistence_tx
+                .send(PersistenceMsg::PlanState(
+                    crate::tools::todo::TodoState::default(),
+                ));
+            self.agent
+                .borrow()
+                .tool_bridge()
+                .on_agents_md_compaction()
+                .await;
+            self.agent
+                .borrow()
+                .tool_bridge()
+                .on_skill_discovery_compaction()
+                .await;
+            self.rearm_failed_server_announcements().await;
+            self.plan_mode.lock().reset_after_compaction();
+            self.persist_plan_mode_state();
+            self.dispatch_hook(
+                xai_grok_hooks::event::HookEventName::PostCompact,
+                xai_grok_hooks::event::HookPayload::PostCompact {
+                    source: compact_source.into(),
+                },
+                None,
+                None,
+            )
             .await;
-        self.agent
-            .borrow()
-            .tool_bridge()
-            .on_skill_discovery_compaction()
-            .await;
-        self.rearm_failed_server_announcements().await;
-        self.plan_mode.lock().reset_after_compaction();
-        self.persist_plan_mode_state();
-        self.dispatch_hook(
-            xai_grok_hooks::event::HookEventName::PostCompact,
-            xai_grok_hooks::event::HookPayload::PostCompact {
-                source: compact_source.into(),
-            },
-            None,
-            None,
-        )
-        .await;
-        let tokens_after = self.chat_state_handle.get_total_tokens().await;
-        {
-            let span = tracing::Span::current();
-            span.record("compaction_tokens_after", tokens_after as i64);
-            span.record(
-                "compaction_summary_chars",
-                compact_output.content.chars().count() as i64,
-            );
-            span.record("compaction_attempts", telemetry.attempts as i64);
-            span.record(
-                "compaction_degenerate_rejections",
-                telemetry.degenerate_rejections as i64,
-            );
-            span.record(
-                "compaction_input_overflow_rejections",
-                input_overflow_rejections as i64,
-            );
-            span.record(
-                "compaction_deterministic_rejections",
-                telemetry.deterministic_rejections as i64,
-            );
-            span.record(
-                "compaction_transient_rejections",
-                telemetry.transient_rejections as i64,
-            );
-            let stop_reason = compact_output.stop_reason.as_deref().unwrap_or("stop");
-            span.record("compaction_stop_reason", stop_reason);
-            let outcome = if compact_output.truncated {
-                CompactionOutcome::Truncated
-            } else {
-                CompactionOutcome::Success
-            };
-            span.record("compaction_outcome", outcome.as_str());
-            span.record("compaction_delta_count", compact_output.delta_count as i64);
-            if let Some(ms) = compact_output.ttft_ms {
-                span.record("compaction_ttft_ms", ms as i64);
+            let tokens_after = self.chat_state_handle.get_total_tokens().await;
+            {
+                let span = tracing::Span::current();
+                span.record("compaction_tokens_after", tokens_after as i64);
+                span.record(
+                    "compaction_summary_chars",
+                    compact_output.content.chars().count() as i64,
+                );
+                span.record("compaction_attempts", telemetry.attempts as i64);
+                span.record(
+                    "compaction_degenerate_rejections",
+                    telemetry.degenerate_rejections as i64,
+                );
+                span.record(
+                    "compaction_input_overflow_rejections",
+                    input_overflow_rejections as i64,
+                );
+                span.record(
+                    "compaction_deterministic_rejections",
+                    telemetry.deterministic_rejections as i64,
+                );
+                span.record(
+                    "compaction_transient_rejections",
+                    telemetry.transient_rejections as i64,
+                );
+                let stop_reason = compact_output.stop_reason.as_deref().unwrap_or("stop");
+                span.record("compaction_stop_reason", stop_reason);
+                let outcome = if compact_output.truncated {
+                    CompactionOutcome::Truncated
+                } else {
+                    CompactionOutcome::Success
+                };
+                span.record("compaction_outcome", outcome.as_str());
+                span.record("compaction_delta_count", compact_output.delta_count as i64);
+                if let Some(ms) = compact_output.ttft_ms {
+                    span.record("compaction_ttft_ms", ms as i64);
+                }
+                if let Some(ms) = compact_output.stream_ms {
+                    span.record("compaction_stream_ms", ms as i64);
+                }
+                if let Some(ms) = compact_output.itl_max_ms {
+                    span.record("compaction_itl_max_ms", ms as i64);
+                }
             }
-            if let Some(ms) = compact_output.stream_ms {
-                span.record("compaction_stream_ms", ms as i64);
-            }
-            if let Some(ms) = compact_output.itl_max_ms {
-                span.record("compaction_itl_max_ms", ms as i64);
-            }
-        }
-        compaction.complete(
-            xai_grok_telemetry::events::CompactionCompleteStats {
-                tokens_after,
-                two_pass_used,
-                segments_queued,
-                degenerate_retries: telemetry.degenerate_rejections,
-                input_overflow_retries: input_overflow_rejections,
-            },
-            xai_grok_telemetry::events::CompactionTiming {
-                model_wait_ms: compact_output.model_wait_ms(),
-                pre_compaction_ms: Some(pre_compaction_ms),
-                post_compaction_ms: Some(post_compaction_ms),
-            },
-        );
-        Ok(())
+            compaction.complete(
+                xai_grok_telemetry::events::CompactionCompleteStats {
+                    tokens_after,
+                    two_pass_used,
+                    segments_queued,
+                    degenerate_retries: telemetry.degenerate_rejections,
+                    input_overflow_retries: input_overflow_rejections,
+                },
+                xai_grok_telemetry::events::CompactionTiming {
+                    model_wait_ms: compact_output.model_wait_ms(),
+                    pre_compaction_ms: Some(pre_compaction_ms),
+                    post_compaction_ms: Some(post_compaction_ms),
+                },
+            );
+            Ok(())
+        })
     }
     pub(crate) fn should_auto_compact(
         &self,
