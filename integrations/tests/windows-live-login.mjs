@@ -28,7 +28,7 @@ try {
   assert.equal(result.status,0,result.stdout+result.stderr);
   const release=join(install,'releases',readdirSync(join(install,'releases'))[0]);
   const env={};
-  for(const key of ['SystemRoot','SYSTEMROOT','WINDIR','ComSpec','COMSPEC','PATHEXT','PATH','TEMP','TMP'])if(process.env[key])env[key]=process.env[key];
+  for(const key of ['SYSTEMROOT','WINDIR','COMSPEC','PATHEXT','PATH','TEMP','TMP'])if(process.env[key])env[key]=process.env[key];
   Object.assign(env,{HOME:home,USERPROFILE:home,LOCALAPPDATA:join(home,'AppData/Local'),APPDATA:join(home,'AppData/Roaming'),
     GROK_HOME:join(home,'grok'),TERM:'xterm-256color',COLORTERM:'truecolor',DISABLE_TELEMETRY:'1',DISABLE_ERROR_REPORTING:'1',
     GROK_TELEMETRY_ENABLED:'off',GROK_TEST_OPEN_URL_FILE:browserFile});

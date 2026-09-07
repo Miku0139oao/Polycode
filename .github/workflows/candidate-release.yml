@@ -43,6 +43,13 @@ jobs:
           Expand-Archive protoc.zip -DestinationPath .ci/protoc
           "PROTOC=$PWD\.ci\protoc\bin\protoc.exe" >> $env:GITHUB_ENV
           "PROTOC_INCLUDE=$PWD\.ci\protoc\include" >> $env:GITHUB_ENV
+      - name: Fetch pinned Windows search dependency
+        shell: pwsh
+        run: |
+          . ./integrations/windows-process.ps1
+          . ./integrations/windows-ripgrep.ps1
+          $archive = Get-WindowsRipgrepArchive
+          "POLYCODE_RIPGREP_ARCHIVE=$archive" >> $env:GITHUB_ENV
       - name: Install bridge and terminal test dependencies
         shell: pwsh
         run: |
@@ -83,7 +90,9 @@ jobs:
         run: |
           node integrations/tests/windows-candidate-smoke.mjs candidate-out
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          node integrations/tests/windows-native-tools.mjs target/x86_64-pc-windows-msvc/release/xai-grok-pager.exe --mcp --task
+          $smoke = Get-Content windows-smoke-report.json -Raw | ConvertFrom-Json
+          if (-not $smoke.passed -or -not $smoke.searchExecutable) { throw 'Installed search dependency was not verified.' }
+          node integrations/tests/windows-native-tools.mjs target/x86_64-pc-windows-msvc/release/xai-grok-pager.exe --mcp --task --grep --clean-path --ripgrep $smoke.searchExecutable
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:

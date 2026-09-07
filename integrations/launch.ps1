@@ -44,6 +44,13 @@ $info.FileName = $options.Runtime
 $info.UseShellExecute = $false
 $info.WorkingDirectory = $project.FullName
 $info.Arguments = ($launchArgs | ForEach-Object { Quote-Argument $_ }) -join ' '
+$ripgrep = Join-Path (Split-Path $PSScriptRoot) 'vendor\rg.exe'
+if (Test-Path -LiteralPath $ripgrep -PathType Leaf) {
+    Assert-WindowsExecutable $ripgrep
+    $info.EnvironmentVariables['RG_BIN_PATH'] = [IO.Path]::GetFullPath($ripgrep)
+} elseif ($installed) {
+    throw 'Bundled search executable is missing. Reinstall the Polycode Windows runtime.'
+}
 $process = New-Object Diagnostics.Process
 $process.StartInfo = $info
 try {

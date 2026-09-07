@@ -17,6 +17,10 @@ const nonce=randomBytes(20).toString('hex'), file=join(workspace,'fixture.txt');
 writeFileSync(file,nonce);
 const testMcp=process.argv.includes('--mcp');
 const testTask=process.argv.includes('--task');
+const testGrep=process.argv.includes('--grep');
+const cleanPath=process.argv.includes('--clean-path');
+const ripgrepIndex=process.argv.indexOf('--ripgrep');
+const ripgrep=ripgrepIndex<0?null:resolve(process.argv[ripgrepIndex+1]);
 const taskState=Object.fromEntries(['codex','cursor'].map(p=>[p,{nonce:randomBytes(24).toString('hex'),childCalls:0,verified:false}]));
 const mcpLog=join(root,'mcp-events.jsonl'),mcpFile=join(workspace,'mcp-fixture.txt');
 const mcpNonces=Object.fromEntries(['codex','cursor'].map(p=>[p,randomBytes(24).toString('hex')]));
@@ -61,9 +65,22 @@ for(const provider of ['codex','cursor']) {
           return completion(body,{content:state.nonce});
         }
         const taskPrompt=!auxiliary && (prompt.match(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/)?.[1]
-          || (['Read the isolated fixture.','Read the resumed fixture.','Wait until cancelled.','Write the isolated output.','Run the isolated Windows command.','Discover and call the local MCP probe.','Run the native Task probe.'].includes(prompt.trim())?prompt.trim():null));
+          || (['Read the isolated fixture.','Read the resumed fixture.','Wait until cancelled.','Write the isolated output.','Run the isolated Windows command.','Discover and call the local MCP probe.','Run the native Task probe.','Search the isolated fixture.'].includes(prompt.trim())?prompt.trim():null));
         requests.push({provider,model:body.model,prompt:taskPrompt||'[auxiliary]',...(!taskPrompt?{promptPrefix:prompt.slice(0,240)}:{}),tools:tools.map(t=>t.name)});
         if(!taskPrompt)return completion(body,{content:'Windows fixture ready'});
+        if(taskPrompt==='Search the isolated fixture.') {
+          const id='grep-'+provider;
+          const result=body.messages.find(m=>m.role==='tool' && m.tool_call_id===id);
+          if(result) {
+            assert.ok(JSON.stringify(result).includes(nonce),'Native Grep failed: '+JSON.stringify(result).slice(0,600));
+            return completion(body,{content:'WINDOWS_GREP_'+provider.toUpperCase()+'_PASS'});
+          }
+          const definition=tools.find(t=>t.name==='grep');
+          assert.ok(definition,'Native Grep tool missing');
+          const args={pattern:nonce,path:file};
+          assert.ok((definition.parameters.required||[]).every(key=>key in args),'Unknown required native Grep argument');
+          return call(body,definition,args,id);
+        }
         if(taskPrompt==='Run the native Task probe.') {
           const state=taskState[provider],id='task-'+provider;
           const results=body.messages.filter(m=>m.role==='tool' && m.tool_call_id===id);
@@ -181,10 +198,17 @@ service.server.on('request',(req,res)=>{
   controlRequests.push(request);res.on('finish',()=>{request.status=res.statusCode;});
 });
 const env={};
-for(const key of ['SystemRoot','SYSTEMROOT','WINDIR','ComSpec','COMSPEC','PATHEXT','PATH','TEMP','TMP'])if(process.env[key])env[key]=process.env[key];
+for(const key of ['SYSTEMROOT','WINDIR','COMSPEC','PATHEXT','PATH','TEMP','TMP'])if(process.env[key])env[key]=process.env[key];
 Object.assign(env,{HOME:home,USERPROFILE:home,LOCALAPPDATA:join(home,'AppData/Local'),APPDATA:join(home,'AppData/Roaming'),
   GROK_HOME:join(home,'grok'),GROK_SHELL:'powershell',TERM:'xterm-256color',COLORTERM:'truecolor',DISABLE_TELEMETRY:'1',DISABLE_ERROR_REPORTING:'1',
   GROK_TELEMETRY_ENABLED:'off',GROK_TEST_OPEN_URL_FILE:join(root,'browser.txt'),POLYCODE_BRIDGE_URL:bridge.url,POLYCODE_BRIDGE_TOKEN:bridge.token});
+if(cleanPath) {
+  const windows=process.env.SystemRoot||process.env.SYSTEMROOT;
+  assert.ok(windows,'Windows system directory is unavailable');
+  env.PATH=[join(windows,'System32'),join(windows,'System32/WindowsPowerShell/v1.0'),windows].join(';');
+  delete env.GROK_SHELL;
+}
+if(ripgrep)env.RG_BIN_PATH=ripgrep;
 const nativeArgs=['--polycode-native','--no-external-acp','--fullscreen','--trust','--cwd',workspace];
 let t=new WindowsTerminal(binary,nativeArgs,workspace,env);
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
@@ -224,6 +248,7 @@ try {
     t.write('g\r');await pause(1500);
     await command('Read the isolated fixture.');
     await text('WINDOWS_READ_'+provider.toUpperCase()+'_PASS');
+    if(testGrep)await toolTurn('Search the isolated fixture.','WINDOWS_GREP_'+provider.toUpperCase()+'_PASS');
     await pause(700);
     await toolTurn('Write the isolated output.','WINDOWS_WRITE_'+provider.toUpperCase()+'_PASS');
     assert.equal(readFileSync(join(workspace,provider+'-written.txt'),'utf8'),nonce+'-'+provider);
@@ -248,6 +273,7 @@ try {
     report.mcp={calls:2,bridgeTokenLeaked:false};
   }
   if(testTask)report.nativeTasks=Object.fromEntries(Object.entries(taskState).map(([provider,state])=>[provider,{childCalls:state.childCalls,verified:state.verified,model:state.model,subagentId:state.subagentId}]));
+  if(testGrep)report.grep={providers:['codex','cursor'],cleanPath,ripgrepSha256:ripgrep?createHash('sha256').update(readFileSync(ripgrep)).digest('hex'):null};
   await pause(1000);
   await command('Wait until cancelled.');
   await text('WINDOWS_CANCEL_READY');

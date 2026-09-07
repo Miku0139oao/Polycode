@@ -28,6 +28,10 @@ export function verifyCandidate(candidate, evidence, version, now = Date.now()) 
       /^[a-f0-9]{64}$/.test(manifest.native?.sha256), 'Invalid Windows candidate identity/provenance');
     requireThat(['2', '3', 's', 'z'].includes(String(manifest.native.profile?.opt_level)) &&
       manifest.native.profile?.debug_assertions === false && manifest.native.profile?.test === false, 'Release profile required');
+    const search = (Array.isArray(manifest.files) ? manifest.files : []).filter(file => file?.path === 'vendor/rg.exe');
+    requireThat(search.length === 1 && search[0].bytes === 4265472 &&
+      search[0].sha256 === 'a286ea6f4d0d8c1c6c2234728cf2d96afcf371c550086c11e1ea28730dcfb418',
+      'Pinned Windows search dependency is missing or changed');
     requireThat(JSON.stringify(readdirSync(candidate).sort()) === JSON.stringify([...assets, 'manifest.json', 'SHA256SUMS'].sort()), 'Unexpected or missing candidate assets');
     requireThat(Array.isArray(manifest.artifacts) && JSON.stringify(manifest.artifacts.map(a => a.path).sort()) === JSON.stringify(assets), 'Invalid asset inventory');
     const sums = new Map();

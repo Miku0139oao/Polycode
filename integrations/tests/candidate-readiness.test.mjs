@@ -8,12 +8,13 @@ import { CANDIDATE_GATES, verifyCandidate } from '../candidate-readiness.mjs';
 const root = mkdtempSync(join(tmpdir(), 'windows-candidate-gates-'));
 after(() => rmSync(root, { recursive: true, force: true }));
 const sha = b => createHash('sha256').update(b).digest('hex');
-function fixture() {
+function fixture(includeSearch = true) {
   const candidate = mkdtempSync(join(root, 'candidate-')), evidence = mkdtempSync(join(root, 'evidence-'));
   const paths = ['install.ps1', 'polycode-bun-windows-x64.gz', 'polycode-runtime.zip', 'polycode-windows-x64.gz'];
   const manifest = { schemaVersion: 3, version: 'v0.2.1', platform: 'windows', target: 'x86_64-pc-windows-msvc',
     executableFormat: 'PE32+', classification: 'immutable-candidate', provenance: 'build-report',
     native: { transformed: false, revision: 'a'.repeat(40), sha256: 'b'.repeat(64), profile: { opt_level: '3', debug_assertions: false, test: false } },
+    files: includeSearch ? [{path:'vendor/rg.exe',bytes:4265472,sha256:'a286ea6f4d0d8c1c6c2234728cf2d96afcf371c550086c11e1ea28730dcfb418'}] : [],
     artifacts: paths.map(path => { const bytes = Buffer.from('SYNTHETIC POLICY FIXTURE ' + path); writeFileSync(join(candidate,path), bytes); return { path, bytes: bytes.length, sha256: sha(bytes) }; }),
   };
   const text = JSON.stringify(manifest);
@@ -30,6 +31,9 @@ function fixture() {
 }
 test('prerelease policy passes a complete synthetic fixture without stable authorization', () => {
   const result = fixture().check(); assert.equal(result.status,'PASS'); assert.equal(result.stableReleaseAuthorized,false);
+});
+test('candidate without the Windows search executable cannot publish', () => {
+  const result=fixture(false).check();assert.equal(result.status,'BLOCKED');assert.match(result.reason,/search dependency/);
 });
 test('every gate requires its actual mode and PASS, including native generation', () => {
   for (const id of CANDIDATE_GATES) for (const state of ['BLOCKED','SKIPPED','FAIL']) {

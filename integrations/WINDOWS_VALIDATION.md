@@ -19,6 +19,13 @@ Stop after any nonzero exit. Build evidence uses Cargo's actual artifact profile
 Local dirty builds are identified in the report. All runtime files and executable
 bytes are hashed in the candidate manifest.
 
+Packaging fetches the pinned Windows ripgrep 15.0.0 archive into a build cache,
+verifies its SHA256, and includes `vendor/rg.exe` plus its licenses in the runtime
+ZIP. For offline packaging, supply `-RipgrepArchive` or
+`POLYCODE_RIPGREP_ARCHIVE` pointing to that exact official archive. Installation
+does not download search tools. The Windows launcher provides the installed
+absolute path through `RG_BIN_PATH` to the native engine.
+
 Windows manifests use schema 3, platform `windows`, target
 `x86_64-pc-windows-msvc`, executableFormat `PE32+`. Windows installation rejects
 legacy WSL manifests. The stable-readiness verifier can still inspect schema 2
@@ -51,6 +58,12 @@ approval, and verifies the bridge token is absent from its process environment.
 Task responses require an actual child model request on the parent's provider
 and model, its generated value in the correlated result, and a typed child ID.
 These flags still use synthetic model transport and do not satisfy live coding.
+
+Use `--grep --clean-path --ripgrep INSTALLED_RG_EXE` alongside those flags to
+verify native Grep with only Windows system paths available and the default
+Windows shell selection. `windows-candidate-smoke.mjs` records the verified
+installed path as `searchExecutable`; CI passes it to the native tools test.
+This PATH restriction is not a replacement for a clean Windows VM.
 
 ## Interactive login
 
@@ -117,10 +130,28 @@ This package is not a published or accepted GitHub artifact.
   the frame completes. An isolated compilation of the production functions and
   regression test fails with the original loop and passes with the fix, covering
   interruptions in both the length prefix and body plus a subsequent frame.
-  Full-shell testing and a newly built executable remain required for this fix.
+  The full Windows shell test binary subsequently passed this regression and
+  all 11 bridge tests. The rebuilt native executable also passed the complete
+  Read/Write/PowerShell/MCP/Task/cancel/resume integration run.
 - The old installed WSL package started ChatGPT/Cursor browser authorization and
   displayed Grok's browser approval screen. These observations do not reproduce
   or resolve the user's real account/generation failures.
+
+### Search dependency correction
+
+The native `5d75902` executable SHA256 is
+`6e89915c6f30e62b4b18681d0e818073022b0ad71c3f2c1728f64b6addc85760`.
+Its initial package lacked ripgrep: native Grep passed with developer tools on
+PATH and failed with Windows system paths alone. That package is superseded.
+
+With the same native engine and the corrected runtime package, installed startup
+and the complete native integration run passed, including Grep for both providers
+under the restricted PATH. The bundled executable SHA256 is
+`a286ea6f4d0d8c1c6c2234728cf2d96afcf371c550086c11e1ea28730dcfb418`.
+Installer tests cover forwarding its absolute path, executing the packaged search
+tool, and rejecting a different archive. Publication now rejects an inventory
+without this pinned dependency. A fresh clean-source candidate and GitHub artifact
+are still required before live acceptance.
 
 ## Remaining acceptance
 

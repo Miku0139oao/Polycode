@@ -37,7 +37,7 @@ before(() => {
   assert.equal(process.platform, 'win32');
   originalPath = userPath();
   const fixture = join(root, 'fixture.exe');
-  const code = 'using System; using System.Text; public class Fixture { public static int Main(string[] args) { Console.WriteLine("--no-external-acp --polycode-native --polycode-provider"); foreach(var arg in args) Console.WriteLine("ARG:" + Convert.ToBase64String(Encoding.UTF8.GetBytes(arg))); return Array.IndexOf(args, "--fixture-exit") >= 0 ? 23 : 0; } }';
+  const code = 'using System; using System.Text; public class Fixture { public static int Main(string[] args) { Console.WriteLine("--no-external-acp --polycode-native --polycode-provider"); Console.WriteLine("RG:" + Convert.ToBase64String(Encoding.UTF8.GetBytes(Environment.GetEnvironmentVariable("RG_BIN_PATH") ?? ""))); foreach(var arg in args) Console.WriteLine("ARG:" + Convert.ToBase64String(Encoding.UTF8.GetBytes(arg))); return Array.IndexOf(args, "--fixture-exit") >= 0 ? 23 : 0; } }';
   const cs = join(root, 'fixture.cs'); writeFileSync(cs, code);
   ok(run(join(process.env.SystemRoot, 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'), ['/nologo', '/platform:x64', '/target:exe', '/out:' + fixture, cs]));
   const bun = ok(ps('(Get-Command bun.exe).Source')).trim();
@@ -47,6 +47,13 @@ before(() => {
 after(() => {
   assert.equal(userPath(), originalPath, 'Installer changed the real user PATH');
   rmSync(root, { recursive: true, force: true });
+});
+test('Windows search archive rejects bytes outside the pinned release', () => {
+  const bad=join(root,'wrong-ripgrep.zip');writeFileSync(bad,'not the pinned release');
+  const r=ps('. '+q(join(source,'integrations/windows-ripgrep.ps1'))+'; Get-WindowsRipgrepArchive '+q(bad));
+  assert.notEqual(r.status,0);
+  assert.match(r.stdout+r.stderr,/does not match the pinned Windows release/);
+  assert.equal(readFileSync(bad,'utf8'),'not the pinned release');
 });
 for (const runtime of ['powershell.exe', 'pwsh.exe']) test(runtime + ': install, relocate, preserve argv and roll back', () => {
   const dest = join(root, runtime + ' space 中文 [test]');
@@ -61,6 +68,16 @@ for (const runtime of ['powershell.exe', 'pwsh.exe']) test(runtime + ': install,
   const r = run(runtime, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(release, 'polycode.ps1'),
     '-Project', dest, '-Backend', 'CuRsOr', '--', ...native]);
   const forwarded = ok(r).split(/\r?\n/).filter(s => s.startsWith('ARG:')).map(s => Buffer.from(s.slice(4), 'base64').toString('utf8'));
+  const rg = join(release, 'vendor', 'rg.exe');
+  const rgEnv = r.stdout.split(/\r?\n/).find(s => s.startsWith('RG:'));
+  assert.ok(rgEnv, 'Native subprocess did not observe its search executable');
+  assert.equal(realpathSync.native(Buffer.from(rgEnv.slice(3), 'base64').toString('utf8')), realpathSync.native(rg));
+  const inventory = JSON.parse(readFileSync(join(release,'third-party/dependencies.json'),'utf8').replace(/^\uFEFF/,''));
+  assert.equal(inventory.ripgrep.version,'15.0.0');
+  assert.equal(inventory.ripgrep.sha256,sha(readFileSync(rg)));
+  const fixtureText=join(dest,'search-fixture.txt');writeFileSync(fixtureText,'isolated-search-value\n');
+  const searched=spawnSync(rg,['isolated-search-value',fixtureText],{encoding:'utf8',timeout:30000,env:{SystemRoot:process.env.SystemRoot,PATH:join(process.env.SystemRoot,'System32')}});
+  assert.match(ok(searched),/isolated-search-value/);
   assert.deepEqual(forwarded.slice(-native.length), native);
   assert.ok(forwarded.includes('--polycode-native'));
   assert.ok(forwarded.includes('cursor'));

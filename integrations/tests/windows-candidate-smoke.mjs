@@ -22,11 +22,16 @@ try {
   const config = JSON.parse(readFileSync(join(release, 'install-config.json'), 'utf8').replace(/^\uFEFF/, ''));
   assert.equal(config.platform, 'windows');
   assert.equal(createHash('sha256').update(readFileSync(config.binary)).digest('hex'), manifest.native.sha256);
+  const searchEntry = manifest.files.find(file => file.path === 'vendor/rg.exe');
+  assert.ok(searchEntry, 'Candidate omitted the Windows search dependency');
+  result.searchExecutable = join(release,'vendor','rg.exe');
+  result.ripgrepSha256 = createHash('sha256').update(readFileSync(result.searchExecutable)).digest('hex');
+  assert.equal(result.ripgrepSha256, searchEntry.sha256);
   for (const provider of ['native', 'codex', 'cursor']) {
     const workspace = join(root, provider); mkdirSync(workspace);
     const home = join(workspace, 'home'); mkdirSync(home);
     const env = {};
-    for (const key of ['SystemRoot','SYSTEMROOT','WINDIR','ComSpec','COMSPEC','PATHEXT','PATH','TEMP','TMP']) if (process.env[key]) env[key] = process.env[key];
+    for (const key of ['SYSTEMROOT','WINDIR','COMSPEC','PATHEXT','PATH','TEMP','TMP']) if (process.env[key]) env[key] = process.env[key];
     Object.assign(env, { HOME: home, USERPROFILE: home, LOCALAPPDATA: join(home,'AppData/Local'), APPDATA: join(home,'AppData/Roaming'),
       GROK_HOME: join(home,'grok'), TERM: 'xterm-256color', COLORTERM: 'truecolor', DISABLE_TELEMETRY:'1', DISABLE_ERROR_REPORTING:'1',
       GROK_TELEMETRY_ENABLED:'off', GROK_TEST_OPEN_URL_FILE:join(workspace,'browser.txt') });

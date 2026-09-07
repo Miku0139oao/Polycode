@@ -9,6 +9,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Binary,
     [Parameter(Mandatory = $true)][string]$Runtime,
     [string]$BuildReport,
+    [string]$RipgrepArchive = $env:POLYCODE_RIPGREP_ARCHIVE,
     [string]$Output = (Join-Path $env:TEMP ('polycode-candidate-' + [Guid]::NewGuid().ToString('N'))),
     [ValidatePattern('^v[0-9]+\.[0-9]+\.[0-9]+$')][string]$Version = 'v0.2.1'
 )
@@ -27,6 +28,7 @@ function Get-Sha256([string]$Path) {
     finally { $hash.Dispose(); $stream.Dispose() }
 }
 . (Join-Path $PSScriptRoot 'windows-process.ps1')
+. (Join-Path $PSScriptRoot 'windows-ripgrep.ps1')
 function Copy-Staged([string]$From, [string]$Relative) {
     $destination = Join-Path $stage $Relative
     New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null
@@ -64,6 +66,24 @@ try {
     if ($bunVersion -ne '1.3.14') { throw 'This candidate package is qualified for Bun 1.3.14 only.' }
     New-Item -ItemType Directory -Force -Path $payload | Out-Null
     foreach ($file in @('polycode.ps1', 'integrations\launch.ps1', 'integrations\windows-process.ps1', 'integrations\RELEASE_READINESS.md', 'LICENSE', 'THIRD-PARTY-NOTICES')) { Copy-Staged (Join-Path $source $file) $file }
+    # Windows Grep otherwise depends on a developer-installed rg on PATH.
+    # Extract only named entries from the pinned official archive.
+    $rgArchive = Get-WindowsRipgrepArchive $RipgrepArchive
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $rgZip = [IO.Compression.ZipFile]::OpenRead($rgArchive)
+    try {
+        foreach ($name in @('rg.exe', 'COPYING', 'LICENSE-MIT', 'UNLICENSE')) {
+            $entry = $rgZip.GetEntry('ripgrep-15.0.0-x86_64-pc-windows-msvc/' + $name)
+            if (-not $entry) { throw "Pinned ripgrep archive is missing $name" }
+            $relative = if ($name -eq 'rg.exe') { 'vendor\rg.exe' } else { 'third-party\ripgrep\' + $name }
+            $destination = Join-Path $stage $relative
+            New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $destination, $false)
+        }
+    } finally { $rgZip.Dispose() }
+    $rgPath = Join-Path $stage 'vendor\rg.exe'
+    Assert-WindowsExecutable $rgPath
+    if ((Invoke-Native $rgPath @('--version')) -notmatch '^ripgrep 15\.0\.0(?:\s|$)') { throw 'Unexpected bundled ripgrep version.' }
     $provider = Join-Path $PSScriptRoot 'native-provider'
     $bundle = Join-Path $stage 'integrations\native-provider\launch.mjs'
     New-Item -ItemType Directory -Force -Path (Split-Path $bundle) | Out-Null
@@ -89,7 +109,7 @@ try {
         $dependencies += @{ name = $package.name; version = $package.version; license = $package.license }
     }
     if (-not $dependencies.Count) { throw 'Dependency inventory is empty.' }
-    @{ dependencies = $dependencies; bun = @{ version = $bunVersion; revision = $bunRevision; licenseSource = 'https://github.com/oven-sh/bun/blob/main/LICENSE.md' } } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $stage 'third-party\dependencies.json') -Encoding UTF8
+    @{ dependencies = $dependencies; bun = @{ version = $bunVersion; revision = $bunRevision; licenseSource = 'https://github.com/oven-sh/bun/blob/main/LICENSE.md' }; ripgrep = @{ version = '15.0.0'; sha256 = (Get-Sha256 $rgPath); archiveSha256 = (Get-Sha256 $rgArchive); source = 'https://github.com/BurntSushi/ripgrep/releases/tag/15.0.0' } } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $stage 'third-party\dependencies.json') -Encoding UTF8
     # Copy, never strip: acceptance must refer to the bytes that are installed.
     $nativeCopy = Join-Path $work 'polycode.exe'; $bun = Join-Path $work 'bun.exe'
     Copy-Item -LiteralPath $Binary -Destination $nativeCopy
