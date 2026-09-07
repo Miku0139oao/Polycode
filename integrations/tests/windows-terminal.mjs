@@ -28,6 +28,13 @@ export class WindowsTerminal {
     this.write('\x11'); await delay(250); this.write('\x11');
     const deadline = Date.now() + 10000;
     while (!this.exited && Date.now() < deadline) await delay(100);
+    if (this.exited) {
+      // node-pty 1.1.0 closes conout on natural exit but leaves its input
+      // socket and connection worker referenced. Release only those owned
+      // harness resources; kill() would enumerate the now-detached console.
+      this.terminal._agent.inSocket.destroy();
+      this.terminal._agent._conoutSocketWorker.dispose();
+    }
     if (!this.exited) {
       this.forcedExit = true;
       // A WSL console can contain shared hosts. Never use node-pty's

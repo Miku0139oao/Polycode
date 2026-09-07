@@ -2059,12 +2059,12 @@ fn main() {
 async fn async_main(args: PagerArgs) -> Result<()> {
     xai_grok_extra_ca::ensure_default_crypto_provider();
     let mut args = args.apply_cwd()?;
-    // The snapshot on the pipe seeds the trusted overlay; fetch the same bridge
-    // catalog before *any* native agent/config/model bootstrap in this process.
-    if xai_grok_shell::leader::polycode_bootstrap::is_bootstrapped_leader() {
-        xai_grok_shell::polycode::bridge()
-            .ok_or_else(|| anyhow::anyhow!("Private leader bridge unavailable"))?
-            .refresh(false)
+    // Both the TUI and its private leader need the authenticated catalog before
+    // config/model bootstrap. Resume can load a session before the provider
+    // picker performs its asynchronous reload; an empty TUI overlay otherwise
+    // replaces the restored subscription route with the unauthenticated default.
+    if let Some(bridge) = xai_grok_shell::polycode::bridge() {
+        bridge.refresh(false)
             .await
             .map_err(anyhow::Error::msg)?;
     }

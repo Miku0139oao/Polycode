@@ -16,6 +16,7 @@ const nonce=randomBytes(20).toString('hex'), file=join(workspace,'fixture.txt');
 writeFileSync(file,nonce);
 const store=new CredentialStore(join(home,'auth'));
 const requests=[], failures=[], permissions=[];
+let cancelledStreams=0;
 function content(value) { return typeof value==='string'?value:Array.isArray(value)?value.map(v=>v.text||'').join('\n'):''; }
 function completion(body,delta,finish='stop') {
   if (!body.stream) return Response.json({id:'fixture',object:'chat.completion',created:1,model:body.model,choices:[{index:0,message:{role:'assistant',...delta},finish_reason:finish}]});
@@ -31,22 +32,30 @@ for(const provider of ['codex','cursor']) {
   providers[provider]={
     close(){}, refresh:async credential=>credential,
     models:async()=>[{id:'mock-'+provider,name:'Mock '+provider,contextWindow:provider==='cursor'?null:131072}],
-    async complete(body) {
+    async complete(body, _credential, {signal}) {
       try {
         const last=[...(body.messages||[])].reverse().find(m=>m.role==='user'), prompt=content(last?.content);
         const auxiliary=prompt.startsWith('<system-reminder>') || prompt.startsWith('CWD:') || !(body.tools||[]).length;
         const taskPrompt=!auxiliary && (prompt.match(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/)?.[1]
-          || (['Read the isolated fixture.','Write the isolated output.','Run the isolated Windows command.'].includes(prompt.trim())?prompt.trim():null));
+          || (['Read the isolated fixture.','Read the resumed fixture.','Wait until cancelled.','Write the isolated output.','Run the isolated Windows command.'].includes(prompt.trim())?prompt.trim():null));
         const tools=(body.tools||[]).map(t=>t.function);
         requests.push({provider,model:body.model,prompt:taskPrompt||'[auxiliary]',...(!taskPrompt?{promptPrefix:prompt.slice(0,240)}:{}),tools:tools.map(t=>t.name)});
         if(tools.length===1 && tools[0].name==='session_title') return call(body,tools[0],{session_title:'Windows fixture session'},'fixture-title');
         if(!taskPrompt)return completion(body,{content:'Windows fixture ready'});
-        if(taskPrompt==='Read the isolated fixture.') {
-          const id='read-'+provider;
+        if(taskPrompt==='Wait until cancelled.') {
+          const stream=new ReadableStream({start(controller){
+            controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({id:'cancel',object:'chat.completion.chunk',created:1,model:body.model,choices:[{index:0,delta:{role:'assistant',content:'WINDOWS_CANCEL_READY'},finish_reason:null}]})+'\n\n'));
+            signal.addEventListener('abort',()=>{cancelledStreams++;controller.close();},{once:true});
+          }});
+          return new Response(stream,{headers:{'Content-Type':'text/event-stream'}});
+        }
+        if(['Read the isolated fixture.','Read the resumed fixture.'].includes(taskPrompt)) {
+          const resumed=taskPrompt==='Read the resumed fixture.';
+          const id=(resumed?'resumed-read-':'read-')+provider;
           const result=body.messages.find(m=>m.role==='tool' && m.tool_call_id===id);
           if(result) {
-            assert.ok(JSON.stringify(result).includes(nonce),'Native Read did not return fixture bytes');
-            return completion(body,{content:'WINDOWS_READ_'+provider.toUpperCase()+'_PASS'});
+            assert.ok(JSON.stringify(result).includes(nonce+(resumed?'-resumed':'')),'Native Read did not return fixture bytes');
+            return completion(body,{content:resumed?'WINDOWS_RESUME_PASS':'WINDOWS_READ_'+provider.toUpperCase()+'_PASS'});
           }
           const definition=tools.find(t=>['read','read_file'].includes(t.name.toLowerCase()));
           assert.ok(definition,'No advertised native read tool');
@@ -116,7 +125,8 @@ for(const key of ['SystemRoot','SYSTEMROOT','WINDIR','ComSpec','COMSPEC','PATHEX
 Object.assign(env,{HOME:home,USERPROFILE:home,LOCALAPPDATA:join(home,'AppData/Local'),APPDATA:join(home,'AppData/Roaming'),
   GROK_HOME:join(home,'grok'),GROK_SHELL:'powershell',TERM:'xterm-256color',COLORTERM:'truecolor',DISABLE_TELEMETRY:'1',DISABLE_ERROR_REPORTING:'1',
   GROK_TELEMETRY_ENABLED:'off',GROK_TEST_OPEN_URL_FILE:join(root,'browser.txt'),POLYCODE_BRIDGE_URL:bridge.url,POLYCODE_BRIDGE_TOKEN:bridge.token});
-const t=new WindowsTerminal(binary,['--polycode-native','--no-external-acp','--fullscreen','--trust','--cwd',workspace],workspace,env);
+const nativeArgs=['--polycode-native','--no-external-acp','--fullscreen','--trust','--cwd',workspace];
+let t=new WindowsTerminal(binary,nativeArgs,workspace,env);
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 async function text(value){await t.until(()=>plain(t.output).includes(value),90000);}
 async function command(value){t.write(value+'\r');await pause(800);}
@@ -151,6 +161,26 @@ try {
     await pause(700);
     await toolTurn('Run the isolated Windows command.','WINDOWS_SHELL_'+provider.toUpperCase()+'_PASS');
   }
+  await pause(1000);
+  await command('Wait until cancelled.');
+  await text('WINDOWS_CANCEL_READY');
+  t.write('\x03');
+  await t.until(()=>cancelledStreams===1,15000);
+  assert.equal(t.exited,false,'Cancellation exited the native TUI');
+  report.cancelledStreams=cancelledStreams;
+  await pause(1500);
+  await t.close();
+  assert.ok(!t.forcedExit && t.exitCode===0,'First terminal did not exit normally');
+  const session=plain(t.output).match(/--resume\s+([a-f0-9-]{36})/)?.[1];
+  assert.ok(session,'Native TUI did not expose a resumable session');
+  writeFileSync(join(root,'first-terminal.txt'),plain(t.output).replaceAll(bridge.token,'[REDACTED]'));
+  writeFileSync(file,nonce+'-resumed');
+  t=new WindowsTerminal(binary,[...nativeArgs,'--resume',session],workspace,env);
+  await text('Mock cursor');
+  await pause(1000);
+  await command('Read the resumed fixture.');
+  await text('WINDOWS_RESUME_PASS');
+  report.resumedSession=session;
   assert.deepEqual(failures,[]);
   report.passed=true;
 } catch(error){report.failure=error.message;process.exitCode=1;}
