@@ -1,5 +1,28 @@
 # Native checkpoint: tested core, release still pending
 
+## Later parent checkpoint (2026-09-07, not a release)
+
+Source **`8e44bf2`** (Rust contents of `041f1a2` plus a JS-only Cursor expiry fix).
+Development binary SHA-256
+**`2fbf2c63edd6371e0e76116bec9b02b5610f322d4547117c572a40dce679c029`**,
+553,893,040 bytes, same unoptimized profile as below. Build
+`native-app-build-041/report.json`, 636s, `--offline --locked`.
+
+Mock-network permission/billing preflight on that exact hash:
+**8/8 PASS** (ChatGPT-selected and Cursor-selected tool deny, allow-once,
+billing deny, billing allow including painted continuation
+`NATIVE_ACCEPTANCE_BILLING_ALLOW_CONTINUED`). Evidence
+`native-billing-artifacts-041-1/report.json`.
+
+Default-feature leader PTY plus native Task inheritance/result/child resume
+also **PASS** on the same hash (`native-artifacts-041-default-tasks`; mock
+endpoints only). Real vendor/paid paths remain **BLOCKED**. Live Cursor OAuth
+is unproven; the JS fix only stops Unix-second `expiresAt` from being rejected
+as already elapsed. No GitHub release.
+
+The 18d unit-regression numbers below are unchanged and were not re-run on this
+binary.
+
 ## Source and executable
 
 - Rust source: `18dce8670c9767944e2a225a75dd10580a27e985`.
