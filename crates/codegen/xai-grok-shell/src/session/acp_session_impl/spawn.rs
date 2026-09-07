@@ -1154,6 +1154,17 @@ pub(crate) async fn spawn_session_actor(
     drop(tool_setup_span);
     crate::waterfall::mark(&wf_sid, crate::waterfall::stage::SB_AGENT_BUILT);
     let system_prompt = agent.system_prompt().to_string();
+    // Read the old context before the fresh snapshot replaces it. The conversation head,
+    // not system_prompt.txt, is authoritative; normal children get a fresh prompt below.
+    if !startup_hints.is_subagent
+        && !startup_hints.preserve_inherited_system
+        && matches!(conversation.first(), Some(ConversationItem::System(_)))
+        && let Some(renderer) = agent.tool_bridge().template_renderer_snapshot().await
+        && let Some(saved_context) = load_prompt_context(&session_info)
+        && migrate_resumed_builtin_identity(&mut conversation, &saved_context, &renderer)
+    {
+        tracing::info!(session_id = %session_info.id.0, "migrated legacy built-in prompt identity to Polycode");
+    }
     let mut prompt_context = agent.prompt_context().clone();
     prompt_context.normalize_for_persistence();
     save_prompt_context(&session_info, &prompt_context);

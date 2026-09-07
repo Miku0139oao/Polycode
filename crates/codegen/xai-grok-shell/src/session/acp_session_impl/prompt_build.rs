@@ -283,7 +283,26 @@ pub(super) fn is_project_instructions(item: &ConversationItem) -> bool {
         })
         .is_some_and(|t| t.starts_with(LEGACY_AGENTS_MD_REMINDER_PREFIX))
 }
+/// Change only the authoritative system head when its saved context proves a legacy built-in prompt.
+/// User/assistant turns and additional system messages are never searched or rewritten.
+pub(super) fn migrate_resumed_builtin_identity(
+    conversation: &mut [ConversationItem],
+    saved_context: &xai_grok_agent::PromptContext,
+    renderer: &xai_grok_tools::types::template_renderer::TemplateRenderer,
+) -> bool {
+    let Some(ConversationItem::System(sys)) = conversation.first_mut() else {
+        return false;
+    };
+    let Some(migrated) = saved_context
+        .migrate_legacy_builtin_identity_with_renderer(&sys.content, renderer)
+    else {
+        return false;
+    };
+    sys.content = std::sync::Arc::<str>::from(migrated);
+    true
+}
 /// Subagent spawns (including `resume_from`) overwrite the leading System with the fresh prompt; top-level user-resumed sessions keep theirs.
+/// Recognized legacy built-in identity is migrated separately before this installation step.
 /// When no System is present, insert one and grow the preserved prefix.
 pub(super) fn install_system_prompt(
     conversation: &mut Vec<ConversationItem>,
@@ -303,6 +322,9 @@ pub(super) fn install_system_prompt(
         }
     }
 }
+#[cfg(test)]
+#[path = "../acp_session_tests/polycode_identity_tests.rs"]
+mod polycode_identity_tests;
 #[cfg(test)]
 mod install_system_prompt_tests {
     use super::install_system_prompt;

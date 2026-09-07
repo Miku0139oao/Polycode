@@ -1,6 +1,7 @@
 pub mod agents_md;
 pub mod browser_verification;
 pub mod context;
+mod identity;
 pub mod ignore;
 pub mod skills;
 pub mod subagent_prompts;

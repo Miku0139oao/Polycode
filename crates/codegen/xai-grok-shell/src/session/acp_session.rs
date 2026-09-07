@@ -1505,7 +1505,6 @@ fn load_system_prompt_from_dir(session_dir: &std::path::Path) -> Option<String> 
 /// Load the canonical prompt context from `{session_dir}/prompt_context.json`.
 ///
 /// Returns `None` for sessions without a persisted context.
-#[expect(dead_code, reason = "API for future viewers/debug tools")]
 pub(crate) fn load_prompt_context(
     session_info: &SessionInfo,
 ) -> Option<xai_grok_agent::PromptContext> {

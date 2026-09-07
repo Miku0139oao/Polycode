@@ -133,13 +133,13 @@ pub struct PromptContext {
     /// Whether the agent is running in a non-interactive session (headless / SDK / stdio / generic-ACP).
     #[serde(default)]
     pub is_non_interactive: bool,
-    /// Identity in the primary grok-build system prompt (`You are <label>…`).
-    /// Not the UI picker name. Defaults to [`DEFAULT_SYSTEM_PROMPT_LABEL`].
+    /// Legacy/configured label exposed to custom prompt templates, not model provenance.
+    /// Built-in prompts use the stable Polycode identity regardless of this label.
     #[serde(default = "default_system_prompt_label")]
     pub system_prompt_label: String,
 }
-/// Default identity on trim-tool-descriptions (`You are Grok released by xAI`).
-pub const DEFAULT_SYSTEM_PROMPT_LABEL: &str = "Grok";
+/// Provider-neutral agent identity; independent of the selected model's creator.
+pub const DEFAULT_SYSTEM_PROMPT_LABEL: &str = "Polycode";
 fn default_system_prompt_label() -> String {
     DEFAULT_SYSTEM_PROMPT_LABEL.to_string()
 }

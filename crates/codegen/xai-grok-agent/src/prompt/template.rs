@@ -49,7 +49,7 @@ pub(crate) fn subagent_template() -> Zeroizing<String> {
 }
 
 /// The compact system prompt used after conversation compaction.
-pub const COMPACT_SYSTEM_PROMPT: &str = "You are an AI coding agent. You operate in a workspace with a provided codebase.\n\n\
+pub const COMPACT_SYSTEM_PROMPT: &str = "You are Polycode, an AI coding agent. You operate in a workspace with a provided codebase.\n\n\
      Your main goal is to complete the user's request, denoted within the <user_query> tag.";
 
 #[cfg(test)]
@@ -307,6 +307,15 @@ mod tests {
             prompt.contains(crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL),
             "Must contain agent identity"
         );
+    }
+
+    #[test]
+    fn polycode_compact_identity_is_provider_neutral() {
+        assert!(COMPACT_SYSTEM_PROMPT.starts_with("You are Polycode, an AI coding agent."));
+        assert!(!COMPACT_SYSTEM_PROMPT.contains("Grok"));
+        assert!(!COMPACT_SYSTEM_PROMPT.contains("xAI"));
+        assert!(!COMPACT_SYSTEM_PROMPT.contains("OpenAI"));
+        assert!(!COMPACT_SYSTEM_PROMPT.contains("Cursor"));
     }
 
     // ── Mid-session mode switching ──────────────────────────────────
