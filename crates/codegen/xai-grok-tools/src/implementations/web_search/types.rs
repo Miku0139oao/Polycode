@@ -8,7 +8,7 @@ use indexmap::IndexMap;
 // `Disabled` is empty, but this config is built once per session and never stored in bulk
 // collections, so boxing would add indirection for no real benefit.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum WebSearchConfig {
     #[default]
@@ -35,6 +35,14 @@ pub enum WebSearchConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         excluded_domains: Option<Vec<String>>,
     },
+}
+
+impl std::fmt::Debug for WebSearchConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebSearchConfig")
+            .field("enabled", &self.is_enabled())
+            .finish_non_exhaustive()
+    }
 }
 
 impl WebSearchConfig {

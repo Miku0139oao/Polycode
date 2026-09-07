@@ -27,6 +27,7 @@ use serde::Deserialize;
 
 use crate::attribution::{SharedAttributionCallback, ToolConsumer};
 use crate::types::SharedApiKeyProvider;
+use crate::types::native_service_consent::{ApprovedHeaders, NativeService, NativeServiceCall};
 
 use crate::types::output::{MediaGenOutput, ToolOutput};
 use crate::types::requirements::{Expr, ToolRequirement};
@@ -141,6 +142,8 @@ impl std::fmt::Debug for ZdrVideoOutputS3Config {
 #[derive(Clone)]
 pub struct VideoGenClient {
     http: reqwest::Client,
+    guarded_http: reqwest::Client,
+    default_headers: reqwest::header::HeaderMap,
     download_http: reqwest::Client,
     base_url: String,
     writer: super::storage::SessionFileWriter,
@@ -184,7 +187,7 @@ impl VideoGenClient {
 
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        // Always bake the static api_key as the default Authorization header.
+        // Retain effective static defaults for request-time authorization.
         // The dynamic provider overrides per-request; this is the fallback.
         headers.insert(
             AUTHORIZATION,
@@ -216,13 +219,12 @@ impl VideoGenClient {
             headers.contains_key(super::image_gen::SESSION_ID_HEADER);
         let key = crate::util::shared_http::cache_key("video_gen", &headers);
         let http = crate::util::shared_http::cached_client(key, || {
-            xai_grok_extra_ca::build_reqwest_client(|builder| {
-                builder.default_headers(headers.clone())
-            })
+            xai_grok_extra_ca::build_reqwest_client(|builder| builder)
         })
         .map_err(|e| {
             xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to build HTTP client: {e}"
+                "Failed to build HTTP client: {}",
+                e.without_url()
             ))
         })?;
 
@@ -239,12 +241,18 @@ impl VideoGenClient {
         })
         .map_err(|e| {
             xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to build download client: {e}"
+                "Failed to build download client: {}",
+                e.without_url()
             ))
         })?;
 
         Ok(Self {
             http,
+            guarded_http: crate::types::native_service_consent::guarded_http_client(
+                "video_gen",
+                |b| b,
+            )?,
+            default_headers: headers,
             download_http,
             base_url: base_url.clone(),
             writer: super::storage::SessionFileWriter::new(DEFAULT_VIDEO_DIR, "mp4"),
@@ -261,25 +269,29 @@ impl VideoGenClient {
         })
     }
 
-    /// Attach the session-id header per start/poll request; a
-    /// caller-provided `extra_headers` value is never overridden.
-    /// Every Imagine video API request goes through here so no call site
-    /// can miss the bearer or per-request session header (the presigned
-    /// download client stays separate: its URLs carry their own auth).
-    fn request(
+    /// No hidden auth: dispatch attaches the exact approved header snapshot.
+    fn request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+        self.http.request(method, url)
+    }
+
+    async fn authorize(
         &self,
-        method: reqwest::Method,
-        url: &str,
-        sent_bearer: Option<&str>,
-    ) -> reqwest::RequestBuilder {
-        let mut req = self.http.request(method, url);
-        if let Some(key) = sent_bearer {
-            req = req.header(AUTHORIZATION, format!("Bearer {key}"));
-        }
+        call: &NativeServiceCall,
+        model: &str,
+        request: &reqwest::RequestBuilder,
+    ) -> Result<ApprovedHeaders, xai_tool_runtime::ToolError> {
+        let mut headers = NativeServiceCall::request_headers(&self.default_headers, request)?;
         if let Some(ref session) = self.session_header {
-            req = req.header(super::image_gen::SESSION_ID_HEADER, session.clone());
+            headers.insert(super::image_gen::SESSION_ID_HEADER, session.clone());
         }
-        req
+        call.authorize(
+            NativeService::VideoGeneration,
+            &self.base_url,
+            model,
+            &headers,
+            self.api_key_provider.as_ref(),
+        )
+        .await
     }
 
     pub fn with_session_id(mut self, session_id: &str) -> Self {
@@ -313,14 +325,12 @@ impl VideoGenClient {
         self
     }
 
-    async fn current_bearer(&self) -> Option<String> {
-        crate::types::api_key_provider::resolve_bearer(self.api_key_provider.as_ref()).await
-    }
-
     fn record_401_attribution(&self, consumer: ToolConsumer, sent_bearer: Option<&str>) {
         crate::attribution::emit_401(self.attribution_callback.as_ref(), consumer, sent_bearer);
     }
 
+    /// Native-only SDK compatibility method. Model-facing callers must use
+    /// [`Self::generate_with_images_with_context`] to honor session billing consent.
     pub async fn generate_with_images(
         &self,
         model: &'static str,
@@ -332,10 +342,72 @@ impl VideoGenClient {
         reference_images: Vec<String>,
         reference_voices: Vec<String>,
     ) -> Result<VideoOutcome, xai_tool_runtime::ToolError> {
-        let start_url = format!("{}/videos/generations", self.base_url.trim_end_matches('/'));
+        self.generate_for_call(
+            &NativeServiceCall::native(),
+            model,
+            prompt,
+            duration,
+            aspect_ratio,
+            resolution,
+            image,
+            reference_images,
+            reference_voices,
+        )
+        .await
+    }
 
+    /// Context-aware entry point required for model-facing adapters.
+    pub async fn generate_with_images_with_context(
+        &self,
+        ctx: &xai_tool_runtime::ToolCallContext,
+        model: &'static str,
+        prompt: &str,
+        duration: Option<u32>,
+        aspect_ratio: Option<&str>,
+        resolution: &str,
+        image: Option<String>,
+        reference_images: Vec<String>,
+        reference_voices: Vec<String>,
+    ) -> Result<VideoOutcome, xai_tool_runtime::ToolError> {
+        let call = NativeServiceCall::from_context(ctx).await;
+        self.generate_for_call(
+            &call,
+            model,
+            prompt,
+            duration,
+            aspect_ratio,
+            resolution,
+            image,
+            reference_images,
+            reference_voices,
+        )
+        .await
+    }
+
+    async fn generate_for_call(
+        &self,
+        call: &NativeServiceCall,
+        model: &'static str,
+        prompt: &str,
+        duration: Option<u32>,
+        aspect_ratio: Option<&str>,
+        resolution: &str,
+        image: Option<String>,
+        reference_images: Vec<String>,
+        reference_voices: Vec<String>,
+    ) -> Result<VideoOutcome, xai_tool_runtime::ToolError> {
+        call.check_current()?;
+        let start_url = format!("{}/videos/generations", self.base_url.trim_end_matches('/'));
+        // JSON supplies this same request-level content type in the legacy path.
+        // Resolve/approve headers before minting expiring ZDR output URLs: a long
+        // consent dialog must not consume their generation/download lifetime.
+        let req = self
+            .request(reqwest::Method::POST, &start_url)
+            .timeout(std::time::Duration::from_secs(VIDEO_START_TIMEOUT_SECS))
+            .header(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let approved = self.authorize(call, model, &req).await?;
         let presigned = match &self.zdr_video_output_s3 {
-            Some(config) => Some(self.presign_zdr_output_urls(config).await?),
+            Some(config) => Some(call.wait(self.presign_zdr_output_urls(config)).await??),
             None => None,
         };
 
@@ -359,42 +431,31 @@ impl VideoGenClient {
             }),
         };
 
-        let sent_bearer = self.current_bearer().await;
-        let req = self
-            .request(reqwest::Method::POST, &start_url, sent_bearer.as_deref())
-            .timeout(std::time::Duration::from_secs(VIDEO_START_TIMEOUT_SECS))
-            .json(&payload);
-
-        let response = req.send().await.map_err(|e| {
-            xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Video generation API request failed: {e}"
-            ))
-        })?;
+        let response = call
+            .send(req.json(&payload), &approved, &self.guarded_http)
+            .await?;
 
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            self.record_401_attribution(ToolConsumer::VideoGenStart, sent_bearer.as_deref());
+            self.record_401_attribution(ToolConsumer::VideoGenStart, approved.sent_bearer());
         }
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            // 500 chars so the unknown-voice 400 keeps its full voice roster.
-            let truncated: String = body.chars().take(500).collect();
-            tracing::warn!(http_status = %status, "Video generation API error: {truncated}");
+            tracing::warn!(http_status = %status, "Video generation API error");
             return Err(video_http_error(status, &body));
         }
 
         let body = response.text().await.map_err(|e| {
             xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to read video generation start response body: {e}"
+                "Failed to read video generation start response body: {}",
+                e.without_url()
             ))
         })?;
 
-        let start_resp: VideoGenStartResponse = serde_json::from_str(&body).map_err(|e| {
-            let preview: String = body.chars().take(500).collect();
-            tracing::warn!("Video generation API returned unparseable body: {preview}");
-            xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to parse video generation start response: {e} — body preview: {preview}"
-            ))
+        let start_resp: VideoGenStartResponse = serde_json::from_str(&body).map_err(|_| {
+            xai_tool_runtime::ToolError::invalid_arguments(
+                "Failed to parse video generation start response",
+            )
         })?;
 
         let request_id = start_resp.request_id;
@@ -417,7 +478,7 @@ impl VideoGenClient {
         let started = tokio::time::Instant::now();
 
         loop {
-            tokio::time::sleep(poll_interval).await;
+            call.wait(tokio::time::sleep(poll_interval)).await?;
 
             if started.elapsed() >= deadline {
                 return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
@@ -426,22 +487,19 @@ impl VideoGenClient {
                 )));
             }
 
-            let poll_sent_bearer = self.current_bearer().await;
             let poll_req = self
-                .request(reqwest::Method::GET, &poll_url, poll_sent_bearer.as_deref())
+                .request(reqwest::Method::GET, &poll_url)
                 .timeout(poll_timeout);
-
-            let poll_response = poll_req.send().await.map_err(|e| {
-                xai_tool_runtime::ToolError::invalid_arguments(format!(
-                    "Video poll request failed: {e}"
-                ))
-            })?;
+            let poll_approved = self.authorize(call, model, &poll_req).await?;
+            let poll_response = call
+                .send(poll_req, &poll_approved, &self.guarded_http)
+                .await?;
 
             let poll_status = poll_response.status();
             if poll_status == reqwest::StatusCode::UNAUTHORIZED {
                 self.record_401_attribution(
                     ToolConsumer::VideoGenPoll,
-                    poll_sent_bearer.as_deref(),
+                    poll_approved.sent_bearer(),
                 );
             }
             if !poll_status.is_success() && poll_status.as_u16() != 202 {
@@ -449,10 +507,9 @@ impl VideoGenClient {
                 if is_zdr_upload_url_error(&body) {
                     return Err(zdr_restricted_error());
                 }
-                let truncated: String = body.chars().take(200).collect();
                 return Err(xai_tool_runtime::ToolError::new(
                     xai_tool_runtime::ToolErrorKind::Custom,
-                    format!("Video poll failed with HTTP {poll_status}: {truncated}"),
+                    format!("Video poll failed with HTTP {poll_status}"),
                 )
                 .with_details(
                     serde_json::json!({"code": "http_failure", "status": poll_status.as_u16()}),
@@ -461,17 +518,16 @@ impl VideoGenClient {
 
             let poll_body = poll_response.text().await.map_err(|e| {
                 xai_tool_runtime::ToolError::invalid_arguments(format!(
-                    "Failed to read video poll response body: {e}"
+                    "Failed to read video poll response body: {}",
+                    e.without_url()
                 ))
             })?;
 
             let poll_data: VideoGenPollResponse =
-                serde_json::from_str(&poll_body).map_err(|e| {
-                    let preview: String = poll_body.chars().take(500).collect();
-                    tracing::warn!("Video poll API returned unparseable body: {preview}");
-                    xai_tool_runtime::ToolError::invalid_arguments(format!(
-                        "Failed to parse video poll response: {e} — body preview: {preview}"
-                    ))
+                serde_json::from_str(&poll_body).map_err(|_| {
+                    xai_tool_runtime::ToolError::invalid_arguments(
+                        "Failed to parse video poll response",
+                    )
                 })?;
 
             match poll_data.status.as_str() {
@@ -483,23 +539,22 @@ impl VideoGenClient {
                         "Video generation completed"
                     );
                     return match presigned {
-                        Some(urls) => self.finish_zdr_video(&request_id, urls).await,
+                        Some(urls) => self.finish_zdr_video(call, &request_id, urls).await,
                         None if video_url.is_empty() => {
                             Err(xai_tool_runtime::ToolError::invalid_arguments(
                                 "Video generation completed but no download URL was returned.",
                             ))
                         }
                         None => self
-                            .download_video(&video_url)
+                            .download_video(call, &video_url)
                             .await
                             .map(VideoOutcome::Bytes),
                     };
                 }
                 "failed" => {
-                    let preview: String = poll_body.chars().take(300).collect();
-                    return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
-                        "Video generation failed on the server (request_id={request_id}): {preview}"
-                    )));
+                    return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                        "Video generation failed on the server",
+                    ));
                 }
                 "expired" => {
                     return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
@@ -518,10 +573,17 @@ impl VideoGenClient {
     }
 
     /// Download video bytes from a pre-signed temporary URL (no auth headers).
-    async fn download_video(&self, url: &str) -> Result<Vec<u8>, xai_tool_runtime::ToolError> {
-        let response = self.download_http.get(url).send().await.map_err(|e| {
-            xai_tool_runtime::ToolError::invalid_arguments(format!("Failed to download video: {e}"))
-        })?;
+    async fn download_video(
+        &self,
+        call: &NativeServiceCall,
+        url: &str,
+    ) -> Result<Vec<u8>, xai_tool_runtime::ToolError> {
+        let response = call
+            .wait(self.download_http.get(url).send())
+            .await?
+            .map_err(|_| {
+                xai_tool_runtime::ToolError::invalid_arguments("Failed to download video")
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -534,13 +596,15 @@ impl VideoGenClient {
 
         response.bytes().await.map(|b| b.to_vec()).map_err(|e| {
             xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to read video bytes: {e}"
+                "Failed to read video bytes: {}",
+                e.without_url()
             ))
         })
     }
 
     async fn finish_zdr_video(
         &self,
+        call: &NativeServiceCall,
         request_id: &str,
         urls: ZdrPresignedUrls,
     ) -> Result<VideoOutcome, xai_tool_runtime::ToolError> {
@@ -553,7 +617,7 @@ impl VideoGenClient {
         // A presigned GET means the client must download locally. Propagate
         // failures instead of silently treating the run as upload-only success.
         if let Some(get_url) = urls.get_url.as_deref() {
-            let bytes = self.download_video(get_url).await.map_err(|e| {
+            let bytes = self.download_video(call, get_url).await.map_err(|e| {
                 tracing::warn!(
                     request_id = %request_id,
                     "Presigned video download failed (GET URL was minted): {e}"
@@ -566,9 +630,13 @@ impl VideoGenClient {
         // No pre-minted GET URL — retry presign (may succeed now that the
         // object exists) and attempt a local download before falling back to
         // a remote reference URL for the model.
-        match self.presign_and_download(config, &urls, request_id).await {
+        match self
+            .presign_and_download(call, config, &urls, request_id)
+            .await
+        {
             Ok(bytes) => Ok(VideoOutcome::Bytes(bytes)),
             Err(e) => {
+                call.check_current()?;
                 tracing::warn!(
                     request_id = %request_id,
                     "Post-upload video download failed, returning remote reference: {e}"
@@ -598,16 +666,14 @@ impl VideoGenClient {
             expires_in,
         )
         .await
-        .map_err(|e| {
-            xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to presign video upload URL: {e}"
-            ))
+        .map_err(|_| {
+            xai_tool_runtime::ToolError::invalid_arguments("Failed to presign video upload URL")
         })?;
 
         if !is_http_url(&upload_url) {
-            return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Presigned upload URL is not http(s): {upload_url}"
-            )));
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                "Presigned upload URL is not http(s)",
+            ));
         }
 
         let get_url = match self
@@ -634,6 +700,7 @@ impl VideoGenClient {
     /// Re-presign a GET URL after generation and attempt a local download.
     async fn presign_and_download(
         &self,
+        call: &NativeServiceCall,
         config: &ZdrVideoOutputS3Config,
         urls: &ZdrPresignedUrls,
         request_id: &str,
@@ -645,7 +712,7 @@ impl VideoGenClient {
             request_id = %request_id,
             "Post-upload video GET presign succeeded, attempting download"
         );
-        self.download_video(&get_url).await
+        self.download_video(call, &get_url).await
     }
 
     async fn zdr_reference_url(
@@ -677,16 +744,16 @@ impl VideoGenClient {
             expires_in,
         )
         .await
-        .map_err(|e| {
+        .map_err(|_| {
             xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to presign video GET URL ({creds_source}): {e}"
+                "Failed to presign video GET URL ({creds_source})"
             ))
         })?;
 
         if !is_http_url(&url) {
-            return Err(xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Presigned GET URL is not http(s): {url}"
-            )));
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                "Presigned GET URL is not http(s)",
+            ));
         }
         Ok(url)
     }
@@ -732,7 +799,7 @@ fn is_http_url(raw: &str) -> bool {
 /// Session-level configuration. Same shape as [`ImageGenConfig`].
 ///
 /// [`ImageGenConfig`]: super::image_gen::ImageGenConfig
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub enum VideoGenConfig {
     #[default]
     Disabled,
@@ -752,6 +819,14 @@ pub enum VideoGenConfig {
         /// instead of being silently dropped.
         zdr_restricted: bool,
     },
+}
+
+impl std::fmt::Debug for VideoGenConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VideoGenConfig")
+            .field("enabled", &self.is_enabled())
+            .finish_non_exhaustive()
+    }
 }
 
 impl VideoGenConfig {
@@ -788,10 +863,9 @@ fn video_http_error(status: reqwest::StatusCode, body: &str) -> xai_tool_runtime
     if is_zdr_upload_url_error(body) {
         return zdr_restricted_error();
     }
-    let truncated: String = body.chars().take(500).collect();
     xai_tool_runtime::ToolError::new(
         xai_tool_runtime::ToolErrorKind::Custom,
-        format!("Video generation failed with HTTP {status}: {truncated}"),
+        format!("Video generation failed with HTTP {status}"),
     )
     .with_details(serde_json::json!({"code": "http_failure", "status": status.as_u16()}))
 }
@@ -1143,6 +1217,7 @@ impl xai_tool_runtime::Tool for ImageToVideoTool {
         ctx: xai_tool_runtime::ToolCallContext,
         input: ImageToVideoInput,
     ) -> Result<ToolOutput, xai_tool_runtime::ToolError> {
+        let call = NativeServiceCall::from_context(&ctx).await;
         validate_imagine_duration(input.duration)?;
         validate_one_of(
             "resolution_name",
@@ -1164,7 +1239,8 @@ impl xai_tool_runtime::Tool for ImageToVideoTool {
         }
 
         let outcome = client
-            .generate_with_images(
+            .generate_for_call(
+                &call,
                 XAI_VIDEO_MODEL,
                 &prompt,
                 Some(
@@ -1243,6 +1319,7 @@ impl xai_tool_runtime::Tool for ReferenceToVideoTool {
         ctx: xai_tool_runtime::ToolCallContext,
         input: ReferenceToVideoInput,
     ) -> Result<ToolOutput, xai_tool_runtime::ToolError> {
+        let call = NativeServiceCall::from_context(&ctx).await;
         if input.prompt.trim().is_empty() {
             return Err(xai_tool_runtime::ToolError::invalid_arguments(
                 "`prompt` must not be empty.",
@@ -1297,7 +1374,8 @@ impl xai_tool_runtime::Tool for ReferenceToVideoTool {
         }
 
         let outcome = client
-            .generate_with_images(
+            .generate_for_call(
+                &call,
                 XAI_VIDEO_MODEL,
                 &input.prompt,
                 Some(
@@ -1321,8 +1399,7 @@ impl xai_tool_runtime::Tool for ReferenceToVideoTool {
 
 #[cfg(test)]
 mod tests {
-    // Mirrors image_gen's post_json pinning: every start/poll request must
-    // route through request(), which attaches both bearer and session id.
+    // Every start/poll request must use the approved bearer/session snapshot.
     #[tokio::test]
     async fn request_attaches_session_and_bearer_headers() {
         let cfg = VideoGenConfig::Enabled {
@@ -1336,12 +1413,13 @@ mod tests {
         let client = VideoGenClient::new(&cfg, None)
             .unwrap()
             .with_session_id("sess-7");
-        let req = client
-            .request(
-                reqwest::Method::POST,
-                "https://api.x.ai/v1/videos",
-                Some("tok"),
-            )
+        let request = client.request(reqwest::Method::POST, "https://api.x.ai/v1/videos");
+        let approved = client
+            .authorize(&NativeServiceCall::native(), XAI_VIDEO_MODEL, &request)
+            .await
+            .unwrap();
+        let req = request
+            .headers(approved.headers_for_test())
             .build()
             .unwrap();
         assert_eq!(
@@ -1354,7 +1432,7 @@ mod tests {
             req.headers()
                 .get(reqwest::header::AUTHORIZATION)
                 .and_then(|v| v.to_str().ok()),
-            Some("Bearer tok")
+            Some("Bearer k")
         );
     }
 

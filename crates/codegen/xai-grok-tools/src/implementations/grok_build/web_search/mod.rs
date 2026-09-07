@@ -81,14 +81,16 @@ impl xai_tool_runtime::Tool for WebSearchTool {
         use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
 
-        let client;
-        {
+        let (client, call) = {
             let res = resources.lock().await;
-            client = res.require::<WebSearchClient>()?.clone();
-        }
+            (
+                res.require::<WebSearchClient>()?.clone(),
+                crate::types::native_service_consent::NativeServiceCall::from_resources(&ctx, &res),
+            )
+        };
 
         let (content, citations) = client
-            .search(&input.query, input.allowed_domains.clone())
+            .search_for_call(&call, &input.query, input.allowed_domains.clone())
             .await
             .map_err(|e| {
                 xai_tool_runtime::ToolError::execution(

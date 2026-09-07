@@ -20,6 +20,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 
 use crate::attribution::{SharedAttributionCallback, ToolConsumer};
 use crate::types::SharedApiKeyProvider;
+use crate::types::native_service_consent::{ApprovedHeaders, NativeService, NativeServiceCall};
 
 use crate::types::output::{MediaGenOutput, ToolOutput};
 use crate::types::requirements::{Expr, ToolRequirement};
@@ -52,6 +53,8 @@ pub(crate) const TIER_RESTRICTED_UPSELL: &str = "Image generation is a SuperGrok
 #[derive(Clone)]
 pub struct ImageGenClient {
     http: reqwest::Client,
+    pub(crate) guarded_http: reqwest::Client,
+    default_headers: reqwest::header::HeaderMap,
     base_url: String,
     /// Imagine model slug used by `generate()`. Selected at construction
     /// from `ImageGenConfig::model_override` (falling back to
@@ -106,7 +109,7 @@ impl ImageGenClient {
 
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        // Always bake the static api_key as the default Authorization header.
+        // Retain effective static defaults for request-time authorization.
         // The dynamic provider overrides per-request; this is the fallback.
         headers.insert(
             AUTHORIZATION,
@@ -142,17 +145,25 @@ impl ImageGenClient {
                 builder
                     .timeout(std::time::Duration::from_secs(IMAGE_GEN_TIMEOUT_SECS))
                     .read_timeout(std::time::Duration::from_secs(IMAGE_GEN_READ_TIMEOUT_SECS))
-                    .default_headers(headers.clone())
             })
         })
         .map_err(|e| {
             xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to build HTTP client: {e}"
+                "Failed to build HTTP client: {}",
+                e.without_url()
             ))
         })?;
 
         Ok(Self {
             http,
+            guarded_http: crate::types::native_service_consent::guarded_http_client(
+                "image_gen",
+                |b| {
+                    b.timeout(std::time::Duration::from_secs(IMAGE_GEN_TIMEOUT_SECS))
+                        .read_timeout(std::time::Duration::from_secs(IMAGE_GEN_READ_TIMEOUT_SECS))
+                },
+            )?,
+            default_headers: headers,
             base_url: base_url.clone(),
             model,
             edit_model,
@@ -194,8 +205,25 @@ impl ImageGenClient {
         self
     }
 
-    pub(crate) async fn current_bearer(&self) -> Option<String> {
-        crate::types::api_key_provider::resolve_bearer(self.api_key_provider.as_ref()).await
+    pub(crate) async fn authorize(
+        &self,
+        call: &NativeServiceCall,
+        service: NativeService,
+        model: &str,
+        request: &reqwest::RequestBuilder,
+    ) -> Result<ApprovedHeaders, xai_tool_runtime::ToolError> {
+        let mut headers = NativeServiceCall::request_headers(&self.default_headers, request)?;
+        if let Some(ref session) = self.session_header {
+            headers.insert(SESSION_ID_HEADER, session.clone());
+        }
+        call.authorize(
+            service,
+            &self.base_url,
+            model,
+            &headers,
+            self.api_key_provider.as_ref(),
+        )
+        .await
     }
 
     pub(crate) fn record_401_attribution(&self, consumer: ToolConsumer, sent_bearer: Option<&str>) {
@@ -206,22 +234,14 @@ impl ImageGenClient {
         &self.base_url
     }
 
-    /// Every Imagine-API POST goes through here so no call site can miss
-    /// the bearer or per-request session header (image_edit once did).
+    /// Request builders have no hidden auth; `NativeServiceCall::send` attaches
+    /// only the exact approved header snapshot (including session headers).
     pub(crate) fn post_json(
         &self,
         url: &str,
         payload: &serde_json::Value,
-        sent_bearer: Option<&str>,
     ) -> reqwest::RequestBuilder {
-        let mut req = self.http.post(url).json(payload);
-        if let Some(key) = sent_bearer {
-            req = req.header(AUTHORIZATION, format!("Bearer {key}"));
-        }
-        if let Some(ref session) = self.session_header {
-            req = req.header(SESSION_ID_HEADER, session.clone());
-        }
-        req
+        self.http.post(url).json(payload)
     }
 
     pub(crate) fn writer(&self) -> &super::storage::SessionFileWriter {
@@ -232,8 +252,31 @@ impl ImageGenClient {
         &self.edit_model
     }
 
+    /// Native-only SDK compatibility method. Model-facing callers must use
+    /// [`Self::generate_with_context`] to honor session billing consent.
     pub async fn generate(
         &self,
+        prompt: &str,
+        aspect_ratio: &str,
+    ) -> Result<Vec<u8>, xai_tool_runtime::ToolError> {
+        self.generate_for_call(&NativeServiceCall::native(), prompt, aspect_ratio)
+            .await
+    }
+
+    /// Context-aware entry point required for model-facing adapters.
+    pub async fn generate_with_context(
+        &self,
+        ctx: &xai_tool_runtime::ToolCallContext,
+        prompt: &str,
+        aspect_ratio: &str,
+    ) -> Result<Vec<u8>, xai_tool_runtime::ToolError> {
+        let call = NativeServiceCall::from_context(ctx).await;
+        self.generate_for_call(&call, prompt, aspect_ratio).await
+    }
+
+    async fn generate_for_call(
+        &self,
+        call: &NativeServiceCall,
         prompt: &str,
         aspect_ratio: &str,
     ) -> Result<Vec<u8>, xai_tool_runtime::ToolError> {
@@ -248,45 +291,36 @@ impl ImageGenClient {
             "response_format": "b64_json",
         });
 
-        // Capture the bearer once so the request and the 401-attribution
-        // emit see the same value (even if the provider rotates between
-        // the send and the response handling).
-        let sent_bearer = self.current_bearer().await;
-        let req = self.post_json(&url, &payload, sent_bearer.as_deref());
-
-        let response = req.send().await.map_err(|e| {
-            xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Image generation API request failed: {e}"
-            ))
-        })?;
+        let request = self.post_json(&url, &payload);
+        let approved = self
+            .authorize(call, NativeService::ImageGeneration, &self.model, &request)
+            .await?;
+        let response = call.send(request, &approved, &self.guarded_http).await?;
 
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            self.record_401_attribution(ToolConsumer::ImageGen, sent_bearer.as_deref());
+            self.record_401_attribution(ToolConsumer::ImageGen, approved.sent_bearer());
         }
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            let truncated: String = body.chars().take(200).collect();
-            tracing::warn!(http_status = %status, "Imagine API error: {truncated}");
+            tracing::warn!(http_status = %status, "Imagine API error");
             return Err(xai_tool_runtime::ToolError::new(
                 xai_tool_runtime::ToolErrorKind::Custom,
-                format!("Image generation failed with HTTP {status}: {truncated}"),
+                format!("Image generation failed with HTTP {status}"),
             )
             .with_details(serde_json::json!({"code": "http_failure", "status": status.as_u16()})));
         }
 
         let body = response.text().await.map_err(|e| {
             xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to read image generation response body: {e}"
+                "Failed to read image generation response body: {}",
+                e.without_url()
             ))
         })?;
 
-        let resp_json: ImageGenResponse = serde_json::from_str(&body).map_err(|e| {
-            let preview: String = body.chars().take(500).collect();
-            tracing::warn!("Imagine API returned unparseable body: {preview}");
-            xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to parse image generation response: {e} — body preview: {preview}"
-            ))
+        let resp_json: ImageGenResponse = serde_json::from_str(&body).map_err(|_| {
+            xai_tool_runtime::ToolError::invalid_arguments(
+                "Failed to parse image generation response",
+            )
         })?;
 
         let b64_data = resp_json.b64_data().unwrap_or("");
@@ -308,7 +342,7 @@ impl ImageGenClient {
 }
 
 /// `Enabled` means credentials are present; each tool has its own gate.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub enum ImageGenConfig {
     #[default]
     Disabled,
@@ -337,6 +371,14 @@ pub enum ImageGenConfig {
 /// Session-id header attached to imagine API requests; matches the header
 /// chat requests already carry.
 pub const SESSION_ID_HEADER: &str = "x-grok-session-id";
+
+impl std::fmt::Debug for ImageGenConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImageGenConfig")
+            .field("enabled", &self.has_credentials())
+            .finish_non_exhaustive()
+    }
+}
 
 impl ImageGenConfig {
     /// Credentials present — required to construct any of the clients.
@@ -469,9 +511,12 @@ impl xai_tool_runtime::Tool for ImageGenTool {
         use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
 
-        let client = {
+        let (client, call) = {
             let res = resources.lock().await;
-            res.require::<ImageGenClient>()?.clone()
+            (
+                res.require::<ImageGenClient>()?.clone(),
+                NativeServiceCall::from_resources(&ctx, &res),
+            )
         };
 
         // Free / X Basic users are zero-limited on Imagine server-side; return
@@ -481,7 +526,9 @@ impl xai_tool_runtime::Tool for ImageGenTool {
             return Ok(ToolOutput::Text(TIER_RESTRICTED_UPSELL.into()));
         }
 
-        let image_bytes = client.generate(&input.prompt, &input.aspect_ratio).await?;
+        let image_bytes = client
+            .generate_for_call(&call, &input.prompt, &input.aspect_ratio)
+            .await?;
 
         let session_folder = {
             let res = resources.lock().await;
@@ -579,8 +626,8 @@ mod tests {
         );
     }
 
-    // Pins the image_edit wire regression: every POST routes through
-    // post_json, which attaches both bearer and session id.
+    // Pins the image_edit wire regression: every POST uses the approved
+    // snapshot, which includes both bearer and session id.
     #[tokio::test]
     async fn post_json_attaches_session_and_bearer_headers() {
         let cfg = ImageGenConfig::Enabled {
@@ -596,12 +643,18 @@ mod tests {
         let client = ImageGenClient::new(&cfg, None)
             .unwrap()
             .with_session_id("sess-42");
-        let req = client
-            .post_json(
-                "https://api.x.ai/v1/images",
-                &serde_json::json!({}),
-                Some("tok"),
+        let request = client.post_json("https://api.x.ai/v1/images", &serde_json::json!({}));
+        let approved = client
+            .authorize(
+                &NativeServiceCall::native(),
+                NativeService::ImageGeneration,
+                &client.model,
+                &request,
             )
+            .await
+            .unwrap();
+        let req = request
+            .headers(approved.headers_for_test())
             .build()
             .unwrap();
         assert_eq!(
@@ -614,7 +667,7 @@ mod tests {
             req.headers()
                 .get(reqwest::header::AUTHORIZATION)
                 .and_then(|v| v.to_str().ok()),
-            Some("Bearer tok")
+            Some("Bearer k")
         );
     }
 

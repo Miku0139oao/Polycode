@@ -1,6 +1,7 @@
 use super::types::WebSearchConfig;
 use crate::attribution::{SharedAttributionCallback, ToolConsumer};
 use crate::types::SharedApiKeyProvider;
+use crate::types::native_service_consent::{NativeService, NativeServiceCall};
 use async_openai::types::responses as rs;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 /// A minimal, purpose-built HTTP client for calling the Responses API
@@ -8,6 +9,8 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, Header
 #[derive(Clone)]
 pub struct WebSearchClient {
     http: reqwest::Client,
+    guarded_http: reqwest::Client,
+    default_headers: HeaderMap,
     base_url: String,
     model: String,
     /// Authoritative domain allowlist from `[toolset.web_search] allowed_domains`.
@@ -77,18 +80,21 @@ impl WebSearchClient {
         let _ = alpha_test_key;
         let key = crate::util::shared_http::cache_key("web_search", &headers);
         let http = crate::util::shared_http::cached_client(key, || {
-            xai_grok_extra_ca::build_reqwest_client(|builder| {
-                builder.default_headers(headers.clone())
-            })
+            xai_grok_extra_ca::build_reqwest_client(|builder| builder)
         })
         .map_err(|e| {
             xai_tool_runtime::ToolError::execution(
                 xai_tool_protocol::ToolId::new("web_search").expect("valid"),
-                format!("Failed to build HTTP client: {e}"),
+                format!("Failed to build HTTP client: {}", e.without_url()),
             )
         })?;
         Ok(Self {
             http,
+            guarded_http: crate::types::native_service_consent::guarded_http_client(
+                "web_search",
+                |b| b,
+            )?,
+            default_headers: headers,
             base_url: base_url.clone(),
             model: model.clone(),
             default_allowed_domains: allowed_domains.clone(),
@@ -189,9 +195,6 @@ impl WebSearchClient {
         self.attribution_callback = callback;
         self
     }
-    async fn current_bearer(&self) -> Option<String> {
-        crate::types::api_key_provider::resolve_bearer(self.api_key_provider.as_ref()).await
-    }
     fn record_401_attribution(&self, sent_bearer: Option<&str>) {
         crate::attribution::emit_401(
             self.attribution_callback.as_ref(),
@@ -199,7 +202,8 @@ impl WebSearchClient {
             sent_bearer,
         );
     }
-    /// Perform a web search query using the Responses API.
+    /// Native-only SDK compatibility method. Model-facing adapters must use
+    /// [`Self::search_with_context`] to honor session billing consent.
     ///
     /// Returns `(content, citations)` where content is the assistant's text
     /// and citations are unique URLs found in the response annotations.
@@ -208,131 +212,120 @@ impl WebSearchClient {
         query: &str,
         allowed_domains: Option<Vec<String>>,
     ) -> Result<(String, Vec<String>), xai_tool_runtime::ToolError> {
-        let (allowed, excluded) = self.resolve_filters(allowed_domains);
-        let request = self.build_request_json(query, allowed, excluded)?;
-        let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
-        let sent_bearer = self.current_bearer().await;
-        let mut req = self.http.post(&url).json(&request);
-        if let Some(ref key) = sent_bearer {
-            req = req.header(AUTHORIZATION, format!("Bearer {key}"));
-        }
-        let response = req.send().await.map_err(|e| {
-            xai_tool_runtime::ToolError::execution(
-                xai_tool_protocol::ToolId::new("web_search").expect("valid"),
-                format!("HTTP request failed: {e}"),
-            )
-        })?;
-        let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            self.record_401_attribution(sent_bearer.as_deref());
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read error body".to_string());
-            return Err(xai_tool_runtime::ToolError::unauthorized(format!(
-                "Responses API returned 401 Unauthorized: {body}"
-            ))
-            .with_details(serde_json::json!({
-                "tool_id": "web_search",
-                "status": 401,
-            })));
-        }
-        if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read error body".to_string());
-            return Err(xai_tool_runtime::ToolError::execution(
-                xai_tool_protocol::ToolId::new("web_search").expect("valid"),
-                format!("Responses API returned {status}: {body}"),
-            ));
-        }
-        let bytes = response.bytes().await.map_err(|e| {
-            xai_tool_runtime::ToolError::execution(
-                xai_tool_protocol::ToolId::new("web_search").expect("valid"),
-                format!("Failed to read response body: {e}"),
-            )
-        })?;
-        let response_obj: rs::Response = serde_json::from_slice(&bytes).map_err(|e| {
-            xai_tool_runtime::ToolError::execution(
-                xai_tool_protocol::ToolId::new("web_search").expect("valid"),
-                format!("Failed to parse response: {e}"),
-            )
-        })?;
-        let content = response_obj
+        self.search_for_call(&NativeServiceCall::native(), query, allowed_domains)
+            .await
+    }
+    /// Context-aware entry point required for model-facing adapters.
+    pub async fn search_with_context(
+        &self,
+        ctx: &xai_tool_runtime::ToolCallContext,
+        query: &str,
+        allowed_domains: Option<Vec<String>>,
+    ) -> Result<(String, Vec<String>), xai_tool_runtime::ToolError> {
+        let call = NativeServiceCall::from_context(ctx).await;
+        self.search_for_call(&call, query, allowed_domains).await
+    }
+    pub(crate) async fn search_for_call(
+        &self,
+        call: &NativeServiceCall,
+        query: &str,
+        allowed_domains: Option<Vec<String>>,
+    ) -> Result<(String, Vec<String>), xai_tool_runtime::ToolError> {
+        let response = self.request_response(call, query, allowed_domains).await?;
+        let content = response
             .output_text()
             .unwrap_or_else(|| "No search results found.".to_string());
-        let citations = extract_citations(&response_obj);
-        Ok((content, citations))
+        Ok((content, extract_citations(&response)))
     }
     /// Same as [`Self::search`] but also extracts per-citation titles when
     /// the Responses API surfaces them. Returns `(content, citations_with_titles)`
     /// where each citation is `(title, url)`. Empty `title` strings indicate
     /// the upstream didn't supply one for that URL.
     ///
-    /// Used by the cursor-compat `WebSearch` adapter to render a
-    /// `Links:\n1. [title](url)` list instead of the LLM synthesis text.
+    /// Native-only SDK compatibility method. A model-facing cursor adapter must
+    /// use [`Self::search_with_titles_with_context`] instead.
     pub async fn search_with_titles(
         &self,
         query: &str,
         allowed_domains: Option<Vec<String>>,
     ) -> Result<(String, Vec<(String, String)>), xai_tool_runtime::ToolError> {
+        self.search_titles_for_call(&NativeServiceCall::native(), query, allowed_domains)
+            .await
+    }
+    /// Context-aware title path; subscription adapters must not call the legacy method.
+    pub async fn search_with_titles_with_context(
+        &self,
+        ctx: &xai_tool_runtime::ToolCallContext,
+        query: &str,
+        allowed_domains: Option<Vec<String>>,
+    ) -> Result<(String, Vec<(String, String)>), xai_tool_runtime::ToolError> {
+        let call = NativeServiceCall::from_context(ctx).await;
+        self.search_titles_for_call(&call, query, allowed_domains)
+            .await
+    }
+    async fn search_titles_for_call(
+        &self,
+        call: &NativeServiceCall,
+        query: &str,
+        allowed_domains: Option<Vec<String>>,
+    ) -> Result<(String, Vec<(String, String)>), xai_tool_runtime::ToolError> {
+        let response = self.request_response(call, query, allowed_domains).await?;
+        let content = response
+            .output_text()
+            .unwrap_or_else(|| "No search results found.".to_string());
+        Ok((content, extract_citation_pairs(&response)))
+    }
+    async fn request_response(
+        &self,
+        call: &NativeServiceCall,
+        query: &str,
+        allowed_domains: Option<Vec<String>>,
+    ) -> Result<rs::Response, xai_tool_runtime::ToolError> {
         let (allowed, excluded) = self.resolve_filters(allowed_domains);
         let request = self.build_request_json(query, allowed, excluded)?;
         let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
-        let sent_bearer = self.current_bearer().await;
-        let mut req = self.http.post(&url).json(&request);
-        if let Some(ref key) = sent_bearer {
-            req = req.header(AUTHORIZATION, format!("Bearer {key}"));
-        }
-        let response = req.send().await.map_err(|e| {
-            xai_tool_runtime::ToolError::execution(
-                xai_tool_protocol::ToolId::new("web_search").expect("valid"),
-                format!("HTTP request failed: {e}"),
+        let request = self.http.post(&url).json(&request);
+        let defaults = NativeServiceCall::request_headers(&self.default_headers, &request)?;
+        let approved = call
+            .authorize(
+                NativeService::WebSearch,
+                &self.base_url,
+                &self.model,
+                &defaults,
+                self.api_key_provider.as_ref(),
             )
-        })?;
+            .await?;
+        let response = call.send(request, &approved, &self.guarded_http).await?;
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            self.record_401_attribution(sent_bearer.as_deref());
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read error body".to_string());
-            return Err(xai_tool_runtime::ToolError::unauthorized(format!(
-                "Responses API returned 401 Unauthorized: {body}"
-            ))
+            self.record_401_attribution(approved.sent_bearer());
+            return Err(xai_tool_runtime::ToolError::unauthorized(
+                "Responses API returned 401 Unauthorized",
+            )
             .with_details(serde_json::json!({
                 "tool_id": "web_search",
                 "status": 401,
             })));
         }
         if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read error body".to_string());
             return Err(xai_tool_runtime::ToolError::execution(
                 xai_tool_protocol::ToolId::new("web_search").expect("valid"),
-                format!("Responses API returned {status}: {body}"),
+                format!("Responses API returned {status}"),
             ));
         }
         let bytes = response.bytes().await.map_err(|e| {
             xai_tool_runtime::ToolError::execution(
                 xai_tool_protocol::ToolId::new("web_search").expect("valid"),
-                format!("Failed to read response body: {e}"),
+                format!("Failed to read response body: {}", e.without_url()),
             )
         })?;
-        let response_obj: rs::Response = serde_json::from_slice(&bytes).map_err(|e| {
+        let response_obj: rs::Response = serde_json::from_slice(&bytes).map_err(|_| {
             xai_tool_runtime::ToolError::execution(
                 xai_tool_protocol::ToolId::new("web_search").expect("valid"),
-                format!("Failed to parse response: {e}"),
+                "Failed to parse Responses API response",
             )
         })?;
-        let content = response_obj
-            .output_text()
-            .unwrap_or_else(|| "No search results found.".to_string());
-        let pairs = extract_citation_pairs(&response_obj);
-        Ok((content, pairs))
+        Ok(response_obj)
     }
 }
 /// Extract citation URLs from the Response output items.

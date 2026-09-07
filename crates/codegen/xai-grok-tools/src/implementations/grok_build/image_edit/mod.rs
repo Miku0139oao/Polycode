@@ -19,6 +19,7 @@ use image::ImageReader;
 
 use crate::attribution::ToolConsumer;
 use crate::implementations::grok_build::image_gen::{ImageGenClient, ImageGenResponse};
+use crate::types::native_service_consent::{NativeService, NativeServiceCall};
 use crate::types::output::{MediaGenOutput, ToolOutput};
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::SessionFolder;
@@ -318,9 +319,12 @@ impl xai_tool_runtime::Tool for ImageEditTool {
             ));
         }
 
-        let client = {
+        let (client, call) = {
             let res = resources.lock().await;
-            res.require::<ImageGenClient>()?.clone()
+            (
+                res.require::<ImageGenClient>()?.clone(),
+                NativeServiceCall::from_resources(&ctx, &res),
+            )
         };
 
         // Free / X Basic users are zero-limited on Imagine server-side; return
@@ -374,42 +378,39 @@ impl xai_tool_runtime::Tool for ImageEditTool {
             payload["aspect_ratio"] = serde_json::json!(input.aspect_ratio);
         }
 
-        let sent_bearer = client.current_bearer().await;
-        let req = client.post_json(&url, &payload, sent_bearer.as_deref());
-
-        let response = req.send().await.map_err(|e| {
-            xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Image edit API request failed: {e}"
-            ))
-        })?;
+        let request = client.post_json(&url, &payload);
+        let approved = client
+            .authorize(
+                &call,
+                NativeService::ImageEdit,
+                client.edit_model(),
+                &request,
+            )
+            .await?;
+        let response = call.send(request, &approved, &client.guarded_http).await?;
 
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            client.record_401_attribution(ToolConsumer::ImageGen, sent_bearer.as_deref());
+            client.record_401_attribution(ToolConsumer::ImageGen, approved.sent_bearer());
         }
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            let truncated: String = body.chars().take(200).collect();
-            tracing::warn!(http_status = %status, "Imagine edit API error: {truncated}");
+            tracing::warn!(http_status = %status, "Imagine edit API error");
             return Err(xai_tool_runtime::ToolError::new(
                 xai_tool_runtime::ToolErrorKind::Custom,
-                format!("Image edit failed with HTTP {status}: {truncated}"),
+                format!("Image edit failed with HTTP {status}"),
             )
             .with_details(serde_json::json!({"code": "http_failure", "status": status.as_u16()})));
         }
 
         let body = response.text().await.map_err(|e| {
             xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to read image edit response body: {e}"
+                "Failed to read image edit response body: {}",
+                e.without_url()
             ))
         })?;
 
-        let resp_json: ImageGenResponse = serde_json::from_str(&body).map_err(|e| {
-            let preview: String = body.chars().take(500).collect();
-            tracing::warn!("Imagine edit API returned unparseable body: {preview}");
-            xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to parse image edit response: {e} — body preview: {preview}"
-            ))
+        let resp_json: ImageGenResponse = serde_json::from_str(&body).map_err(|_| {
+            xai_tool_runtime::ToolError::invalid_arguments("Failed to parse image edit response")
         })?;
 
         let b64_data = resp_json.b64_data().unwrap_or("");

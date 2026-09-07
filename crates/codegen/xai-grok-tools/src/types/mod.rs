@@ -8,6 +8,7 @@ pub mod definition;
 pub mod description;
 pub mod error;
 pub mod memory_backend;
+pub mod native_service_consent;
 pub mod output;
 pub mod params_validation;
 pub mod process_manager;
