@@ -80,6 +80,31 @@ function Get-Sha256([string]$Path) {
     try { return [BitConverter]::ToString($hash.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
     finally { $hash.Dispose(); $stream.Dispose() }
 }
+# PS7 Invoke-WebRequest uses HTTP/2 against GitHub's CDN and often dies with
+# "unexpected EOF or 0 bytes from the transport stream" on the 70MB+ native gzip.
+# Tests stub Invoke-WebRequest as a Function; keep that path for local copies.
+function Get-ReleaseFile([string]$Uri, [string]$OutFile) {
+    $iwr = Get-Command Invoke-WebRequest
+    if ($iwr.CommandType -eq 'Function') {
+        Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing
+        return
+    }
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($curl) {
+        $attempt = 0
+        while ($attempt -lt 4) {
+            $attempt++
+            if (Test-Path -LiteralPath $OutFile) { Remove-Item -LiteralPath $OutFile -Force }
+            & curl.exe --location --fail --retry 3 --retry-delay 2 --output $OutFile -- $Uri
+            if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $OutFile) -and (Get-Item -LiteralPath $OutFile).Length -gt 0) { return }
+            Start-Sleep -Seconds (2 * $attempt)
+        }
+        throw "Failed to download $Uri"
+    }
+    $params = @{ Uri = $Uri; OutFile = $OutFile; UseBasicParsing = $true }
+    if ($iwr.Parameters.ContainsKey('HttpVersion')) { $params.HttpVersion = '1.1' }
+    Invoke-WebRequest @params
+}
 # Do not coerce untrusted JSON values or pipe them through an enumerating helper.
 # PowerShell comparisons FILTER a collection on the left; [] can otherwise make
 # a rejection condition false, and ["PASS"] can masquerade as a scalar.
@@ -330,14 +355,14 @@ try {
             # Same version-specific trusted publisher origin as the assets. These are
             # separate metadata, never inserted into ZIP/SHA256SUMS after acceptance.
             foreach ($sidecar in @('release-readiness.json', 'release-authorization.json')) {
-                Invoke-WebRequest -UseBasicParsing "$base/$sidecar" -OutFile (Join-Path $temp $sidecar)
+                Get-ReleaseFile "$base/$sidecar" (Join-Path $temp $sidecar)
             }
         }
     }
     foreach ($asset in @('SHA256SUMS') + $assets) {
         $destination = Join-Path $temp $asset
         if ($ArtifactDirectory) { Copy-Item -LiteralPath (Join-Path $ArtifactDirectory $asset) -Destination $destination }
-        else { Invoke-WebRequest -UseBasicParsing "$base/$asset" -OutFile $destination }
+        else { Get-ReleaseFile "$base/$asset" $destination }
     }
     $sums = @{}
     foreach ($line in Get-Content -LiteralPath (Join-Path $temp 'SHA256SUMS')) {
