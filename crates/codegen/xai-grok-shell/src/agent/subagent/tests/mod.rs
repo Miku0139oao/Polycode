@@ -2590,6 +2590,7 @@ fn spawn_test_parent_chat_state(model_slug: &str) -> xai_chat_state::ChatStateHa
     )
 }
 mod rest;
+mod provider_affinity;
 #[tokio::test]
 async fn join_worker_task_resumes_worker_panics() {
     let inner = super::worker_runtime()

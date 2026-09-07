@@ -429,7 +429,7 @@ pub(crate) async fn run_shell_child(
     if let Some(error) = task_model_override_error(
         request.runtime_overrides.model.as_deref(),
         request.runtime_overrides.model_override_provenance,
-        resume_source.is_some(),
+        resume_source.is_some() || request.fork_context,
         &ctx.available_models,
         ctx.auth_manager
             .current_or_expired()
@@ -437,6 +437,26 @@ pub(crate) async fn run_shell_child(
     ) {
         return child_run_output(failure_result(&request, &error), completion_data, None);
     }
+    // Capture live config + credentials once, before resolving ANY model pin.
+    let parent_model = match read_parent_sampling_config(&ctx).await {
+        Ok(parent) => parent,
+        Err(error) => {
+            return child_run_output(failure_result(&request, &error), completion_data, None);
+        }
+    };
+    let (mut effective_sampling_config, effective_model_id) = match resolve_child_model_config(
+        &request,
+        effective_runtime.model.as_deref(),
+        &definition.model,
+        resume_source.as_ref(),
+        &ctx,
+        &parent_model,
+    ) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            return child_run_output(failure_result(&request, &error), completion_data, None);
+        }
+    };
     let worktree_path = if let Some(ref source) = resume_source {
         if effective_runtime.isolation != xai_tool_types::SubagentIsolationMode::None
             && source.worktree_path.is_none()
@@ -629,61 +649,7 @@ pub(crate) async fn run_shell_child(
             )
         });
     }
-    if request.fork_context {
-        effective_runtime.model = Some(ctx.model_id.0.to_string());
-    }
-    let (mut effective_sampling_config, mut effective_model_id) = resolve_effective_model_config(
-        effective_runtime.model.as_deref(),
-        &request.subagent_type,
-        &definition.model,
-        &ctx,
-    )
-    .await;
     let subagent_max_turns = resolve_subagent_max_turns(definition.max_turns, ctx.parent_max_turns);
-    {
-        let model_str = &effective_sampling_config.model;
-        let model_unknown = !model_str.is_empty()
-            && !ctx.available_models.is_empty()
-            && !ctx.available_models.contains_key(model_str)
-            && !ctx
-                .available_models
-                .values()
-                .any(|e| e.info().has_model_id(model_str));
-        if model_unknown {
-            let (parent_config, parent_mid) = read_parent_sampling_config(&ctx).await;
-            tracing::warn!(
-                subagent_id = %request.id,
-                resolved_model = %model_str,
-                parent_model = %parent_config.model,
-                "Resolved subagent model not found in available models — \
-                 falling back to parent model"
-            );
-            effective_sampling_config = parent_config;
-            effective_model_id = parent_mid;
-        }
-    }
-    if let Some(ref source) = resume_source
-        && let Some(ref source_model) = source.model_id
-        && effective_model_id.0.as_ref() != source_model.as_str()
-    {
-        if let Some(resolved) = resolve_model_override_to_config(source_model, &ctx) {
-            tracing::info!(
-                subagent_id = %request.id,
-                resolved_model = %effective_model_id.0,
-                source_model = source_model,
-                "Pinning resumed child to source model"
-            );
-            effective_sampling_config = resolved.0;
-            effective_model_id = resolved.1;
-        } else {
-            let msg = format!(
-                "Cannot resume from subagent '{}': source model '{source_model}' \
-                 is no longer available in the model catalogue.",
-                source.subagent_id,
-            );
-            return child_run_output(failure_result(&request, &msg), completion_data, None);
-        }
-    }
     if let Some(raw) = effective_runtime.reasoning_effort.as_deref()
         && ctx
             .models_manager
@@ -704,6 +670,12 @@ pub(crate) async fn run_shell_child(
                 )
             }
         }
+    }
+    if let Err(error) = validate_child_provider(
+        &parent_model.config.base_url,
+        &effective_sampling_config.base_url,
+    ) {
+        return child_run_output(failure_result(&request, &error), completion_data, None);
     }
     let subagent_model_id = effective_sampling_config.model.clone();
     let auto_compact_threshold_percent =
@@ -885,6 +857,25 @@ pub(crate) async fn run_shell_child(
         depth: 0,
         auth_manager: ctx.auth_manager.clone(),
     };
+    // Final defense after resume/effort routing and async preparation, before any client use.
+    let route_check = match recheck_parent_model(&ctx, &parent_model).await {
+        Ok(()) => validate_child_provider(
+            &parent_model.config.base_url,
+            &effective_sampling_config.base_url,
+        ),
+        Err(error) => Err(error),
+    };
+    if let Err(msg) = route_check {
+        let result = fail_subagent(
+            &msg,
+            &subagent_id,
+            &child_session_id,
+            &subagent_meta_dir,
+            0,
+            &early_gcs_ctx,
+        );
+        return child_run_output(result, completion_data, None);
+    }
     let sampling_client = match crate::sampling::Client::new(effective_sampling_config.clone()) {
         Ok(c) => c,
         Err(e) => {
@@ -962,12 +953,21 @@ pub(crate) async fn run_shell_child(
         &ctx.available_models,
         effective_model_id.0.as_ref(),
     );
-    let model_has_own_creds = model_entry.is_some_and(|entry| entry.has_own_credentials());
-    let inherited_auth_type = subagent_auth_type(model_entry, &ctx.auth_method_id);
+    let subscription_child = xai_grok_sampler::local_transport::subscription_provider(
+        &effective_sampling_config.base_url,
+    )
+    .is_some();
+    let model_has_own_creds =
+        !subscription_child && model_entry.is_some_and(|entry| entry.has_own_credentials());
+    let inherited_auth_type = if subscription_child {
+        parent_model.credentials.auth_type
+    } else {
+        subagent_auth_type(model_entry, &ctx.auth_method_id)
+    };
     let credentials = xai_chat_state::Credentials {
         api_key: effective_sampling_config.api_key.clone(),
         auth_type: inherited_auth_type,
-        alpha_test_key: ctx.alpha_test_key.clone(),
+        alpha_test_key: parent_model.credentials.alpha_test_key.clone(),
         client_version: effective_sampling_config.client_version.clone(),
     };
     xai_grok_telemetry::unified_log::info(
@@ -979,12 +979,12 @@ pub(crate) async fn run_shell_child(
             "effective_model": effective_model_id.0.as_ref(),
             "effective_model_raw": &effective_sampling_config.model,
             "base_url": &effective_sampling_config.base_url,
-            "key_prefix": key_prefix(&effective_sampling_config.api_key),
+            "key": credential_presence(&effective_sampling_config.api_key),
             "auth_type": format!("{:?}", inherited_auth_type),
             "model_has_own_creds": model_has_own_creds,
             "auth_method_id": ctx.auth_method_id.0.as_ref(),
-            "parent_model": ctx.model_id.0.as_ref(),
-            "parent_key_prefix": key_prefix(&ctx.sampling_config.api_key),
+            "parent_model": parent_model.model_id.0.as_ref(),
+            "parent_key": credential_presence(&parent_model.config.api_key),
             "context_window": effective_sampling_config.context_window,
         })),
     );
@@ -1245,6 +1245,19 @@ pub(crate) async fn run_shell_child(
     let spawn_phase_parent = session_bootstrap_span.span().clone();
     let bootstrap_started_at = std::time::Instant::now();
     let pins = ctx.compaction_pins_for_child(&definition.user_message_template);
+    // Skill/MCP/persistence preparation above can await after client construction.
+    // Recheck again immediately before child creation (which may bootstrap inference).
+    if let Err(msg) = recheck_parent_model(&ctx, &parent_model).await {
+        let result = fail_subagent(
+            &msg,
+            &subagent_id,
+            &child_session_id,
+            &subagent_meta_dir,
+            0,
+            &early_gcs_ctx,
+        );
+        return child_run_output(result, completion_data, None);
+    }
     let spawn_result = session::spawn_session_on_thread(
         child_session_info,
         gateway.clone(),

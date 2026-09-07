@@ -4,6 +4,30 @@ use super::super::resume_window::resume_inherited_prefix_len;
 use crate::test_support::lsp_runtime::{ctx_with_toggle, test_gateway};
 use crate::upload::trace::SubagentSpawnedRef;
 use xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend;
+
+// Keep the existing native-resolution assertions below on their tuple interface.
+// Each adapter exercises the production capture/guard path; subscription failures
+// are tested directly (without unwrap adapters) in provider_affinity.
+async fn read_parent_sampling_config(ctx: &SubagentSpawnContext) -> (xai_grok_sampler::SamplerConfig, acp::ModelId) {
+    super::super::read_parent_sampling_config(ctx).await.unwrap().inherited()
+}
+async fn resolve_effective_model_config(
+    runtime: Option<&str>, agent: &str, definition: &ModelOverride, ctx: &SubagentSpawnContext,
+) -> (xai_grok_sampler::SamplerConfig, acp::ModelId) {
+    let parent = super::super::read_parent_sampling_config(ctx).await.unwrap();
+    super::super::resolve_effective_model_config(runtime, agent, definition, ctx, &parent).unwrap()
+}
+async fn resolve_subagent_sampling_config(
+    agent: &str, definition: &ModelOverride, ctx: &SubagentSpawnContext,
+) -> (xai_grok_sampler::SamplerConfig, acp::ModelId) {
+    let parent = super::super::read_parent_sampling_config(ctx).await.unwrap();
+    super::super::resolve_subagent_sampling_config(agent, definition, ctx, &parent).unwrap()
+}
+fn resolve_model_override_to_config(
+    model: &str, ctx: &SubagentSpawnContext,
+) -> Option<(xai_grok_sampler::SamplerConfig, acp::ModelId)> {
+    super::super::resolve_model_override_to_config(model, ctx, &ctx.sampling_config.base_url).unwrap()
+}
 #[test]
 fn normalize_forked_context_strips_project_layout() {
     use xai_grok_sampling_types::conversation::ConversationItem;
@@ -2328,8 +2352,9 @@ fn resolve_model_override_wires_resolver_for_fresh_and_hard_expired_session_keys
             crate::agent::auth_method::CACHED_TOKEN_AUTH_METHOD_ID,
         );
         ctx.auth = Some(auth);
-        ctx.available_models
-            .insert("grok-4.5".to_string(), test_model_entry("grok-4.5"));
+        let mut entry = test_model_entry("grok-4.5");
+        entry.info.base_url = "https://api.x.ai/v1".into();
+        ctx.available_models.insert("grok-4.5".into(), entry);
         let (config, _) = resolve_model_override_to_config("grok-4.5", &ctx).unwrap();
         assert!(config.bearer_resolver.is_some(), "key={key}");
     }
@@ -2343,7 +2368,9 @@ fn resolve_model_override_to_config_never_strips_a_fallback_key() {
         crate::agent::auth_method::CACHED_TOKEN_AUTH_METHOD_ID,
     );
     ctx.auth = None;
-    ctx.available_models.insert("grok-4.5".to_string(), test_model_entry("grok-4.5"));
+    let mut entry = test_model_entry("grok-4.5");
+    entry.info.base_url = "https://api.x.ai/v1".into();
+    ctx.available_models.insert("grok-4.5".into(), entry);
     let (config, _) = resolve_model_override_to_config("grok-4.5", &ctx).unwrap();
     assert_eq!(
             config.bearer_resolver.is_some(),
@@ -2503,10 +2530,8 @@ async fn runtime_override_wins_over_subagents_models_pin_in_precedence_path() {
             "an unknown override falls through to the pin",
         );
 }
-/// A `fork_context = true` spawn must infer on the parent session model (`ctx.model_id`) for per-model radix reuse.
-/// That holds even when a `[subagents.models]` pin and an `AgentDefinition.model` override are both present.
-/// `run_shell_child` forces `effective_runtime.model = Some(ctx.model_id)` on the fork path after other override sources.
-/// The runtime override wins in `resolve_effective_model_config`.
+/// A fork inherits the captured parent's config, even when config/definition pins exist.
+/// Exercise the actual final-winner path, not a simulation of the old ctx.model_id rewrite.
 #[tokio::test]
 async fn fork_context_pins_parent_model_over_overrides() {
     use xai_grok_agent::config::ModelOverride;
@@ -2526,18 +2551,11 @@ async fn fork_context_pins_parent_model_over_overrides() {
     };
     let agent_def = ModelOverride::Override("agentdef-model".to_string());
     let ctx = build_ctx();
-    let fork_context = true;
-    let mut runtime_override: Option<String> = None;
-    if fork_context {
-        runtime_override = Some(ctx.model_id.0.to_string());
-    }
-    let (config, model_id) = resolve_effective_model_config(
-            runtime_override.as_deref(),
-            "general-purpose",
-            &agent_def,
-            &ctx,
-        )
-        .await;
+    let request = bootstrap_test_request(true);
+    let parent = super::super::read_parent_sampling_config(&ctx).await.unwrap();
+    let (config, model_id) = resolve_child_model_config(
+        &request, None, &agent_def, None, &ctx, &parent,
+    ).unwrap();
     assert_eq!(
             config.model, "parent-model",
             "fork_context must pin the parent model over the [subagents.models] pin and agent-def override",
@@ -2808,23 +2826,23 @@ async fn subagent_override_provider_model_spawns_cache_only_credentials() {
     assert_eq!(config.base_url, "https://gateway.example/v1");
 }
 #[test]
-fn key_prefix_truncates_to_8_chars() {
+fn credential_presence_never_logs_long_key_fragments() {
     let key = Some("eyJ0eXAiOiJhbGciOiJSUzI1NiJ9".to_string());
-    assert_eq!(key_prefix(&key), "eyJ0eXAi");
+    assert_eq!(credential_presence(&key), "configured");
 }
 #[test]
-fn key_prefix_short_key_not_truncated() {
+fn credential_presence_never_logs_short_key() {
     let key = Some("abc".to_string());
-    assert_eq!(key_prefix(&key), "abc");
+    assert_eq!(credential_presence(&key), "configured");
 }
 #[test]
-fn key_prefix_none_returns_placeholder() {
-    assert_eq!(key_prefix(&None), "<none>");
+fn credential_presence_none_returns_absent() {
+    assert_eq!(credential_presence(&None), "absent");
 }
 #[test]
-fn key_prefix_empty_string() {
+fn credential_presence_empty_string_is_still_only_a_marker() {
     let key = Some(String::new());
-    assert_eq!(key_prefix(&key), "");
+    assert_eq!(credential_presence(&key), "configured");
 }
 #[test]
 fn non_cursor_persona_injected_as_system_reminder() {
