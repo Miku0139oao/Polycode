@@ -2494,6 +2494,10 @@ async fn finish_update_on_exit(
     adopted: Option<tokio::task::JoinHandle<std::io::Result<std::process::ExitStatus>>>,
     update_config: &UpdateConfig,
 ) -> bool {
+    if let Err(error) = allow_upstream_update(xai_grok_shell::polycode::enabled()) {
+        eprintln!("{error}");
+        return false;
+    }
     let run_blocking = |reason: Option<String>| async move {
         if let Some(reason) = reason {
             eprintln!("{reason}");
@@ -2557,14 +2561,32 @@ fn build_update_config() -> UpdateConfig {
 }
 /// Central gate for auto-update checks; add new suppression rules here, not at call sites.
 fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
-    if cfg!(debug_assertions) {
-        return false;
+    upstream_auto_updates_allowed(
+        xai_grok_shell::polycode::enabled(),
+        cfg!(debug_assertions),
+        no_auto_update_flag,
+        std::env::var_os("GROK_DISABLE_AUTOUPDATER")
+            .is_some_and(|v| env_flag_enabled(&v.to_string_lossy())),
+    )
+}
+
+fn upstream_auto_updates_allowed(
+    polycode: bool,
+    debug_build: bool,
+    cli_disabled: bool,
+    env_disabled: bool,
+) -> bool {
+    !polycode && !debug_build && !cli_disabled && !env_disabled
+}
+
+fn allow_upstream_update(polycode: bool) -> Result<()> {
+    if polycode {
+        anyhow::bail!(
+            "Polycode uses immutable release bundles, not the upstream Grok updater. \
+             Re-run the Polycode PowerShell installer to update the complete bundle."
+        );
     }
-    if no_auto_update_flag {
-        return false;
-    }
-    !std::env::var_os("GROK_DISABLE_AUTOUPDATER")
-        .is_some_and(|v| env_flag_enabled(&v.to_string_lossy()))
+    Ok(())
 }
 /// Gate for the stdio agent's background auto-update: only the direct stdio agent, from the managed install.
 /// Other modes update in `run_agent_command`.
@@ -2632,6 +2654,10 @@ async fn run_update_command(
     trigger: auto_update::CliUpdateTrigger,
     base_update_config: &UpdateConfig,
 ) -> Result<()> {
+    // Also guard explicit `update --check` and Ctrl+U's separate exit path.
+    // Bootstrap initializes Polycode mode before command dispatch, including
+    // private leaders; a launcher-only flag would not cover all these paths.
+    allow_upstream_update(xai_grok_shell::polycode::enabled())?;
     if json && !check {
         anyhow::bail!("--json requires --check");
     }
@@ -2745,6 +2771,28 @@ async fn signal_leaders_to_relaunch(installed_version: &str) {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn polycode_suppresses_upstream_auto_updates_in_release_too() {
+        for debug in [false, true] {
+            for cli in [false, true] {
+                for env in [false, true] {
+                    assert!(!super::upstream_auto_updates_allowed(true, debug, cli, env));
+                    assert_eq!(
+                        super::upstream_auto_updates_allowed(false, debug, cli, env),
+                        !debug && !cli && !env,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn polycode_explicit_update_does_not_enter_upstream_installer() {
+        let error = super::allow_upstream_update(true).unwrap_err();
+        assert!(error.to_string().contains("Polycode PowerShell installer"));
+        assert!(super::allow_upstream_update(false).is_ok());
+    }
+
     use super::*;
     #[test]
     fn embedded_agent_commands_heal_managed_policy_before_sandboxing() {

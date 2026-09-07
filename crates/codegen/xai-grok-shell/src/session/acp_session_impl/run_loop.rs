@@ -773,6 +773,9 @@ pub(super) async fn run_session(
                                 {
                                     cfg.context_window = cw;
                                 }
+                                session.rebuild_spec.native_service_consent.set_provider(
+                                    xai_grok_sampler::local_transport::subscription_provider(&cfg.base_url),
+                                );
                                 session.chat_state_handle.update_sampling_config(cfg);
 
                                 let existing = session.chat_state_handle.get_credentials().await;

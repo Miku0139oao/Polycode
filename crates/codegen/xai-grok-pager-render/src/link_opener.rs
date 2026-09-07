@@ -27,12 +27,21 @@ pub fn browser_open_likely_available_from_env(env: &HashMap<String, String>) -> 
     if cfg!(any(target_os = "macos", target_os = "windows")) {
         return true;
     }
+    if cfg!(target_os = "linux") && wsl_interop_available_from_env(env) {
+        return true;
+    }
     // Explicit BROWSER override: allow even without a display server so scripted/headless setups that point at a CLI browser still try
     if env.get("BROWSER").is_some_and(|v| !v.is_empty()) {
         return true;
     }
     env.get("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
         || env.get("DISPLAY").is_some_and(|v| !v.is_empty())
+}
+
+fn wsl_interop_available_from_env(env: &HashMap<String, String>) -> bool {
+    ["WSL_INTEROP", "WSL_DISTRO_NAME"]
+        .iter()
+        .all(|key| env.get(*key).is_some_and(|value| !value.is_empty()))
 }
 
 /// Whether this process likely has a GUI browser available right now.
@@ -141,6 +150,10 @@ fn spawn_url_opener(url: &str) -> bool {
 #[cfg(not(target_os = "windows"))]
 #[allow(clippy::disallowed_methods)] // fire and forget; the child is reaped when this process exits
 fn spawn_url_opener(url: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    if wsl_interop_available_from_env(&crate::host::collect_unicode_env()) {
+        return spawn_wsl_url_opener(url);
+    }
     #[cfg(target_os = "macos")]
     let cmd = "open";
     #[cfg(not(target_os = "macos"))]
@@ -160,6 +173,64 @@ fn spawn_url_opener(url: &str) -> bool {
             false
         }
     }
+}
+
+// The script is constant. The URL travels only over stdin, never as PowerShell
+// source, cmd.exe arguments, an environment variable, or a log field.
+#[cfg(any(target_os = "linux", test))]
+const WSL_BROWSER_SCRIPT: &str = r#"$ErrorActionPreference='Stop'; [Console]::InputEncoding=[Text.Encoding]::UTF8; $target=[Console]::In.ReadToEnd(); $uri=$null; if (-not [Uri]::TryCreate($target,[UriKind]::Absolute,[ref]$uri) -or $uri.Scheme -notin @('http','https','mailto')) { exit 1 }; Start-Process -FilePath $target -ErrorAction Stop"#;
+
+#[cfg(any(target_os = "linux", test))]
+fn wsl_browser_arguments() -> Vec<String> {
+    use base64::Engine;
+    let script: Vec<u8> = WSL_BROWSER_SCRIPT
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    vec![
+        "-NoLogo".into(),
+        "-NoProfile".into(),
+        "-NonInteractive".into(),
+        "-EncodedCommand".into(),
+        base64::engine::general_purpose::STANDARD.encode(script),
+    ]
+}
+
+#[cfg(target_os = "linux")]
+#[allow(clippy::disallowed_methods)]
+fn spawn_wsl_url_opener(url: &str) -> bool {
+    use std::io::Write;
+    // Bound the synchronous pipe write; callers can still show a longer URL.
+    if url.len() > 4096
+        || url.contains('\0')
+        || !url::Url::parse(url)
+            .is_ok_and(|parsed| matches!(parsed.scheme(), "http" | "https" | "mailto"))
+    {
+        return false;
+    }
+    let mut command = std::process::Command::new("powershell.exe");
+    command
+        .args(wsl_browser_arguments())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .env_remove("POLYCODE_BRIDGE_TOKEN");
+    xai_grok_tools::util::detach_std_command(&mut command);
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    let written = child
+        .stdin
+        .take()
+        .is_some_and(|mut input| input.write_all(url.as_bytes()).is_ok());
+    if !written {
+        let _ = child.kill();
+    }
+    // Reap this owned helper without blocking the TUI on browser startup.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    written
 }
 
 /// Build the `open`/`xdg-open` opener command (macOS, Linux, BSD); Windows uses [`reveal_in_explorer`] instead.
@@ -332,6 +403,48 @@ pub fn ensure_query_param(url: &str, key: &str, value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wsl_detection_requires_both_interop_and_distribution() {
+        use std::collections::HashMap;
+        let mut env = HashMap::new();
+        env.insert("WSL_DISTRO_NAME".into(), "fixture".into());
+        assert!(!super::wsl_interop_available_from_env(&env));
+        env.insert("WSL_INTEROP".into(), "/run/WSL/fixture_interop".into());
+        assert!(super::wsl_interop_available_from_env(&env));
+        if cfg!(target_os = "linux") {
+            assert!(super::browser_open_likely_available_from_env(&env));
+        }
+        env.insert("WSL_INTEROP".into(), String::new());
+        assert!(!super::wsl_interop_available_from_env(&env));
+    }
+
+    #[test]
+    fn wsl_browser_command_contains_only_constant_script() {
+        use base64::Engine;
+        let args = super::wsl_browser_arguments();
+        assert_eq!(
+            &args[..4],
+            &[
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand"
+            ]
+        );
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&args[4])
+            .unwrap();
+        let wide: Vec<_> = bytes
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        let script = String::from_utf16(&wide).unwrap();
+        assert_eq!(script, super::WSL_BROWSER_SCRIPT);
+        assert!(script.contains("[Console]::In.ReadToEnd()"));
+        assert!(script.contains("Start-Process -FilePath $target"));
+        assert!(!script.contains("Invoke-Expression"));
+    }
+
     use super::*;
 
     #[test]

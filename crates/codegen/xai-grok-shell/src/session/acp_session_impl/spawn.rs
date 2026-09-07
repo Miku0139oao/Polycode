@@ -1002,6 +1002,12 @@ pub(crate) async fn spawn_session_actor(
         subagent_coordinator_sender: tool_context.subagent_coordinator_sender.clone(),
         monitor_event_buffer: tool_context.monitor_event_buffer.clone(),
         user_question_tx: user_question_tx.clone(),
+        // This is the effective per-session route (also for subagent model
+        // overrides), the same config used to seed chat_state_handle above.
+        native_service_consent:
+            xai_grok_tools::types::native_service_consent::NativeServiceConsent::new(
+                xai_grok_sampler::local_transport::subscription_provider(&sampling_config.base_url),
+            ),
         subagent_depth: tool_context.subagent_depth,
         subagents_max_depth,
         session_id_str: session_info.id.0.to_string(),

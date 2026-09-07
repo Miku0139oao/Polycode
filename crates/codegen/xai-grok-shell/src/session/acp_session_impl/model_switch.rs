@@ -12,13 +12,18 @@ impl SessionActor {
         let models = self.models_manager.models();
         let endpoints = self.models_manager.endpoints();
         let pin = self.models_manager.session_summary_model();
-        let session_key = self.auth_manager.as_ref()
+        let session_key = self
+            .auth_manager
+            .as_ref()
             .and_then(|am| am.current_or_expired().map(|a| a.key));
-        let disable_api_key_auth = self.auth_manager.as_ref()
+        let disable_api_key_auth = self
+            .auth_manager
+            .as_ref()
             .is_some_and(|am| am.grok_com_config().api_key_auth_disabled());
         let resolved = crate::agent::config::resolve_aux_model_sampling_config(
             primary,
-            pin.as_deref().unwrap_or(crate::models::default_session_summary_model()),
+            pin.as_deref()
+                .unwrap_or(crate::models::default_session_summary_model()),
             &models,
             &endpoints,
             session_key.as_deref(),
@@ -27,10 +32,13 @@ impl SessionActor {
             primary.client_version.clone(),
         );
         let (model, config) = crate::agent::config::finalize_image_describe_sampler_config(
-            resolved, primary, primary.client_identifier.clone(), primary.max_retries,
+            resolved,
+            primary,
+            primary.client_identifier.clone(),
+            primary.max_retries,
         );
-        let client = xai_grok_sampler::SamplingClient::new(config)
-            .map_err(|e| self.to_acp_error(e))?;
+        let client =
+            xai_grok_sampler::SamplingClient::new(config).map_err(|e| self.to_acp_error(e))?;
         Ok((client, model))
     }
 
@@ -44,7 +52,8 @@ impl SessionActor {
         auto_compact_threshold_percent: u8,
     ) -> Result<acp::ModelId, acp::Error> {
         if crate::polycode::enabled() && self.state.lock().await.running_task.is_some() {
-            return Err(acp::Error::invalid_params().data("Wait for the active turn, or cancel it before switching models"));
+            return Err(acp::Error::invalid_params()
+                .data("Wait for the active turn, or cancel it before switching models"));
         }
         let (summary_client, summary_model) = self.selected_summary_client(&sampling_config)?;
         self.abort_title_refresh();
@@ -85,10 +94,16 @@ impl SessionActor {
         );
         // Queue title invalidation before publishing the new chat route. The FIFO is
         // the persistence actor's selection boundary, including already-queued titles.
-        let _ = self.notifications.persistence_tx.send(PersistenceMsg::SummarySampling {
-            client: summary_client,
-            model: summary_model,
-        });
+        let _ = self
+            .notifications
+            .persistence_tx
+            .send(PersistenceMsg::SummarySampling {
+                client: summary_client,
+                model: summary_model,
+            });
+        self.rebuild_spec.native_service_consent.set_provider(
+            xai_grok_sampler::local_transport::subscription_provider(&sampling_config.base_url),
+        );
         self.chat_state_handle
             .update_sampling_config(xai_grok_sampling_types::SamplingConfig {
                 base_url: sampling_config.base_url.clone(),
@@ -211,7 +226,13 @@ impl SessionActor {
         primary.reasoning_effort = cfg.reasoning_effort;
         let (client, model) = self.selected_summary_client(&primary)?;
         self.abort_title_refresh();
-        let _ = self.notifications.persistence_tx.send(PersistenceMsg::SummarySampling { client, model });
+        let _ = self
+            .notifications
+            .persistence_tx
+            .send(PersistenceMsg::SummarySampling { client, model });
+        self.rebuild_spec.native_service_consent.set_provider(
+            xai_grok_sampler::local_transport::subscription_provider(&cfg.base_url),
+        );
         self.chat_state_handle.update_sampling_config(cfg);
         let agent_name = self.agent.borrow().definition().name.clone();
         let _ = self

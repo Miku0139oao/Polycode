@@ -405,10 +405,24 @@ impl VideoGenClient {
             .request(reqwest::Method::POST, &start_url)
             .timeout(std::time::Duration::from_secs(VIDEO_START_TIMEOUT_SECS))
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let approved = self.authorize(call, model, &req).await?;
-        let presigned = match &self.zdr_video_output_s3 {
-            Some(config) => Some(call.wait(self.presign_zdr_output_urls(config)).await??),
-            None => None,
+        let (approved, presigned) = match (&self.zdr_video_output_s3, call.is_subscription()) {
+            (Some(config), true) => loop {
+                let before = self.authorize(call, model, &req).await?;
+                let urls = call.wait(self.presign_zdr_output_urls(config)).await??;
+                let after = self.authorize(call, model, &req).await?;
+                // Authorization is the only dynamically resolved header; all
+                // other headers/base/model are immutable on this client/call.
+                // A new credential may have required another long dialog, so
+                // discard its older expiring URLs and mint fresh ones again.
+                if before.sent_bearer() == after.sent_bearer() {
+                    break (after, Some(urls));
+                }
+            },
+            (Some(config), false) => {
+                let urls = call.wait(self.presign_zdr_output_urls(config)).await??;
+                (self.authorize(call, model, &req).await?, Some(urls))
+            }
+            (None, _) => (self.authorize(call, model, &req).await?, None),
         };
 
         let payload = GenerateVideoPayload {
@@ -440,12 +454,12 @@ impl VideoGenClient {
             self.record_401_attribution(ToolConsumer::VideoGenStart, approved.sent_bearer());
         }
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = call.wait(response.text()).await?.unwrap_or_default();
             tracing::warn!(http_status = %status, "Video generation API error");
             return Err(video_http_error(status, &body));
         }
 
-        let body = response.text().await.map_err(|e| {
+        let body = call.wait(response.text()).await?.map_err(|e| {
             xai_tool_runtime::ToolError::invalid_arguments(format!(
                 "Failed to read video generation start response body: {}",
                 e.without_url()
@@ -503,7 +517,7 @@ impl VideoGenClient {
                 );
             }
             if !poll_status.is_success() && poll_status.as_u16() != 202 {
-                let body = poll_response.text().await.unwrap_or_default();
+                let body = call.wait(poll_response.text()).await?.unwrap_or_default();
                 if is_zdr_upload_url_error(&body) {
                     return Err(zdr_restricted_error());
                 }
@@ -516,7 +530,7 @@ impl VideoGenClient {
                 ));
             }
 
-            let poll_body = poll_response.text().await.map_err(|e| {
+            let poll_body = call.wait(poll_response.text()).await?.map_err(|e| {
                 xai_tool_runtime::ToolError::invalid_arguments(format!(
                     "Failed to read video poll response body: {}",
                     e.without_url()
@@ -594,12 +608,15 @@ impl VideoGenClient {
             .with_details(serde_json::json!({"code": "http_failure", "status": status.as_u16()})));
         }
 
-        response.bytes().await.map(|b| b.to_vec()).map_err(|e| {
-            xai_tool_runtime::ToolError::invalid_arguments(format!(
-                "Failed to read video bytes: {}",
-                e.without_url()
-            ))
-        })
+        call.wait(response.bytes())
+            .await?
+            .map(|b| b.to_vec())
+            .map_err(|e| {
+                xai_tool_runtime::ToolError::invalid_arguments(format!(
+                    "Failed to read video bytes: {}",
+                    e.without_url()
+                ))
+            })
     }
 
     async fn finish_zdr_video(
@@ -641,7 +658,8 @@ impl VideoGenClient {
                     request_id = %request_id,
                     "Post-upload video download failed, returning remote reference: {e}"
                 );
-                let reference_url = self.zdr_reference_url(config, &urls).await?;
+                let reference_url = call.wait(self.zdr_reference_url(config, &urls)).await??;
+                call.check_current()?;
                 Ok(VideoOutcome::UploadedUrl(reference_url))
             }
         }
@@ -705,9 +723,9 @@ impl VideoGenClient {
         urls: &ZdrPresignedUrls,
         request_id: &str,
     ) -> Result<Vec<u8>, xai_tool_runtime::ToolError> {
-        let get_url = self
-            .presign_zdr_get_url(config, &urls.object_key, urls.expires_in)
-            .await?;
+        let get_url = call
+            .wait(self.presign_zdr_get_url(config, &urls.object_key, urls.expires_in))
+            .await??;
         tracing::info!(
             request_id = %request_id,
             "Post-upload video GET presign succeeded, attempting download"
@@ -1258,6 +1276,7 @@ impl xai_tool_runtime::Tool for ImageToVideoTool {
 
         let media = media_output_from_outcome(&client, &session_folder, outcome).await?;
 
+        call.check_current()?;
         Ok(ToolOutput::ImageToVideo(media))
     }
 }
@@ -1393,6 +1412,7 @@ impl xai_tool_runtime::Tool for ReferenceToVideoTool {
 
         let media = media_output_from_outcome(&client, &session_folder, outcome).await?;
 
+        call.check_current()?;
         Ok(ToolOutput::ReferenceToVideo(media))
     }
 }

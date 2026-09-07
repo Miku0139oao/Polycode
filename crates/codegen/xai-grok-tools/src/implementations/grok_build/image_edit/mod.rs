@@ -402,7 +402,7 @@ impl xai_tool_runtime::Tool for ImageEditTool {
             .with_details(serde_json::json!({"code": "http_failure", "status": status.as_u16()})));
         }
 
-        let body = response.text().await.map_err(|e| {
+        let body = call.wait(response.text()).await?.map_err(|e| {
             xai_tool_runtime::ToolError::invalid_arguments(format!(
                 "Failed to read image edit response body: {}",
                 e.without_url()
@@ -445,6 +445,7 @@ impl xai_tool_runtime::Tool for ImageEditTool {
             "edited image saved to disk"
         );
 
+        call.check_current()?;
         Ok(ToolOutput::ImageEdit(MediaGenOutput::new(absolute_path)))
     }
 }

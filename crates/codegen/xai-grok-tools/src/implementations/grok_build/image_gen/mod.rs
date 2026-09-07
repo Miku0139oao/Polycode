@@ -310,7 +310,7 @@ impl ImageGenClient {
             .with_details(serde_json::json!({"code": "http_failure", "status": status.as_u16()})));
         }
 
-        let body = response.text().await.map_err(|e| {
+        let body = call.wait(response.text()).await?.map_err(|e| {
             xai_tool_runtime::ToolError::invalid_arguments(format!(
                 "Failed to read image generation response body: {}",
                 e.without_url()
@@ -331,13 +331,15 @@ impl ImageGenClient {
             ));
         }
 
-        base64::engine::general_purpose::STANDARD
+        let bytes = base64::engine::general_purpose::STANDARD
             .decode(b64_data)
             .map_err(|e| {
                 xai_tool_runtime::ToolError::invalid_arguments(format!(
                     "Failed to decode base64 image data: {e}"
                 ))
-            })
+            })?;
+        call.check_current()?;
+        Ok(bytes)
     }
 }
 
@@ -547,6 +549,7 @@ impl xai_tool_runtime::Tool for ImageGenTool {
             "image saved to disk"
         );
 
+        call.check_current()?;
         Ok(ToolOutput::ImageGen(MediaGenOutput::new(absolute_path)))
     }
 }

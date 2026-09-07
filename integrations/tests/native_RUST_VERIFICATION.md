@@ -70,6 +70,10 @@ Fresh units and zero compilation**. This verifies reuse for that Windows graph,
 not the separate WSL cache. The protobuf helper's three tests subsequently passed
 (35.692s including compilation; 0.82s execution). Running its new regression
 straight from the compiled executable took 0.079s, with no Cargo invocation.
+A later scan exposed a gap in those tests: Windows protoc could create a literal
+`NUL` file. Both outputs now use private scratch files, and the regression also
+asserts that the source directory is unchanged. All three tests passed again
+(23.500s including compilation; 5.12s execution), with no source `NUL` entries.
 
 Use a separate target directory and a scoped background check before considering
 a full Windows build. Existing Linux ELF

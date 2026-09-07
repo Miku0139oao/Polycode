@@ -1566,6 +1566,11 @@ async fn restore_effort_via_load(
 ) -> Option<xai_grok_sampling_types::ReasoningEffort> {
     use crate::agent::config::{EndpointsConfig, ModelEntry};
     let agent = build_minimal_agent_for_tests();
+    // This fixture tests restoration after authentication, not the signed-out
+    // model-switch guard. The fake session actor below performs no inference.
+    agent.set_auth_method(acp::AuthMethodId::new(
+        crate::agent::auth_method::XAI_API_KEY_METHOD_ID,
+    ));
     let mut entry = ModelEntry::fallback("effort-model", &EndpointsConfig::default());
     entry.info.supports_reasoning_effort = true;
     agent

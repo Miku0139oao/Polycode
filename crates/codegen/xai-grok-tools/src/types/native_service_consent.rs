@@ -120,23 +120,25 @@ impl ApprovalKey {
     /// exact private target is represented separately by a session-local ID.
     fn safe_labels(&self, configured_headers: &HeaderMap) -> (String, &str) {
         let contains_credential = |label: &str| {
-            [&self.headers, configured_headers].into_iter().any(|headers| {
-                headers.values().any(|value| {
-                    // All headers are potentially credentials. Check whitespace
-                    // tokens too, so "Bearer token" also suppresses "token" in
-                    // a model/origin; never expose a credential suffix or hash.
-                    value
-                        .as_bytes()
-                        .split(u8::is_ascii_whitespace)
-                        .filter(|part| !part.is_empty())
-                        .any(|part| {
-                            label
-                                .as_bytes()
-                                .windows(part.len())
-                                .any(|window| window.eq_ignore_ascii_case(part))
-                        })
+            [&self.headers, configured_headers]
+                .into_iter()
+                .any(|headers| {
+                    headers.values().any(|value| {
+                        // All headers are potentially credentials. Check whitespace
+                        // tokens too, so "Bearer token" also suppresses "token" in
+                        // a model/origin; never expose a credential suffix or hash.
+                        value
+                            .as_bytes()
+                            .split(u8::is_ascii_whitespace)
+                            .filter(|part| !part.is_empty())
+                            .any(|part| {
+                                label
+                                    .as_bytes()
+                                    .windows(part.len())
+                                    .any(|window| window.eq_ignore_ascii_case(part))
+                            })
+                    })
                 })
-            })
         };
         let origin = url::Url::parse(&self.base)
             .ok()
@@ -403,7 +405,9 @@ impl NativeServiceCall {
     ) -> Result<Instant, ToolError> {
         self.check_current()?;
         // Record before queueing, not when the receiver is next polled.
-        let deadline = Instant::now() + self.timeout;
+        let deadline = Instant::now()
+            .checked_add(self.timeout)
+            .ok_or_else(|| denied("approval timeout is out of range"))?;
         let (origin, model) = key.safe_labels(configured_headers);
         let question = format!(
             "Allow native xAI {} outside ChatGPT/Cursor subscription billing? This may use native xAI quota or incur charges using configured credential #{credential_label}. Endpoint origin: {origin}. Model: {model}. Opaque target #{target_label} distinguishes the exact private endpoint/model/credential scope, including redacted parts. Approval is in-memory for this service's exact configured endpoint, model and credential only, until the provider/model selection changes.",

@@ -371,11 +371,14 @@ async fn context_aware_search_cancels_while_response_body_is_held_after_headers(
         request_received_tx.send(()).unwrap();
         send_headers_rx.await.unwrap();
         socket
-            .write_all(concat!(
-                "HTTP/1.1 200 OK\r\n",
-                "Content-Type: application/json\r\n",
-                "Content-Length: 2\r\nConnection: close\r\n\r\n{"
-            ).as_bytes())
+            .write_all(
+                concat!(
+                    "HTTP/1.1 200 OK\r\n",
+                    "Content-Type: application/json\r\n",
+                    "Content-Length: 2\r\nConnection: close\r\n\r\n{"
+                )
+                .as_bytes(),
+            )
             .await
             .unwrap();
         // Headers and one body byte are available, but body completion is held
@@ -401,12 +404,18 @@ async fn context_aware_search_cancels_while_response_body_is_held_after_headers(
         let wake = Arc::new(ResponseWake(Notify::new()));
         let waker = Waker::from(wake.clone());
         assert!(
-            pending.as_mut().poll(&mut Context::from_waker(&waker)).is_pending()
+            pending
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
         );
         send_headers_tx.send(()).unwrap();
         wake.0.notified().await;
         assert!(
-            pending.as_mut().poll(&mut Context::from_waker(&waker)).is_pending()
+            pending
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
         );
         cancellation.cancel();
         let outcome = tokio::time::timeout(Duration::from_secs(5), pending.as_mut()).await;
@@ -625,6 +634,26 @@ async fn cancelled_changed_same_provider_or_dropped_call_cannot_accept_late_answ
     }
 }
 
+#[tokio::test]
+async fn oversized_timeout_is_rejected_without_panicking_or_prompting() {
+    let (policy, resources, mut rx) = fixture();
+    let ctx = test_ctx_with_call_id(resources, "oversized-timeout");
+    let mut call = NativeServiceCall::from_context(&ctx).await;
+    call.timeout = Duration::MAX;
+    let result = call
+        .authorize(
+            NativeService::WebSearch,
+            "https://api.x.ai/v1",
+            "grok-4.6",
+            &headers("Bearer fixture-key"),
+            None,
+        )
+        .await;
+    assert!(result.is_err());
+    assert!(rx.try_recv().is_err());
+    assert!(policy.0.lock().approvals.is_empty());
+}
+
 #[tokio::test(start_paused = true)]
 async fn timeout_is_fail_closed_and_no_detached_approval_writer_survives() {
     let (policy, resources, mut rx) = fixture();
@@ -712,7 +741,11 @@ async fn timely_allow_cannot_be_cached_after_slow_credential_revalidation() {
         async { allow(rx.recv().await.unwrap()) }
     );
     assert!(
-        result.err().unwrap().to_string().contains("approval timed out")
+        result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("approval timed out")
     );
     assert!(policy.0.lock().approvals.is_empty());
 }
@@ -822,12 +855,9 @@ async fn questions_distinguish_private_targets_without_disclosing_secrets() {
         "x-custom-auth",
         HeaderValue::from_static("bEaReR custom-secret"),
     );
-    const FIRST: &str =
-        "https://url-user:url-password@api.example.test:8443/private-one?key=query-secret#fragment-secret";
-    const SECOND: &str =
-        "https://url-user:url-password@api.example.test:8443/private-two?key=query-secret#fragment-secret";
-    const OTHER_ORIGIN: &str =
-        "https://url-user:url-password@other.example.test:8443/private-one?key=query-secret#fragment-secret";
+    const FIRST: &str = "https://url-user:url-password@api.example.test:8443/private-one?key=query-secret#fragment-secret";
+    const SECOND: &str = "https://url-user:url-password@api.example.test:8443/private-two?key=query-secret#fragment-secret";
+    const OTHER_ORIGIN: &str = "https://url-user:url-password@other.example.test:8443/private-one?key=query-secret#fragment-secret";
     const SECRET_MODEL: &str = "https://model-user:model-password@model.example.test/private-model?key=model-query#model-fragment";
     let mut questions = Vec::new();
     for (base, model, target, safe_model) in [
@@ -853,9 +883,11 @@ async fn questions_distinguish_private_targets_without_disclosing_secrets() {
                 assert_eq!(question.options[0].label, DENY);
                 assert_eq!(question.options[1].label, ALLOW);
                 assert!(question.question.contains("credential #1"));
-                assert!(question.question.contains(&format!(
-                    "Model: {safe_model}. Opaque target #{target} "
-                )));
+                assert!(
+                    question
+                        .question
+                        .contains(&format!("Model: {safe_model}. Opaque target #{target} "))
+                );
                 let host = if base == OTHER_ORIGIN { "other" } else { "api" };
                 assert!(question.question.contains(&format!(
                     "Endpoint origin: https://{host}.example.test:8443."
@@ -890,11 +922,23 @@ async fn questions_distinguish_private_targets_without_disclosing_secrets() {
         );
         assert!(result.is_err());
     }
-    assert_ne!(questions[0], questions[1], "path-only changes must be visible");
+    assert_ne!(
+        questions[0], questions[1],
+        "path-only changes must be visible"
+    );
     assert_ne!(questions[1], questions[2], "model changes must be visible");
-    assert_eq!(questions[0], questions[3], "opaque target IDs must be stable");
-    assert_ne!(questions[0], questions[4], "origins must be distinguishable");
-    assert_ne!(questions[5], questions[6], "redacted models need distinct IDs");
+    assert_eq!(
+        questions[0], questions[3],
+        "opaque target IDs must be stable"
+    );
+    assert_ne!(
+        questions[0], questions[4],
+        "origins must be distinguishable"
+    );
+    assert_ne!(
+        questions[5], questions[6],
+        "redacted models need distinct IDs"
+    );
     assert_eq!(questions[5], questions[11]);
     assert_eq!(policy.0.lock().targets.len(), 10);
     assert!(policy.0.lock().approvals.is_empty());
@@ -916,7 +960,11 @@ fn target_labels_redact_invalid_origins_and_overridden_header_credentials() {
         key.safe_labels(&configured),
         ("[redacted]".to_owned(), "[redacted]")
     );
-    for base in ["not a URL", "file:///private", "mailto:private@example.test"] {
+    for base in [
+        "not a URL",
+        "file:///private",
+        "mailto:private@example.test",
+    ] {
         key.base = base.into();
         assert_eq!(key.safe_labels(&configured).0, "[redacted]");
     }

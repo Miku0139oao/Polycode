@@ -369,6 +369,9 @@ async fn provider_concurrent_mints_single_flight() {
 /// The winning expiry source is proven by staleness: an expiry inside the 60s skew re-mints, a distant one serves from cache.
 #[tokio::test]
 async fn provider_expiry_source_precedence() {
+    // Do not depend on another test installing crypto first: jsonwebtoken can
+    // otherwise cache its panic-producing fallback for the entire test process.
+    let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
     fn short_jwt() -> String {
         // The exp lands inside the skew window, so the token is immediately stale if the claim is consumed
         jwt_with_exp(chrono::Utc::now().timestamp() + 30)

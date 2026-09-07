@@ -114,6 +114,9 @@ pub(crate) struct AgentRebuildSpec {
     >,
     pub monitor_event_buffer: Option<MonitorEventBuffer>,
     pub user_question_tx: UnboundedSender<UserQuestionRequest>,
+    /// Session-local native-service billing decisions survive agent rebuilds,
+    /// but are invalidated when the effective selected model changes.
+    pub native_service_consent: xai_grok_tools::types::native_service_consent::NativeServiceConsent,
     pub subagent_depth: u32,
     pub subagents_max_depth: u32,
     pub session_id_str: String,
@@ -210,6 +213,7 @@ impl AgentRebuildSpec {
             subagent_coordinator_sender,
             monitor_event_buffer,
             user_question_tx,
+            native_service_consent,
             subagent_depth,
             subagents_max_depth,
             session_id_str,
@@ -398,6 +402,7 @@ impl AgentRebuildSpec {
                 {
                     use xai_grok_tools::implementations::grok_build::ask_user_question::UserQuestionSender;
                     resources.insert(UserQuestionSender(user_question_tx.clone()));
+                    resources.insert(native_service_consent.clone());
                 }
             })
             .await;
@@ -457,6 +462,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         subagent_coordinator_sender: None,
         monitor_event_buffer: None,
         user_question_tx: uq_tx,
+        native_service_consent: Default::default(),
         subagent_depth: 0,
         subagents_max_depth: xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH,
         session_id_str: "test-session".to_string(),
@@ -478,6 +484,40 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
 mod tests {
     use super::*;
     use crate::agent::config::{EndpointsConfig, ModelEntry};
+    #[tokio::test(flavor = "current_thread")]
+    async fn billing_policy_is_shared_across_rebuilds_and_live_selection_changes() {
+        use xai_grok_tools::types::native_service_consent::NativeServiceConsent;
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let spec = test_rebuild_spec_default();
+                let policy = spec.native_service_consent.clone();
+                policy.set_provider(Some("codex"));
+                let first = spec
+                    .build_agent(AgentDefinition::default_grok_build())
+                    .await
+                    .expect("first agent");
+                let rebuilt = spec
+                    .build_agent(AgentDefinition::default_grok_build())
+                    .await
+                    .expect("rebuilt agent");
+                for selected in [Some("codex"), Some("cursor"), None] {
+                    policy.set_provider(selected);
+                    for agent in [&first, &rebuilt] {
+                        agent
+                            .tool_bridge()
+                            .update_resources_with(|resources| {
+                                let installed = resources
+                                    .require::<NativeServiceConsent>()
+                                    .expect("every rebuilt bridge has its session billing policy");
+                                assert_eq!(installed.selected_provider(), selected);
+                            })
+                            .await;
+                    }
+                }
+            })
+            .await;
+    }
+
     fn model_entry(internal_id: &str) -> ModelEntry {
         ModelEntry::fallback(internal_id, &EndpointsConfig::default())
     }

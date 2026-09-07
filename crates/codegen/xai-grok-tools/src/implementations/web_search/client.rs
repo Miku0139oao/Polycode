@@ -313,7 +313,7 @@ impl WebSearchClient {
                 format!("Responses API returned {status}"),
             ));
         }
-        let bytes = response.bytes().await.map_err(|e| {
+        let bytes = call.wait(response.bytes()).await?.map_err(|e| {
             xai_tool_runtime::ToolError::execution(
                 xai_tool_protocol::ToolId::new("web_search").expect("valid"),
                 format!("Failed to read response body: {}", e.without_url()),
@@ -325,6 +325,7 @@ impl WebSearchClient {
                 "Failed to parse Responses API response",
             )
         })?;
+        call.check_current()?;
         Ok(response_obj)
     }
 }
