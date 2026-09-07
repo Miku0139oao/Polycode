@@ -64,16 +64,19 @@ build and attach candidate assets; that is not live acceptance. See the
 
 ### One-command from GitHub (candidate)
 
-Windows PowerShell 5.1 or 7, with an existing WSL Arch distro. This downloads
-the versioned `install.ps1` and the six hash-checked assets. It does **not**
-require authorization sidecars and does **not** claim a finished release:
+Windows PowerShell 5.1 or 7, with an existing WSL Arch distro:
 
 ```powershell
-& { $ErrorActionPreference='Stop'; $p=Join-Path $env:TEMP ('polycode-install-'+[guid]::NewGuid().ToString('N')+'.ps1'); iwr -UseBasicParsing https://github.com/Miku0139oao/Polycode/releases/download/v0.2.0/install.ps1 -OutFile $p; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $p -Version v0.2.0 -GitHubCandidate }
+irm https://raw.githubusercontent.com/Miku0139oao/Polycode/main/install.ps1 | iex
 ```
 
-Add `-NoPath` to leave user PATH unchanged, or `-InstallRoot`/`-LinuxRoot` for
-an isolated copy. Review the downloaded `install.ps1` before executing it.
+That downloads hash-checked release assets. It does **not** require authorization
+sidecars and does **not** claim a finished release. Isolated install:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/main/install.ps1))) -NoPath
+```
+
 Rebuilds are published by [the candidate-release workflow](.github/workflows/candidate-release.yml)
 (`workflow_dispatch` or a `vX.Y.Z` tag).
 

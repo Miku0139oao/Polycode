@@ -1,5 +1,8 @@
 <# Per-user native Polycode installer: Windows PowerShell 5.1+ and existing WSL
 x86_64 with glibc >= 2.43 (Arch Linux), zlib, libgcc, libstdc++, ICU78 and Windows interop.
+
+    irm https://raw.githubusercontent.com/Miku0139oao/Polycode/main/install.ps1 | iex
+
 No provider login, browser, external agent CLI, Rust compiler or administrator needed.
 -ArtifactDirectory installs local UNPUBLISHED CANDIDATE assets (still hash checked).
 If this script sits next to the six candidate files, the same directory is used
@@ -39,6 +42,8 @@ if (-not $ArtifactDirectory -and $PSCommandPath) {
     }
     if ($complete) { $ArtifactDirectory = $here }
 }
+# irm ... | iex has no script path; treat that hosted one-liner as GitHub candidate install.
+if (-not $PSCommandPath -and -not $ArtifactDirectory) { $GitHubCandidate = $true }
 if ($GitHubCandidate -and $ArtifactDirectory) {
     throw 'This installer is already next to local candidate files. Omit -GitHubCandidate and pass -AllowCandidate.'
 }

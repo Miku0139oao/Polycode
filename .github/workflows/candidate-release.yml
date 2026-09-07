@@ -129,7 +129,7 @@ jobs:
           One-command install (hash-checked, **not** live OAuth/billing acceptance):
 
           \`\`\`powershell
-          & { \$ErrorActionPreference='Stop'; \$p=Join-Path \$env:TEMP ('polycode-install-'+[guid]::NewGuid().ToString('N')+'.ps1'); iwr -UseBasicParsing https://github.com/Miku0139oao/Polycode/releases/download/${TAG}/install.ps1 -OutFile \$p; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \$p -Version ${TAG} -GitHubCandidate }
+          irm https://raw.githubusercontent.com/Miku0139oao/Polycode/main/install.ps1 | iex
           \`\`\`
 
           This prerelease does not include parent authorization sidecars and is not an official public release.
