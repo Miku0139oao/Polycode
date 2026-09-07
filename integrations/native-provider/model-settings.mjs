@@ -6,7 +6,12 @@ export function codexReasoningMetadata(model) {
   const levels = model.supported_reasoning_levels;
   if (levels == null || (Array.isArray(levels) && !levels.length)) return {};
   if (!Array.isArray(levels)) throw new Error('Invalid ChatGPT reasoning capabilities');
-  const reasoningEfforts = levels.map(level => {
+  // The native sampler cannot encode Codex's ultra mode yet. Intersect the
+  // advertised modes with native capabilities instead of dropping every model
+  // when a catalog adds this optional mode. Never map ultra to a lower effort.
+  const nativeLevels = levels.filter(level => (typeof level === 'string' ? level : level?.effort) !== 'ultra');
+  if (!nativeLevels.length) throw new Error('Unsupported ChatGPT reasoning capability');
+  const reasoningEfforts = nativeLevels.map(level => {
     const value = typeof level === 'string' ? level : level?.effort;
     if (!efforts.has(value)) throw new Error('Unsupported ChatGPT reasoning capability');
     return { id: value, value, label: value, ...(typeof level?.description === 'string' ? { description: level.description } : {}), default: value === model.default_reasoning_level };

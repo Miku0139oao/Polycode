@@ -34,11 +34,15 @@ polycode -Backend native -Project D:\my-project
 
 ## 原生架構與功能邊界
 
-`PowerShell → WSL native launcher + 本地 provider service → Grok TUI / 原生 engine → 所選模型 transport`
+`PowerShell → Windows Bun + 本地 provider service → Windows 原生 Grok TUI / engine → 所選模型 transport`
 
 本地 service 負責 OAuth、credential refresh、模型目錄及串流協定轉換，不執行 Codex／Cursor CLI，不掌管專案工具、MCP、權限或 session。模型回傳工具意圖，**由 Grok 原生權限流程決定執行或拒絕，並送回真實結果**。Cursor 的遠端工具橋接不得執行或猜測替代工具；未知內建工具須明確拒絕。
 
 保留上游功能是驗收要求，包含 hooks、skills／plugins、worktree、rewind、原生歷史、附件、headless、cloud／分享／voice 等；各功能原有的帳戶、平台或服務條件仍適用。**不得沿用外部 ACP 模式的停用清單作為已完成原生整合。** Provider 能力差異必須明示及處理，不能靜默丟棄參數、附件、角色或假造 usage，也不能因此悄悄縮減最終需求。
+
+### ChatGPT：推理等級相容性
+
+真實模型目錄已出現 `ultra`，目前原生 sampler 尚無此等級。Bridge 會保留模型其餘可表示的等級，不會因這個新增選項拒絕整份目錄，也不會把 `ultra` 映射成較低等級。若模型只提供 `ultra`，或以它為預設，仍明確拒絕不相容的能力資料。這是尚待補齊的原生能力，不代表完整支援 `ultra`。
 
 ### Cursor：實驗性且有未解相容性
 

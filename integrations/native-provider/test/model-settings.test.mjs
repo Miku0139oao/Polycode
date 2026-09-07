@@ -2,9 +2,19 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCodexProvider, toResponses } from '../codex.mjs';
 import { NativeProviderService } from '../service.mjs';
-import { codexReasoningMetadata, validateReasoningMetadata } from '../model-settings.mjs';
+import { codexReasoningMetadata, validateReasoningMetadata, validateSelectedEffort } from '../model-settings.mjs';
 
 const metadata = () => codexReasoningMetadata({ supported_reasoning_levels: [{ effort: 'low', description: 'Faster' }, { effort: 'high', description: 'More reasoning' }], default_reasoning_level: 'high' });
+test('optional ultra capability does not discard usable native models or downgrade requests', async () => {
+  const provider = createCodexProvider({ fetchImpl: async () => Response.json({ models: [{ slug: 'live-catalog-shape', display_name: 'Live catalog shape', context_window: 272000, supported_reasoning_levels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], default_reasoning_level: 'medium' }] }) });
+  const [model] = await provider.models({ accessToken: 'fixture', accountId: 'fixture' });
+  assert.deepEqual(model.reasoningEfforts.map(o => o.value), ['low', 'medium', 'high', 'xhigh', 'max']);
+  assert.equal(model.defaultReasoningEffort, 'medium');
+  validateReasoningMetadata(model);
+  assert.throws(() => validateSelectedEffort(model, { reasoning_effort: 'ultra' }), /not advertised/);
+  assert.throws(() => codexReasoningMetadata({ supported_reasoning_levels: ['high', 'ultra'], default_reasoning_level: 'ultra' }), /default/);
+  assert.throws(() => codexReasoningMetadata({ supported_reasoning_levels: ['high', 'unknown-future-mode'] }), /capability/);
+});
 test('actual Codex catalog capabilities reach native metadata and selected wire effort', async () => {
   const provider = createCodexProvider({ fetchImpl: async () => Response.json({ models: [{ slug: 'actual-model', display_name: 'Actual', context_window: 200000, supported_reasoning_levels: [{ effort: 'minimal', description: 'Fast' }, { effort: 'high', description: 'Deep' }], default_reasoning_level: 'minimal' }] }) });
   const [model] = await provider.models({ accessToken: 'fixture', accountId: 'fixture' });
