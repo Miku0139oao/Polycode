@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { CredentialStore, NativeProviderService } from '../native-provider/service.mjs';
 import { WindowsTerminal, plain } from './windows-terminal.mjs';
 import { startBunFixtureBridge } from './windows-bun-bridge.mjs';
+import { fixtureUserPrompt } from './windows-native-prompts.mjs';
 assert.equal(plain('\x1b]8;;file:///fixture\x1b\\link\x1b]8;;\x1b\\ Yes \x1b]0;title\x07 visible'),'link Yes  visible');
 const binary = resolve(process.argv[2]);
 const root = mkdtempSync(join(tmpdir(),'polycode-native-tools-'));
@@ -49,7 +50,7 @@ for(const provider of ['codex','cursor']) {
     models:async()=>[{id:'mock-'+provider,name:'Mock '+provider,contextWindow:provider==='cursor'?null:131072}],
     async complete(body, _credential, {signal}) {
       try {
-        const last=[...(body.messages||[])].reverse().find(m=>m.role==='user'), prompt=content(last?.content);
+        const prompt=fixtureUserPrompt(body.messages);
         const tools=(body.tools||[]).map(t=>t.function);
         if(tools.length===1 && tools[0].name==='session_title') return call(body,tools[0],{session_title:'Windows fixture session'},'fixture-title');
         const auxiliary=prompt.startsWith('<system-reminder>') || prompt.startsWith('CWD:') || !(body.tools||[]).length;
