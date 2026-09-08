@@ -54,9 +54,15 @@ async fn computer_use_permission_card_pty() {
         "computer card must offer reject; screen:\n{}",
         harness.screen_contents()
     );
+    assert!(
+        harness.contains_text("Computer: screenshot"),
+        "tool row must name the desktop action; screen:\n{}",
+        harness.screen_contents()
+    );
     write_screen_dump_if_requested(&harness, "computer_use_permission_card");
 
-    harness.inject_keys(b"1").expect("allow once");
+    // Option 1 is the pager-wide "always-approve mode" toggle; 2 is "Yes, allow once".
+    harness.inject_keys(b"2").expect("allow once");
     harness
         .wait_for_text(DONE, Duration::from_secs(90))
         .unwrap_or_else(|_| {
