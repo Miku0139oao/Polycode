@@ -26,7 +26,10 @@ The Preview workflow run
 [34240210179](https://github.com/Miku0139oao/Polycode/actions/runs/34240210179)
 passed policy/publisher tests but failed when its Actions integration received
 HTTP 403 creating the release. It created neither a draft nor a tag. That run
-remains failed; it is not represented as successful publishing CI.
+was a failure, not successful publishing CI. The owner subsequently requested
+removal of failed Actions runs for dashboard cleanup. Historical run links may
+therefore no longer resolve; the diagnostic records are retained privately and
+their outcomes are not relabeled as PASS.
 
 The owner-authorized local GitHub identity had repository administration access.
 Running the same guarded publisher locally created the draft and uploaded the

@@ -64,6 +64,16 @@ before installing. The generic stable one-command installer remains disabled.
 Do not use the withdrawn v0.2.0 WSL candidate as the Windows installation target.
 See the [publication and public-download verification record](integrations/PREVIEW_PUBLICATION.md).
 
+One-line **Preview** installation (separate directory, PATH unchanged):
+
+```powershell
+irm https://raw.githubusercontent.com/Miku0139oao/Polycode/fix/windows-terminal-ci/install-preview.ps1 | iex
+```
+
+The bootstrap verifies all six pinned asset hashes before executing the original
+installer and prints the launch command. See [Preview installation](integrations/PREVIEW_INSTALL.md)
+for explicit `-AddToPath`, custom directories and trust/verification details.
+
 The Windows candidate targets Windows 10 22H2 / Windows 11 x64 and PowerShell
 5.1 / 7. It bundles the MSVC native TUI and Windows Bun and directly starts Windows
 processes. WSL, Rust, Node, a separate Bun installation and external provider CLIs

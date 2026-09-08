@@ -87,3 +87,8 @@ Use the version-specific release instructions and explicit `-AllowCandidate` or
 Do not import credentials or replace an existing production installation as part
 of Preview verification. Stable/latest promotion needs separate full acceptance
 and authorization.
+
+A separate [Preview bootstrap](PREVIEW_INSTALL.md) provides explicit
+`irm .../install-preview.ps1 | iex` installation of the pinned v0.2.1 assets.
+It does not enable the generic stable one-command installer or alter release
+assets. The default remains a separate Preview directory with no PATH changes.
