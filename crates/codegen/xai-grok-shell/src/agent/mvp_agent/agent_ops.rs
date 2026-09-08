@@ -4400,6 +4400,10 @@ impl MvpAgent {
         );
         let compaction_mode = pins.mode;
         let two_pass_enabled = pins.two_pass;
+        let context_budget_enabled = self
+            .cfg
+            .borrow()
+            .is_feature_enabled(crate::agent::config::Feature::ContextBudget);
         let subscription_choice = crate::polycode::is_bridge_endpoint(&sampling_config.base_url)
             .then(|| session_model_id.clone());
         let (session_model_id, mut sampling_config) = self
@@ -4781,6 +4785,7 @@ impl MvpAgent {
                     compaction_verbatim_input,
                     compaction_tool_choice,
                     two_pass_enabled,
+                    context_budget_enabled,
                     buffering_settings,
                     origin_client.clone(),
                     self.codebase_indexes.clone(),

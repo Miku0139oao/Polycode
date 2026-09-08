@@ -48,6 +48,10 @@ pub enum Feature {
     RepoStatusInSystemPrompt,
     /// Consolidated panel dock above the prompt (Subagents / Tasks / Watchers / Queued).
     Dock,
+    /// Inject a per-turn context-budget system reminder so the model can pace a
+    /// long task before compaction. Model-agnostic port of Codex's experimental
+    /// context management (token-budget tier). Off by default.
+    ContextBudget,
 }
 
 /// How one feature is written on each surface it can be set from.
@@ -236,6 +240,14 @@ pub const FEATURES: &[FeatureSpec] = &[
         env: "GROK_DOCK",
         default_enabled: false,
         remote: Some(|settings| settings.dock_enabled),
+    },
+    FeatureSpec {
+        id: Feature::ContextBudget,
+        key: "context_budget",
+        path: "features.context_budget",
+        env: "GROK_CONTEXT_BUDGET",
+        default_enabled: false,
+        remote: Some(|settings| settings.context_budget_enabled),
     },
 ];
 
