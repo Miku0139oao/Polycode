@@ -179,7 +179,8 @@ export class NativeProviderService {
       const response = await this.dispatch({ method: request.method, url: url.pathname + url.search, headers: Object.fromEntries(request.headers) }, () => this.body(request.body ?? []), controller.signal);
       reader = response.body?.getReader();
       if (controller.signal.aborted) { await reader?.cancel(); finish(); return new Response(null, { status: 499 }); }
-      if (!reader) { finish(); return response; }
+      const headers = { 'Content-Type': response.headers.get('Content-Type') ?? 'application/json', 'Cache-Control': 'no-store' };
+      if (!reader) { finish(); return new Response(null, { status: response.status, headers }); }
       const body = new ReadableStream({
         async pull(output) {
           try {
@@ -190,7 +191,7 @@ export class NativeProviderService {
         },
         cancel() { controller.abort(); finish(); },
       });
-      return new Response(body, { status: response.status, headers: { 'Content-Type': response.headers.get('Content-Type') ?? 'application/json', 'Cache-Control': 'no-store' } });
+      return new Response(body, { status: response.status, headers });
     } catch (cause) {
       finish();
       return Response.json(failure(cause), { status: cause.status ?? 500, headers: { 'Cache-Control': 'no-store' } });

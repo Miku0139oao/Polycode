@@ -159,3 +159,31 @@ test('closing the service cancels an attached stream on the shipped runtime', { 
   assert.equal(cancelled, true);
   assert.equal(service.active.size, 0);
 });
+
+test('bodyless provider responses preserve the bridge header isolation boundary', async context => {
+  const credential = { accessToken: 'offline-header-fixture' };
+  const store = {
+    get: async () => credential,
+    snapshot: async () => ({ revision: 'fixture', credential }),
+    update: async (_provider, updater) => ({ revision: 'fixture', credential: await updater(credential) }),
+  };
+  const provider = {
+    refresh: async value => value,
+    models: async () => [{ id: 'header-fixture', name: 'Header fixture', contextWindow: null }],
+    complete: async () => new Response(null, { status: 204, headers: { 'Set-Cookie': 'private-fixture=value', 'X-Provider-Private': 'private-value' } }),
+    close() {},
+  };
+  const service = new NativeProviderService({ cursor: provider }, store);
+  await service.start();
+  context.after(() => service.close());
+  const response = await fetch(service.url + '/cursor/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + service.token },
+    body: JSON.stringify({ model: 'cursor/header-fixture', messages: [{ role: 'user', content: 'Header fixture' }] }),
+  });
+  assert.equal(response.status, 204);
+  assert.equal(response.headers.get('Set-Cookie'), null);
+  assert.equal(response.headers.get('X-Provider-Private'), null);
+  assert.equal(response.headers.get('Cache-Control'), 'no-store');
+  assert.equal(service.active.size, 0);
+});
