@@ -8,6 +8,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { CredentialStore, NativeProviderService } from '../native-provider/service.mjs';
 import { WindowsTerminal, plain } from './windows-terminal.mjs';
+import { startBunFixtureBridge } from './windows-bun-bridge.mjs';
 assert.equal(plain('\x1b]8;;file:///fixture\x1b\\link\x1b]8;;\x1b\\ Yes \x1b]0;title\x07 visible'),'link Yes  visible');
 const binary = resolve(process.argv[2]);
 const root = mkdtempSync(join(tmpdir(),'polycode-native-tools-'));
@@ -189,12 +190,14 @@ const service=new NativeProviderService(providers,store);
 const catalogs=[];
 const originalCatalog=service.catalog.bind(service);
 service.catalog=async (...args)=>{const result=await originalCatalog(...args);catalogs.push(result);return result;};
-const bridge=await service.start();
+const fixtureBridge=await service.start();
+const bunBridge=process.argv.includes('--bun-bridge')?await startBunFixtureBridge(fixtureBridge):null;
+const bridge=bunBridge??fixtureBridge;
 const controlRequests=[];
 service.server.on('request',(req,res)=>{
-  const request={method:req.method,path:new URL(req.url,bridge.url).pathname,
-    authenticated:req.headers.authorization==='Bearer '+bridge.token,
-    expectedHost:req.headers.host===new URL(bridge.url).host,hasOrigin:!!req.headers.origin};
+  const request={method:req.method,path:new URL(req.url,fixtureBridge.url).pathname,
+    authenticated:req.headers.authorization==='Bearer '+fixtureBridge.token,
+    expectedHost:req.headers.host===new URL(fixtureBridge.url).host,hasOrigin:!!req.headers.origin};
   controlRequests.push(request);res.on('finish',()=>{request.status=res.statusCode;});
 });
 const env={};
@@ -234,6 +237,7 @@ async function toolTurn(prompt,marker) {
   if(beforeMcp!==null){assert.ok(approved,'Native MCP execution did not request approval');assert.equal(mcpCalls(),beforeMcp+1,'MCP invocation missing or replayed');}
 }
 const report={passed:false,binarySha256:createHash('sha256').update(readFileSync(binary)).digest('hex'),scope:'Mock transport, actual Windows native TUI/tools, default leader and permissions',root};
+if(bunBridge)report.bridgeRuntime={runtime:bunBridge.runtime,version:bunBridge.version,nativeServer:bunBridge.nativeServer};
 try {
   await text('Choose a provider');
   // The first menu renders before its asynchronous catalog arrives. Dismissing
@@ -304,7 +308,7 @@ try {
   report.passed=true;
 } catch(error){report.failure=error.message;process.exitCode=1;}
 finally {
-  await t.close();await service.close();
+  await t.close();if(bunBridge)await bunBridge.close();await service.close();
   report.forcedExit=!!t.forcedExit;
   if(t.forcedExit){report.passed=false;process.exitCode=1;}
   report.requests=requests;report.permissions=permissions;report.controlRequests=controlRequests;report.catalogs=catalogs;report.fixtureErrors=failures;

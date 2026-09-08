@@ -120,6 +120,9 @@ jobs:
           if (-not $smoke.passed -or -not $smoke.searchExecutable) { throw 'Installed search dependency was not verified.' }
           node integrations/tests/windows-native-tools.mjs target/x86_64-pc-windows-msvc/release/xai-grok-pager.exe --mcp --task --grep --clean-path --ripgrep $smoke.searchExecutable
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Move-Item windows-tools-report.json windows-tools-node-report.json
+          node integrations/tests/windows-native-tools.mjs target/x86_64-pc-windows-msvc/release/xai-grok-pager.exe --bun-bridge --mcp --task --grep --clean-path --ripgrep $smoke.searchExecutable
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
           name: polycode-windows-candidate
@@ -134,6 +137,7 @@ jobs:
             native-build.json
             windows-smoke-report.json
             windows-tools-report.json
+            windows-tools-node-report.json
             windows-terminal-probe.json
             windows-smoke-terminal-*.json
   publish:
