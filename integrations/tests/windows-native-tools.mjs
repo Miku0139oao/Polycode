@@ -21,8 +21,10 @@ const testMcp=process.argv.includes('--mcp');
 const testTask=process.argv.includes('--task');
 const testGrep=process.argv.includes('--grep');
 const cleanPath=process.argv.includes('--clean-path');
+const slowShell=process.argv.includes('--slow-shell');
 const ripgrepIndex=process.argv.indexOf('--ripgrep');
 const ripgrep=ripgrepIndex<0?null:resolve(process.argv[ripgrepIndex+1]);
+const ripgrepSha256=ripgrep?createHash('sha256').update(readFileSync(ripgrep)).digest('hex'):null;
 const taskState=Object.fromEntries(['codex','cursor'].map(p=>[p,{nonce:randomBytes(24).toString('hex'),childCalls:0,verified:false}]));
 const mcpLog=join(root,'mcp-events.jsonl'),mcpFile=join(workspace,'mcp-fixture.txt');
 const mcpNonces=Object.fromEntries(['codex','cursor'].map(p=>[p,randomBytes(24).toString('hex')]));
@@ -32,6 +34,8 @@ if(testMcp) {
 }
 const store=new CredentialStore(join(home,'auth'));
 const requests=[], failures=[], permissions=[];
+const shellResults=[];
+const shellCalls={codex:0,cursor:0};
 let cancelledStreams=0;
 function content(value) { return typeof value==='string'?value:Array.isArray(value)?value.map(v=>v.text||'').join('\n'):''; }
 function completion(body,delta,finish='stop') {
@@ -168,12 +172,27 @@ for(const provider of ['codex','cursor']) {
           const id='shell-'+provider;
           const result=body.messages.find(m=>m.role==='tool' && m.tool_call_id===id);
           if(result) {
-            assert.ok(JSON.stringify(result).includes(nonce),'Native shell did not return fixture bytes');
+            const outputId='shell-output-'+provider;
+            const output=body.messages.find(message=>message.role==='tool' && message.tool_call_id===outputId);
+            const observed=output??result;
+            shellResults.push({provider,result:observed});
+            if(!output && !content(result.content).includes(nonce)) {
+              const taskId=content(result.content).match(/<task-id>([^<]+)<\/task-id>/)?.[1];
+              assert.equal(taskId,id,'Native shell returned neither fixture bytes nor its background task');
+              assert.ok(content(result.content).includes('<status>running</status>'),'Native shell background task is not running');
+              const definition=tools.find(tool=>tool.name==='get_command_or_subagent_output');
+              assert.ok(definition,'Native background output tool is not advertised');
+              return call(body,definition,{task_ids:[taskId],timeout_ms:30000},outputId);
+            }
+            assert.ok(content(observed.content).includes(nonce),'Native shell did not return fixture bytes');
+            if(slowShell)assert.ok(output,'Slow shell did not exercise native background output retrieval');
             return completion(body,{content:'WINDOWS_SHELL_'+provider.toUpperCase()+'_PASS'});
           }
           const definition=tools.find(t=>['bash','shell','run_shell_command','run_terminal_command'].includes(t.name.toLowerCase()));
           assert.ok(definition,'No advertised native shell tool');
           const args={command:"Get-Content -LiteralPath '"+file.replaceAll("'","''")+"'"};
+          if(slowShell)args.command='Start-Sleep -Seconds 20; '+args.command;
+          assert.equal(++shellCalls[provider],1,'Native shell command was issued more than once');
           for(const required of definition.parameters.required||[]) {
             if(required==='command') continue;
             if(required==='description') args[required]='Read isolated fixture using Windows PowerShell';
@@ -278,7 +297,7 @@ try {
     report.mcp={calls:2,bridgeTokenLeaked:false};
   }
   if(testTask)report.nativeTasks=Object.fromEntries(Object.entries(taskState).map(([provider,state])=>[provider,{childCalls:state.childCalls,verified:state.verified,model:state.model,subagentId:state.subagentId}]));
-  if(testGrep)report.grep={providers:['codex','cursor'],cleanPath,ripgrepSha256:ripgrep?createHash('sha256').update(readFileSync(ripgrep)).digest('hex'):null};
+  if(testGrep)report.grep={providers:['codex','cursor'],cleanPath,ripgrepSha256};
   await pause(1000);
   await command('Wait until cancelled.');
   await text('WINDOWS_CANCEL_READY');
@@ -313,6 +332,8 @@ finally {
   report.forcedExit=!!t.forcedExit;
   if(t.forcedExit){report.passed=false;process.exitCode=1;}
   report.requests=requests;report.permissions=permissions;report.controlRequests=controlRequests;report.catalogs=catalogs;report.fixtureErrors=failures;
+  report.shellResults=JSON.parse(JSON.stringify(shellResults).replaceAll(bridge.token,'[REDACTED]'));
+  report.shellCalls=shellCalls;report.slowShell=slowShell;
   writeFileSync(join(root,'terminal.txt'),plain(t.output).replaceAll(bridge.token,'[REDACTED]'));
   writeFileSync('windows-tools-report.json',JSON.stringify(report,null,2)+'\n');
   writeFileSync(join(root,'report.json'),JSON.stringify(report,null,2)+'\n');
