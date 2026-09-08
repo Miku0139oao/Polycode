@@ -8,7 +8,10 @@ authorized on Windows 11 Pro build 26200; it is not clean-OS acceptance.
 The owner has now authorized an opt-in v0.2.1 Preview under the separate
 [Preview policy](PREVIEW_POLICY.md). Its exact candidate and sanitized observations
 pass `PREVIEW_READY`; this does not close the original full-acceptance gates.
-Publication is tracked separately from this historical goal checklist.
+The Preview is now publicly released; its
+[publication record](PREVIEW_PUBLICATION.md) preserves the failed CI 403 attempt,
+guarded local publication and successful anonymous-download/install verification.
+Publication is separate from this historical full-acceptance goal checklist.
 
 ## Owner-authorized continuation
 

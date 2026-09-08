@@ -5,6 +5,8 @@ The owner subsequently authorized a separately scoped Windows v0.2.1 Preview;
 see [Preview policy](PREVIEW_POLICY.md) and the
 [version-specific notes](acceptance/preview-v0.2.1/release-notes.md). The original
 full-acceptance goal remains incomplete; Preview approval does not waive it.
+The Preview is now published; see the [publication record](PREVIEW_PUBLICATION.md)
+for the retained CI failure and successful guarded local/public-download checks.
 Snapshot: 2026-09-08, Polycode `b0adcea8b182a623f1b85ad880e72119a5fe177f`.
 Historical verification documents remain evidence for their recorded bytes only.
 

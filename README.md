@@ -58,10 +58,11 @@ integration or release status.
 ## Install Polycode (Windows native)
 
 Use the [v0.2.1 Preview release](https://github.com/Miku0139oao/Polycode/releases/tag/v0.2.1)
-and its version-specific asset instructions once published. Read the
+and its version-specific asset instructions. Read the
 [Preview scope and limitations](integrations/acceptance/preview-v0.2.1/release-notes.md)
 before installing. The generic stable one-command installer remains disabled.
 Do not use the withdrawn v0.2.0 WSL candidate as the Windows installation target.
+See the [publication and public-download verification record](integrations/PREVIEW_PUBLICATION.md).
 
 The Windows candidate targets Windows 10 22H2 / Windows 11 x64 and PowerShell
 5.1 / 7. It bundles the MSVC native TUI and Windows Bun and directly starts Windows
