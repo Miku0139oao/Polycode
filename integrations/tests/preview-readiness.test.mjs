@@ -117,7 +117,11 @@ function publicationFixture() {
   const sample = fixture(), calls = [];
   const options = { candidate: sample.candidate, evidence: sample.evidence, version: 'v0.2.1', runId: '123',
     repository: 'Miku0139oao/Polycode', policyRevision: 'e'.repeat(40), output: join(sample.directory, 'publication') };
-  let published = false;
+  let published = false, created = false, notes = '';
+  const metadata = () => ({ id: 456, draft: !published, prerelease: true, tag_name: options.version,
+    name: 'Polycode v0.2.1 Preview (Windows x64)', target_commitish: source, body: notes,
+    assets: PREVIEW_ASSETS.map(name => ({ name, state: 'uploaded' })),
+    html_url: 'https://github.com/test/preview', published_at: new Date().toISOString() });
   const invoke = args => {
     calls.push(args);
     if (args[0] === 'api') {
@@ -125,11 +129,13 @@ function publicationFixture() {
       if (endpoint.includes('/actions/runs/')) return JSON.stringify({ id: 123, status: 'completed', conclusion: 'success', head_sha: source,
         head_repository: { full_name: options.repository }, path: '.github/workflows/candidate-release.yml', event: 'workflow_dispatch' });
       if (endpoint.includes('matching-refs')) return '[]';
-      if (endpoint.includes('per_page')) return '[[]]';
+      if (endpoint.includes('per_page')) return JSON.stringify([created ? [metadata()] : []]);
       if (endpoint.includes('/git/ref/')) return JSON.stringify({ object: { type: 'commit', sha: source } });
-      return JSON.stringify({ draft: !published, prerelease: true, tag_name: options.version, target_commitish: source,
-        assets: PREVIEW_ASSETS.map(name => ({ name })), html_url: 'https://github.com/test/preview', published_at: new Date().toISOString() });
+      if (endpoint.includes('/releases/tags/')) throw new Error('Draft tag endpoint returns 404');
+      assert.ok(endpoint.endsWith('/releases/456'));
+      return JSON.stringify(metadata());
     }
+    if (args[1] === 'create') { created = true; notes = readFileSync(args.at(-1), 'utf8'); }
     if (args[1] === 'download') for (const asset of PREVIEW_ASSETS) copyFileSync(join(sample.candidate, asset), join(args.at(-1), asset));
     if (args[1] === 'edit') published = true;
     return '';
@@ -165,4 +171,36 @@ test('publisher leaves draft unpublished when downloaded assets differ', () => {
     return response;
   }), /draft bytes/);
   assert.ok(!state.calls.some(args => args[0] === 'release' && args[1] === 'edit'));
+});
+test('explicit continuation verifies exact existing draft without recreating or uploading assets', () => {
+  const state = publicationFixture();
+  assert.throws(() => publishPreview(state.options, args => {
+    if (args[0] === 'release' && args[1] === 'download') throw new Error('Interrupted download');
+    return state.invoke(args);
+  }), /Interrupted/);
+  state.calls.length = 0;
+  const result = publishPreview({ ...state.options, output: join(state.sample.directory, 'continued'), resumeDraftId: '456' }, state.invoke);
+  assert.equal(result.status, 'PREVIEW_READY');
+  assert.ok(!state.calls.some(args => args[0] === 'release' && ['create', 'upload'].includes(args[1])));
+});
+test('explicit draft continuation rejects wrong ID, notes, or target before downloading/promoting', () => {
+  for (const failure of ['id', 'notes', 'target']) {
+    const state = publicationFixture();
+    assert.throws(() => publishPreview(state.options, args => {
+      if (args[0] === 'release' && args[1] === 'download') throw new Error('Interrupted download');
+      return state.invoke(args);
+    }));
+    state.calls.length = 0;
+    assert.throws(() => publishPreview({ ...state.options, output: join(state.sample.directory, 'continued'), resumeDraftId: failure === 'id' ? '999' : '456' }, args => {
+      const response = state.invoke(args);
+      if (args.at(-1).endsWith('/releases/456')) {
+        const draft = JSON.parse(response);
+        if (failure === 'notes') draft.body = 'Different disclosure';
+        if (failure === 'target') draft.target_commitish = 'f'.repeat(40);
+        return JSON.stringify(draft);
+      }
+      return response;
+    }));
+    assert.ok(!state.calls.some(args => args[0] === 'release'));
+  }
 });

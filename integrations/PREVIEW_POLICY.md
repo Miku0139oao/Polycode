@@ -63,6 +63,19 @@ API errors fail closed. Publication first creates a draft prerelease, downloads
 and compares all six uploaded files, and only then promotes it to a public
 prerelease with `--latest=false`. Failed draft verification does not publish.
 
+Draft releases are resolved through the authenticated release inventory and exact
+numeric release ID, not the public tag endpoint (which can return 404 for drafts).
+After an interrupted authorized attempt, `publish-preview.mjs` accepts an explicit
+`--finish-draft ID` only when the existing draft ID, tag, source, notes, title and
+complete uploaded assets match. It rechecks all evidence and downloads/verifies
+the bytes again; it never recreates a release or uploads/replaces assets in this
+mode. A default invocation still rejects any existing release or tag.
+
+If the Actions integration receives HTTP 403 creating a release, stop and retain
+that failure. Do not weaken checks or export a personal credential into CI.
+An owner-authorized operator with existing local GitHub permission may run the
+same publisher locally; the CI failure must not be relabeled as success.
+
 The tag points to the tested product source; release notes separately identify
 the publication policy/evidence commit. Existing immutable files, manifests and
 checksums are never rebuilt, relabeled or replaced. This means embedded package
