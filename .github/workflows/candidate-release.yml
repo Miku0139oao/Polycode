@@ -86,6 +86,11 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           bun test integrations/native-provider/test integrations/native-provider/cursor/provider.test.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Verify Windows terminal transport before compiling
+        shell: pwsh
+        run: |
+          node integrations/tests/windows-terminal-probe.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Build actual release executable
         shell: pwsh
         run: |
@@ -129,6 +134,8 @@ jobs:
             native-build.json
             windows-smoke-report.json
             windows-tools-report.json
+            windows-terminal-probe.json
+            windows-smoke-terminal-*.json
   publish:
     if: inputs.action == 'publish'
     runs-on: windows-2022

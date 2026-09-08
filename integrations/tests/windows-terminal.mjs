@@ -6,7 +6,12 @@ export const plain = text => text.replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, '')
 export class WindowsTerminal {
   constructor(executable, args, cwd, env) {
     this.output = ''; this.exited = false; this.executable = executable;
-    this.terminal = pty.spawn(executable, args, { name: 'xterm-256color', cols: 140, rows: 45, cwd, env });
+    // Server 2022's inbox ConPTY renders alternate-screen switches as redraws,
+    // losing the mode transitions at this observation boundary. Use node-pty's
+    // pinned modern ConPTY for native VT assertions. Keep the historical WSL
+    // diagnostic on its original host/cleanup path.
+    this.terminal = pty.spawn(executable, args, { name: 'xterm-256color', cols: 140, rows: 45, cwd, env,
+      useConpty: true, useConptyDll: !/wsl\.exe$/i.test(executable) });
     this.terminal.onData(text => {
       this.output += text;
       if (text.includes('\x1b[6n')) this.write('\x1b[1;1R');

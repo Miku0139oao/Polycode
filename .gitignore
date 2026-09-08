@@ -8,3 +8,5 @@
 /protoc.zip
 /windows-smoke-report.json
 /windows-tools-report.json
+/windows-terminal-probe.json
+/windows-smoke-terminal-*.json

@@ -12,7 +12,7 @@ const install = join(root, 'install');
 const manifestBytes = readFileSync(join(candidate, 'manifest.json'));
 const manifest = JSON.parse(manifestBytes.toString().replace(/^\uFEFF/, ''));
 const result = { passed: false, candidateSha256: createHash('sha256').update(manifestBytes).digest('hex'),
-  nativeSha256: manifest.native.sha256, scope: 'Windows ConPTY signed-out installed startup; no OAuth, generation or clean-OS claim', observations: [], artifacts: root };
+  nativeSha256: manifest.native.sha256, scope: 'Windows ConPTY signed-out installed startup; no OAuth, generation or clean-OS claim', terminalTransport: 'node-pty 1.1.0 bundled ConPTY', observations: [], artifacts: root };
 try {
   const installed = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(candidate, 'install.ps1'),
     '-AllowCandidate', '-NoPath', '-InstallRoot', install, '-Version', manifest.version],
@@ -46,9 +46,14 @@ try {
     } finally {
       await terminal.close();
       writeFileSync(join(workspace,'terminal.txt'),plain(terminal.output));
+      // Signed-out startup never dispatches OAuth. Preserve raw VT evidence in
+      // the workflow workspace even when a screen assertion fails.
+      writeFileSync(`windows-smoke-terminal-${provider}.json`, JSON.stringify({ provider, output: terminal.output }));
       result.observations.push({provider,exitCode:terminal.exitCode,forcedExit:!!terminal.forcedExit});
     }
     assert.ok(!terminal.forcedExit,'Native terminal failed to exit normally');
+    assert.equal(terminal.exitCode, 0, 'Native terminal exited with an error');
+    assert.ok(terminal.output.includes('\x1b[?1049l'), 'Fullscreen alternate screen was not restored');
   }
   result.passed = true;
 } catch (error) { result.failure = error.message; process.exitCode = 1; }

@@ -32,6 +32,10 @@ for (const useConptyDll of [false, true]) {
       enterAlternate: output.includes('\x1b[?1049h'), leaveAlternate: output.includes('\x1b[?1049l'), output });
     assert.equal(exitCode, 0);
     assert.ok(output.includes('PROBE_ALT') && output.includes('PROBE_DONE'));
+    if (useConptyDll) {
+      assert.ok(output.includes('\x1b[?1049h'), 'Bundled ConPTY lost alternate-screen entry');
+      assert.ok(output.includes('\x1b[?1049l'), 'Bundled ConPTY lost alternate-screen restoration');
+    }
   } finally {
     clearTimeout(timer);
     terminal._agent.inSocket.destroy();
