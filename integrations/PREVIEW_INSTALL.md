@@ -60,3 +60,19 @@ into `iex` remains intentionally disabled; use this named Preview entrypoint.
 
 No WSL, Rust, Node, separate Bun installation or external provider agent is
 required. Windows 10 22H2 is a target, not a clean-system acceptance claim.
+
+## Verification record
+
+The public raw URL above was exercised with the actual `irm | iex` pipeline in
+both Windows PowerShell 5.1 and PowerShell 7 on 2026-09-08. Each run downloaded
+the real release files, installed into an isolated default Preview directory,
+retained caller execution, and left user PATH unchanged. All three provider
+menus, normal exits and alternate-screen restoration passed in both runs.
+The native hash remained
+`919fd8eb3ce146a594f04daa05a0819b6543fcf95479dbbed9510d16f0c78536`.
+
+The complete Node suite passed 202 tests with no failures or skips, including
+15 bootstrap integrity/failure/cleanup/argument tests across both PowerShell
+versions. `-AddToPath` argument construction is covered offline; actual user PATH
+activation was intentionally not performed on the owner's machine. These checks
+do not add OAuth, paid-generation or clean-OS acceptance claims.
