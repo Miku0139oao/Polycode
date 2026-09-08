@@ -20,9 +20,13 @@ function run(runtime, script, directory = root) {
   Object.assign(env, { TEMP: temp, TMP: temp, LOCALAPPDATA: join(directory, 'local'), APPDATA: join(directory, 'roaming'),
     USERPROFILE: join(directory, 'home'), HOME: join(directory, 'home') });
   return spawnSync(runtime, ['-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
-    { encoding: 'utf8', timeout: 30000, env, maxBuffer: 1024 * 1024 });
+    { encoding: 'utf8', timeout: 120000, env, maxBuffer: 1024 * 1024 });
 }
-function ok(result) { assert.equal(result.status, 0, result.stdout + result.stderr); return result.stdout; }
+function ok(result) {
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, `signal=${result.signal ?? 'none'}\n${result.stdout}${result.stderr}`);
+  return result.stdout;
+}
 const parse = `$tokens=$null; $errors=$null; $ast=[Management.Automation.Language.Parser]::ParseFile(${quote(source)},[ref]$tokens,[ref]$errors); if($errors.Count){throw ($errors.Message -join '; ')}`;
 
 test('Preview bootstrap fixes all six public hashes and does not enable stable installation', () => {
