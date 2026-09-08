@@ -1,5 +1,11 @@
 # Polycode verification: native release still pending
 
+> Historical ledger: the checkpoint and WSL targets below describe older revisions,
+> not the current Windows-native candidate. Use [the current roadmap](POLYCODE_ROADMAP.md)
+> for goals, newer local evidence and remaining acceptance. Preserve these older
+> results only for their recorded source/binary; do not repeat completed work or
+> treat old PASS results as acceptance of a new package.
+
 **This is a status ledger, not a native-completion certificate.** The required
 architecture retains Grok's native engine, tools, MCP, permissions, sessions and
 features while selecting Grok / ChatGPT subscription / experimental Cursor in

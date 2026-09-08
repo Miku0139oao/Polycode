@@ -1,0 +1,21 @@
+{
+  "kind": "sanitized-observation",
+  "gate": "offline-regression",
+  "mode": "offline",
+  "observedAt": "2026-09-08T14:19:05.048Z",
+  "candidateSha256": "6cc3df445e8b02577d8d009d308c949845a852b710f16412dd8a2d30b90de88a",
+  "nativeSha256": "919fd8eb3ce146a594f04daa05a0819b6543fcf95479dbbed9510d16f0c78536",
+  "sourceRevision": "39b25f39df9b1b7341ba7957c0ea54167ea80af8",
+  "sourceEvidenceSha256": [
+    "7e6150b80bdf596e5b82f08fa16e27d8a9ec3ee06484116dcb3341b813747bf4",
+    "ce3ec3fc6ce99ff4d419586a398e14da8e1544e6846785939a8278bba61976d9"
+  ],
+  "facts": {
+    "nodePassed": 177,
+    "bunPassed": 140,
+    "failed": 0,
+    "skipped": 0,
+    "permissionRegression": true,
+    "transport": "synthetic"
+  }
+}

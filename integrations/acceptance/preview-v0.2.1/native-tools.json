@@ -1,0 +1,37 @@
+{
+  "kind": "sanitized-observation",
+  "gate": "native-tools",
+  "mode": "offline",
+  "observedAt": "2026-09-08T12:24:08.462Z",
+  "candidateSha256": "6cc3df445e8b02577d8d009d308c949845a852b710f16412dd8a2d30b90de88a",
+  "nativeSha256": "919fd8eb3ce146a594f04daa05a0819b6543fcf95479dbbed9510d16f0c78536",
+  "sourceRevision": "39b25f39df9b1b7341ba7957c0ea54167ea80af8",
+  "sourceEvidenceSha256": [
+    "e1d819dfa8c32f932c2719ba4d78f4c816f4186628491abea071d80dd8169995"
+  ],
+  "facts": {
+    "transport": "synthetic",
+    "actualNativeTools": true,
+    "mcpCalls": 2,
+    "bridgeTokenLeaked": false,
+    "cancelledStreams": 1,
+    "freshResumeRead": true,
+    "slowShell": true,
+    "forcedExit": false,
+    "fixtureErrors": 0,
+    "shellCalls": {
+      "codex": 1,
+      "cursor": 1
+    },
+    "tasks": {
+      "codex": {
+        "childCalls": 1,
+        "verified": true
+      },
+      "cursor": {
+        "childCalls": 1,
+        "verified": true
+      }
+    }
+  }
+}

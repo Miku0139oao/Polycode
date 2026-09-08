@@ -1,0 +1,132 @@
+{
+  "schemaVersion": 1,
+  "kind": "polycode-preview-evidence",
+  "policy": "polycode-preview-2026-09-08.1",
+  "version": "v0.2.1",
+  "fullAcceptance": false,
+  "stableReleaseAuthorized": false,
+  "candidateSha256": "6cc3df445e8b02577d8d009d308c949845a852b710f16412dd8a2d30b90de88a",
+  "nativeSha256": "919fd8eb3ce146a594f04daa05a0819b6543fcf95479dbbed9510d16f0c78536",
+  "sourceRevision": "39b25f39df9b1b7341ba7957c0ea54167ea80af8",
+  "ci": {
+    "repository": "Miku0139oao/Polycode",
+    "runId": "34213482617",
+    "conclusion": "success",
+    "sourceRevision": "39b25f39df9b1b7341ba7957c0ea54167ea80af8"
+  },
+  "deferred": [
+    {
+      "id": "generation-native",
+      "status": "NOT_VERIFIED",
+      "reason": "OAuth passed; no generation was sent because the conditional US$1 limit could not be reliably enforced."
+    },
+    {
+      "id": "windows10-clean-install",
+      "status": "NOT_VERIFIED",
+      "reason": "Existing Windows 11 development host and Server CI/VM observations do not establish clean-system acceptance."
+    },
+    {
+      "id": "windows11-clean-install",
+      "status": "NOT_VERIFIED",
+      "reason": "Existing Windows 11 development host and Server CI/VM observations do not establish clean-system acceptance."
+    }
+  ],
+  "limitations": [
+    {
+      "id": "cursor-timeout-restart",
+      "status": "OPEN",
+      "description": "Initial session hit upstream 504 then fail-closed 409. An explicitly new session passed; original-session recovery remains unverified."
+    },
+    {
+      "id": "server2025-incomplete",
+      "status": "OPEN",
+      "description": "Supplemental Server 2025 report stopped after Codex exited 0 without affirmative owner confirmation; Cursor was not reached."
+    }
+  ],
+  "gates": [
+    {
+      "id": "host-install",
+      "status": "PASS",
+      "mode": "real",
+      "observedAt": "2026-09-08T14:14:42.952Z",
+      "evidence": {
+        "path": "host-install.json",
+        "sha256": "d90791e043d0d21e7e770f33f1e8bf9b0b0da2c8911d0189c5fc103bd4bee9bc"
+      }
+    },
+    {
+      "id": "oauth-native",
+      "status": "PASS",
+      "mode": "real",
+      "observedAt": "2026-09-08T13:51:29.331Z",
+      "evidence": {
+        "path": "oauth-native.json",
+        "sha256": "fad163785d6d35e92ab28f875ebd1c222ffcb1b8df2bf9a2529656c8193daa44"
+      }
+    },
+    {
+      "id": "oauth-chatgpt",
+      "status": "PASS",
+      "mode": "real",
+      "observedAt": "2026-09-08T12:58:48.449Z",
+      "evidence": {
+        "path": "oauth-chatgpt.json",
+        "sha256": "b22eaea6fdb3b84760d8014f6de868058f1ff3ab09419d5193a5d92e1bec06c9"
+      }
+    },
+    {
+      "id": "oauth-cursor",
+      "status": "PASS",
+      "mode": "real",
+      "observedAt": "2026-09-08T13:04:47.106Z",
+      "evidence": {
+        "path": "oauth-cursor.json",
+        "sha256": "9e0cacab2966b46466053ebf078b7f77afe6adc00caefe6559199fd80c46bf19"
+      }
+    },
+    {
+      "id": "coding-chatgpt",
+      "status": "PASS",
+      "mode": "real",
+      "observedAt": "2026-09-08T13:04:48.073Z",
+      "evidence": {
+        "path": "coding-chatgpt.json",
+        "sha256": "3873c91136b91347ce64c5860236e1f589f5dc68082800cce8c232e4f5a99779"
+      }
+    },
+    {
+      "id": "coding-cursor",
+      "status": "PASS",
+      "mode": "real",
+      "observedAt": "2026-09-08T13:28:39.394Z",
+      "evidence": {
+        "path": "coding-cursor.json",
+        "sha256": "44e924f94b94e42c45f29683a9d587154ef98714e9befdca7a07113ae7f3f591"
+      }
+    },
+    {
+      "id": "offline-regression",
+      "status": "PASS",
+      "mode": "offline",
+      "observedAt": "2026-09-08T14:19:05.048Z",
+      "evidence": {
+        "path": "offline-regression.json",
+        "sha256": "e1db6ebd8df39778dd2d2d444f6355dff9f5144dd299bd3d21621c0bd725b6c8"
+      }
+    },
+    {
+      "id": "native-tools",
+      "status": "PASS",
+      "mode": "offline",
+      "observedAt": "2026-09-08T12:24:08.462Z",
+      "evidence": {
+        "path": "native-tools.json",
+        "sha256": "df6116af537ea658a27402b66c59f7dfb82b21076ad0ebb15f0cbc702dce286a"
+      }
+    }
+  ],
+  "releaseNotes": {
+    "path": "release-notes.md",
+    "sha256": "25dd6020ceee6cd1e523cc4ca3758a26d6be7daa9ffbfecf9e3035206ec4ee50"
+  }
+}

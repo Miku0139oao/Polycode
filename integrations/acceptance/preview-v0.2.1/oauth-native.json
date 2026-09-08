@@ -1,0 +1,18 @@
+{
+  "kind": "sanitized-observation",
+  "gate": "oauth-native",
+  "mode": "real",
+  "observedAt": "2026-09-08T13:51:29.331Z",
+  "candidateSha256": "6cc3df445e8b02577d8d009d308c949845a852b710f16412dd8a2d30b90de88a",
+  "nativeSha256": "919fd8eb3ce146a594f04daa05a0819b6543fcf95479dbbed9510d16f0c78536",
+  "sourceRevision": "39b25f39df9b1b7341ba7957c0ea54167ea80af8",
+  "sourceEvidenceSha256": [
+    "5aed22efaa4121e1f85b23ecaceea7e5b36083923b9c2418351ee9d7fc159d5c"
+  ],
+  "facts": {
+    "loginCompleted": true,
+    "exitCode": 0,
+    "forcedExit": false,
+    "generationRequests": 0
+  }
+}

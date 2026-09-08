@@ -1,5 +1,10 @@
 # Native subscription provider service (in progress)
 
+> The checkpoint counts, WSL paths and unverified labels below are historical.
+> Use [the current roadmap](../POLYCODE_ROADMAP.md) and
+> [Windows validation](../WINDOWS_VALIDATION.md) for current targets and evidence.
+> Local ChatGPT/Cursor live observations do not establish final artifact acceptance.
+
 This is the model/OAuth layer for the **native Grok engine**, not a Codex or
 Cursor CLI agent launcher. The integrated native TUI, live endpoints and v0.2.0
 release remain unverified. See [acceptance gates](../VERIFICATION.md).

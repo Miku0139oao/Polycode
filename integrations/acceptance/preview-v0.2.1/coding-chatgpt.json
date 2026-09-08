@@ -1,0 +1,28 @@
+{
+  "kind": "sanitized-observation",
+  "gate": "coding-chatgpt",
+  "mode": "real",
+  "observedAt": "2026-09-08T13:04:48.073Z",
+  "candidateSha256": "6cc3df445e8b02577d8d009d308c949845a852b710f16412dd8a2d30b90de88a",
+  "nativeSha256": "919fd8eb3ce146a594f04daa05a0819b6543fcf95479dbbed9510d16f0c78536",
+  "sourceRevision": "39b25f39df9b1b7341ba7957c0ea54167ea80af8",
+  "sourceEvidenceSha256": [
+    "5a4537dc3a8fd9bac60d6fd410f50747e458a1db4ad39539752a714feb33be60",
+    "7cc0959105ec9edf21d51ddf40f96d8b9992f3c49dec640473b90b3e25720c2c",
+    "4f5cff2b0b87a2430d51a0914102d30150f54e1a92f3744a937096ec5d740141",
+    "4f5cff2b0b87a2430d51a0914102d30150f54e1a92f3744a937096ec5d740141"
+  ],
+  "facts": {
+    "model": "codex/gpt-5.4-mini",
+    "generationCompleted": true,
+    "readObserved": true,
+    "writeCalls": 1,
+    "shellCalls": 1,
+    "shellExitCode": 0,
+    "exactFileBytes": true,
+    "sameSessionResume": true,
+    "freshResumeRead": true,
+    "normalExits": 2,
+    "forcedExit": false
+  }
+}

@@ -16,7 +16,7 @@ selection in the same TUI**, while retaining Grok's native agent engine, tools,
 MCP, permissions, sessions, and features. It is not an official xAI, OpenAI,
 or Cursor release.
 
-**Windows native candidate under validation; no usable public installer is advertised yet.**
+**Windows native v0.2.1 Preview: opt-in testing, not a stable or fully accepted release.**
 **The v0.2.0 WSL installation recommendation is withdrawn.**
 The published v0.2.0 WSL candidate has user-reported failures across all providers.
 Historical development-binary results do not establish that package or the new Windows build.
@@ -27,7 +27,7 @@ not proof of native completion.
 
 [Install](#install-polycode-windows-native) ·
 [Provider selection and limitations](integrations/README.md) ·
-[Verification status](integrations/VERIFICATION.md)
+[Current goals and verification](integrations/POLYCODE_ROADMAP.md)
 
 **Upstream Grok Build** is SpaceXAI's terminal-based AI coding agent. It runs as a
 full-screen TUI that understands your codebase, edits files, executes shell
@@ -57,9 +57,11 @@ integration or release status.
 
 ## Install Polycode (Windows native)
 
-**Not ready for public installation.** Do not use the old v0.2.0 WSL candidate as
-the Windows installation target. Its reported provider failures remain under
-investigation; Linux development tests are not acceptance of that package.
+Use the [v0.2.1 Preview release](https://github.com/Miku0139oao/Polycode/releases/tag/v0.2.1)
+and its version-specific asset instructions once published. Read the
+[Preview scope and limitations](integrations/acceptance/preview-v0.2.1/release-notes.md)
+before installing. The generic stable one-command installer remains disabled.
+Do not use the withdrawn v0.2.0 WSL candidate as the Windows installation target.
 
 The Windows candidate targets Windows 10 22H2 / Windows 11 x64 and PowerShell
 5.1 / 7. It bundles the MSVC native TUI and Windows Bun and directly starts Windows
@@ -82,14 +84,17 @@ Windows provider credentials live in `%LOCALAPPDATA%\Polycode\auth`, outside
 version directories. Use launcher option `-AuthDirectory D:\isolated-auth` for
 isolated verification. Log in through the TUI; WSL tokens/sessions are not imported.
 
-The Windows workflow builds downloadable Actions artifacts first. Publishing
-uses the same accepted bytes and requires evidence for clean Windows 10/11
-installs, all three real provider logins/generations, coding, resume, and targeted
-Task/MCP/billing regression. Mock Grok responses cannot satisfy real generation.
+The Windows workflow builds downloadable Actions artifacts first. The separate
+[Preview policy](integrations/PREVIEW_POLICY.md) permits only explicitly disclosed
+testing scope using those unchanged bytes. Current Windows 11 host installation,
+three OAuth flows and ChatGPT/Cursor coding/resume pass. Clean Windows 10/11 and
+Grok generation remain unverified; Cursor has a documented timeout/restart limit.
+Mock responses do not establish live generation or full billing acceptance.
 
-No real paid Grok requests are currently authorized. Until test quota becomes
-available and every gate passes, no new prerelease or local activation occurs.
-Stable release authorization remains separate.
+The owner authorized Preview distribution, not stable/latest promotion. The
+original complete candidate/stable checks remain unchanged and BLOCKED until
+their required evidence is complete. No paid Grok generation test was sent
+because the conditional US$1 limit could not be reliably enforced.
 
 See [Windows validation](integrations/WINDOWS_VALIDATION.md). Linux/WSL source
 development can use the explicit Bun bridge CLI; it is not the default Windows
@@ -113,8 +118,8 @@ Requirements:
 
 - **protoc** — proto codegen resolves [`bin/protoc`](bin/protoc) via DotSlash,
   or falls back to a `protoc` on `PATH` / `$PROTOC`.
-- For this fork, use the target WSL Arch x64 environment above. Upstream supports
-  additional build hosts, but those are not verified Polycode release targets.
+- For the Windows-native candidate, follow [Windows build and validation](integrations/WINDOWS_VALIDATION.md).
+  WSL is optional for source development, not a user installation prerequisite.
 
 ```sh
 cargo run -p xai-grok-pager-bin              # build + launch the TUI

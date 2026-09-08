@@ -1,0 +1,28 @@
+{
+  "kind": "sanitized-observation",
+  "gate": "coding-cursor",
+  "mode": "real",
+  "observedAt": "2026-09-08T13:28:39.394Z",
+  "candidateSha256": "6cc3df445e8b02577d8d009d308c949845a852b710f16412dd8a2d30b90de88a",
+  "nativeSha256": "919fd8eb3ce146a594f04daa05a0819b6543fcf95479dbbed9510d16f0c78536",
+  "sourceRevision": "39b25f39df9b1b7341ba7957c0ea54167ea80af8",
+  "sourceEvidenceSha256": [
+    "4c6dce7335a325f5f4712f3937c3ccf664b693744723df4f83bdbc767483130d",
+    "4bcfcc33db3dbbdd6deb2cd84109bd0bf502a20935168d3a88478b36221642fb",
+    "9188c15849e7ffe838b8cf29bbc67517ce7257c8c7f4de579388f390cf19a39c",
+    "9188c15849e7ffe838b8cf29bbc67517ce7257c8c7f4de579388f390cf19a39c"
+  ],
+  "facts": {
+    "model": "cursor/default",
+    "generationCompleted": true,
+    "readObserved": true,
+    "writeCalls": 1,
+    "shellCalls": 1,
+    "shellExitCode": 0,
+    "exactFileBytes": true,
+    "sameSessionResume": true,
+    "freshResumeRead": true,
+    "normalExits": 2,
+    "forcedExit": false
+  }
+}

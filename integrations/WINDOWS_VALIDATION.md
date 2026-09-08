@@ -3,6 +3,10 @@
 Implementation/acceptance record, not a release announcement.
 Target: x86_64-pc-windows-msvc, Windows 10 22H2 and Windows 11 x64.
 
+See [the current roadmap](POLYCODE_ROADMAP.md) for the pinned Open Grok reference,
+later local live evidence, prioritized gaps and latest inspected CI state.
+The observations below remain scoped to their recorded package hashes.
+
 ## Build and package
 
 Use a Visual Studio x64 developer terminal with Rust 1.94.0, protoc 29.3,
@@ -64,6 +68,15 @@ verify native Grep with only Windows system paths available and the default
 Windows shell selection. `windows-candidate-smoke.mjs` records the verified
 installed path as `searchExecutable`; CI passes it to the native tools test.
 This PATH restriction is not a replacement for a clean Windows VM.
+
+Add `--bun-bridge` to keep ConPTY in Node while running the production bridge
+service in a separate Bun process. The upstream model responses remain synthetic;
+the native executable still owns all tools, approvals, MCP and Task execution.
+This exercises Bun's actual Request-abort path rather than relying on its Node
+HTTP compatibility server. The fixture bridge receives only synthetic account
+data and a loopback fixture URL/token over private pipes, not real credentials.
+CI runs both bridge runtimes and retains their reports separately. Do not run
+node-pty itself under Bun: that is not the supported terminal-test driver.
 
 ## Interactive login
 

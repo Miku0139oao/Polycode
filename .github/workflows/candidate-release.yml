@@ -5,7 +5,7 @@ on:
       action:
         description: Build an artifact, or publish previously accepted bytes
         type: choice
-        options: [build, publish, terminal-probe]
+        options: [build, publish, publish-preview, terminal-probe]
         default: build
       version:
         description: New immutable prerelease tag
@@ -82,7 +82,7 @@ jobs:
       - name: Windows bridge and installer regression
         shell: pwsh
         run: |
-          node --test integrations/native-provider/test/*.test.mjs integrations/native-provider/cursor/provider.test.mjs integrations/tests/install-native.test.mjs integrations/tests/install-authorization.test.mjs integrations/tests/release-readiness.test.mjs integrations/tests/candidate-readiness.test.mjs integrations/tests/windows-native-prompts.test.mjs
+          node --test integrations/native-provider/test/*.test.mjs integrations/native-provider/cursor/provider.test.mjs integrations/tests/install-native.test.mjs integrations/tests/install-authorization.test.mjs integrations/tests/release-readiness.test.mjs integrations/tests/candidate-readiness.test.mjs integrations/tests/windows-native-prompts.test.mjs integrations/tests/preview-readiness.test.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           bun test integrations/native-provider/test integrations/native-provider/cursor/provider.test.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
@@ -179,3 +179,46 @@ jobs:
           $manifest = Get-Content candidate-out/manifest.json -Raw | ConvertFrom-Json
           gh release create $env:CANDIDATE_VERSION @assets --target $manifest.native.revision --prerelease --title "Polycode $env:CANDIDATE_VERSION Windows candidate" --notes "Windows x64 native prerelease. Install the version-specific install.ps1 with -GitHubCandidate. No WSL required. This is not an authorized stable release."
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+  publish-preview:
+    if: inputs.action == 'publish-preview'
+    runs-on: windows-2022
+    timeout-minutes: 20
+    concurrency:
+      group: polycode-preview-${{ inputs.version }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify separate Preview policy and publisher regression
+        shell: pwsh
+        run: |
+          node --test integrations/tests/preview-readiness.test.mjs integrations/tests/candidate-readiness.test.mjs integrations/tests/release-readiness.test.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Publish only verified original bytes as non-Latest Preview
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          CANDIDATE_RUN: ${{ inputs.candidate_run_id }}
+          ACCEPTANCE_PATH: ${{ inputs.acceptance_path }}
+          CANDIDATE_VERSION: ${{ inputs.version }}
+          POLICY_REVISION: ${{ github.sha }}
+        run: |
+          if ($env:CANDIDATE_RUN -notmatch '^[0-9]+$') { throw 'A successful build run ID is required.' }
+          if ($env:CANDIDATE_VERSION -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw 'Invalid version.' }
+          gh run download $env:CANDIDATE_RUN -n polycode-windows-candidate -D candidate-out
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node integrations/publish-preview.mjs candidate-out $env:ACCEPTANCE_PATH $env:CANDIDATE_VERSION $env:CANDIDATE_RUN $env:GH_REPO $env:POLICY_REVISION preview-publication
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: preview-publication-receipt
+          path: |
+            preview-publication/publication-receipt.json
+            preview-publication/release-notes.md

@@ -1,0 +1,45 @@
+{
+  "kind": "sanitized-observation",
+  "gate": "host-install",
+  "mode": "real",
+  "observedAt": "2026-09-08T14:14:42.952Z",
+  "candidateSha256": "6cc3df445e8b02577d8d009d308c949845a852b710f16412dd8a2d30b90de88a",
+  "nativeSha256": "919fd8eb3ce146a594f04daa05a0819b6543fcf95479dbbed9510d16f0c78536",
+  "sourceRevision": "39b25f39df9b1b7341ba7957c0ea54167ea80af8",
+  "sourceEvidenceSha256": [
+    "c8ac6cbdd8704a740a4d2e989665ec029c02eb807affaa7a3d4f30f5d6aa6f93",
+    "5c3fd15b2900271c0cda33c34a1f6b25e02381c9cc7bd1898fbacd4886c7830c",
+    "fe1c175d9d1ef24d0e017ac988495087663469b495eeb0d9fb84a3ae0a928d8e",
+    "8239c7bad3e7ea7f8710eb7d02b852e3515c8fbbe2c6f3d4cf5fe2f0743e150f"
+  ],
+  "facts": {
+    "os": "Windows 11",
+    "build": 26200,
+    "cleanOS": false,
+    "nativeHashVerified": true,
+    "bundleHashVerified": true,
+    "providers": [
+      {
+        "id": "native",
+        "exitCode": 0,
+        "forcedExit": false,
+        "menu": true,
+        "alternateScreenRestored": true
+      },
+      {
+        "id": "codex",
+        "exitCode": 0,
+        "forcedExit": false,
+        "menu": true,
+        "alternateScreenRestored": true
+      },
+      {
+        "id": "cursor",
+        "exitCode": 0,
+        "forcedExit": false,
+        "menu": true,
+        "alternateScreenRestored": true
+      }
+    ]
+  }
+}
