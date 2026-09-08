@@ -2,10 +2,56 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createCursorProvider } from './index.mjs';
+import { Connection } from './transport.mjs';
 import * as p from './protocol.mjs';
 import { gifBase64, gifHex, historyHex, userImageHex, usageFrameHex, userRuleHex } from './wire-fixtures.mjs';
 
 const A = { accessToken: 'OFFLINE_ACCOUNT_A', refreshToken: 'OFFLINE_REFRESH_A' };
+test('MCP exec metadata is not mistaken for a builtin and cannot authorize extra operations', () => {
+  const raw = p.one(p.fields(execFrame().subarray(5)), 2);
+  const expected = p.parseExec(raw);
+  const metadata = p.concat(p.bytes(19, p.string(1, 'offline-trace')), p.uint(55, 1));
+  assert.deepEqual(p.parseExec(p.concat(raw, metadata)), expected);
+  const args = p.one(p.fields(raw), 11);
+  const withServer = value => p.concat(p.uint(1, 7), p.string(15, 'original-exec-id'), p.bytes(11, p.concat(args, p.string(9, value))));
+  assert.deepEqual(p.parseExec(withServer(p.MCP_PROVIDER)), expected);
+  assert.throws(() => p.parseExec(withServer('another-server')), { code: 'invalid_protocol' });
+  assert.throws(() => p.parseExec(p.bytes(11, p.concat(args, p.uint(8, 1)))), { code: 'unsupported_protocol' });
+  assert.throws(() => p.parseExec(p.concat(raw, p.uint(19, 1))), { code: 'invalid_protocol' });
+  assert.throws(() => p.parseExec(p.concat(raw, p.uint(55, 2))), { code: 'invalid_protocol' });
+  assert.throws(() => p.parseExec(p.concat(raw, p.bytes(2, p.empty), metadata)), { code: 'unsupported_builtin' });
+  assert.throws(() => p.parseExec(p.concat(raw, p.string(57, 'remote-machine'))), { code: 'unsupported_builtin' });
+});
+test('interaction timestamps accompany text without becoming content or permitting malformed fields', async () => {
+  const collect = async data => {
+    const connection = new Connection({ uuid: () => 'offline', controller: new AbortController() });
+    connection.response = new Response(data);
+    return Array.fromAsync(connection.events());
+  };
+  const update = p.bytes(1, p.string(1, 'actual text'));
+  const timestamp = p.uint(25, 1788821700000);
+  const progress = p.concat(p.envelope(p.bytes(1, p.bytes(8, p.uint(1, 100)))), p.envelope(p.bytes(1, p.bytes(5, p.uint(1, 250)))), ...[15, 16, 17].map(id => p.envelope(p.bytes(1, p.bytes(id, p.empty)))));
+  const events = await collect(p.concat(p.envelope(p.bytes(8, p.empty)), progress, p.envelope(p.bytes(1, p.concat(update, timestamp))), doneFrame()));
+  assert.deepEqual(events, [{ type: 'text', text: 'actual text' }, { type: 'done', usage: undefined }]);
+  await assert.rejects(collect(p.envelope(p.bytes(1, p.concat(update, p.bytes(25, p.empty))))), /protocol/i);
+  await assert.rejects(collect(p.envelope(p.bytes(1, p.concat(update, timestamp, timestamp)))), /protocol/i);
+  await assert.rejects(collect(p.envelope(p.bytes(1, p.concat(update, p.uint(26, 1))))), { code: 'invalid_protocol' });
+  await assert.rejects(collect(p.envelope(p.bytes(9, p.empty))), { code: 'unsupported_protocol' });
+  await assert.rejects(collect(p.envelope(p.bytes(1, p.bytes(8, p.string(1, 'not token count'))))), { code: 'invalid_protocol' });
+});
+test('KV accepts optional span context without changing blob storage or accepting unknown requests', async () => {
+  const connection = new Connection({ uuid: () => 'offline', controller: new AbortController() });
+  const sent = [];
+  connection.append = async value => { sent.push(value); };
+  const key = Uint8Array.of(7), blob = new TextEncoder().encode('opaque payload');
+  const span = p.bytes(4, p.string(1, 'offline-trace'));
+  await connection.kv(p.concat(p.uint(1, 1), p.bytes(3, p.concat(p.bytes(1, key), p.bytes(2, blob))), span));
+  await connection.kv(p.concat(p.uint(1, 2), p.bytes(2, p.bytes(1, key)), span));
+  assert.deepEqual(sent[1], p.bytes(3, p.concat(p.uint(1, 2), p.bytes(2, p.bytes(1, blob)))));
+  await assert.rejects(connection.kv(p.concat(p.uint(1, 3), p.bytes(2, p.bytes(1, key)), p.uint(4, 1))), /protocol/);
+  await assert.rejects(connection.kv(p.concat(p.uint(1, 4), p.bytes(2, p.bytes(1, key)), p.bytes(5, p.empty))), /protocol/);
+  assert.equal(sent.length, 2);
+});
 const B = { accessToken: 'OFFLINE_ACCOUNT_B' };
 const toolName = 'mcp__strange-server__read.path-with-dashes';
 const args = JSON.parse('{"path":"/never/read/this","empty":"","nil":null,"no":false,"zero":0,"nested":[1,{"__proto__":{"safe":true},"":""}]}');
@@ -115,6 +161,9 @@ test('MCP definition, arbitrary names/JSON and exact model roundtrip; no local e
   const prompt = p.text(p.one(user, 1));
   assert.equal(prompt, JSON.stringify(request.messages[1].content[0])); // Annotation is retained as typed text.
   const context = p.fields(p.one(userAction, 2));
+  const serverInstructions = p.fields(p.one(context, 14));
+  assert.equal(p.text(p.one(serverInstructions, 3)), p.MCP_PROVIDER);
+  assert.match(p.text(p.one(serverInstructions, 2)), /Never prepend \/polycode-virtual to tool arguments/);
   const rule = p.fields(p.one(context, 2));
   assert.equal(p.text(p.one(rule, 2)), 'Native permissions stay here.\n' + JSON.stringify({ polycode_message_metadata: { name: 'native' } }));
   assert.equal(p.one(rule, 4, 0), 2n, 'Ordinary USER rule, not TEAM');
@@ -140,6 +189,21 @@ test('native result resumes same connection and monotonically shared append seq 
   assert.deepEqual(mock.appends.map(a => a.seq), [0, 1, 2, 3]);
   assert.deepEqual(decodeResult(mock.appends[1]), { id: 7, execId: 'original-exec-id', content: JSON.stringify(payload), isError: true });
   assert.equal([...mock.connections.values()][0].cancelled, true);
+});
+
+test('native assistant model metadata resumes only the exact selected model', async t => {
+  const mock = mockProtocol(c => c.send(execFrame()), (c, record) => {
+    if (record.message[0].id === 5) c.send(textFrame('native continuation'), doneFrame());
+  });
+  const instance = provider(t, mock), request = body();
+  const first = await (await instance.complete(request, A)).json();
+  const message = first.choices[0].message;
+  assert.equal((await instance.complete(continuation(request, { ...message, model_id: 'foreign-model' }), A)).status, 409);
+  assert.equal(mock.appends.length, 1);
+  const response = await instance.complete(continuation(request, { ...message, model_id: request.model }), A);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).choices[0].message.content, 'native continuation');
+  assert.equal(mock.connections.size, 1);
 });
 
 test('streaming fragments, tool intents and native-result continuation', async t => {

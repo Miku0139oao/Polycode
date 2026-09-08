@@ -2524,37 +2524,66 @@ async fn run_client_session(
         ))
         .await;
     info!(client_id = client_id.0, client_type = %client_type, ?mode, yolo_mode = capabilities.yolo_mode, client_version = ?capabilities.client_version, "Client registered");
+    forward_client_messages(
+        client_id,
+        &mut reader,
+        &mut writer,
+        &server_rx,
+        &event_tx,
+        &cancel,
+    )
+    .await
+}
+
+async fn forward_client_messages<R, W>(
+    client_id: ClientId,
+    reader: &mut R,
+    writer: &mut W,
+    server_rx: &AsyncReceiver<ClientOutbound>,
+    event_tx: &AsyncSender<ServerEvent>,
+    cancel: &CancellationToken,
+) -> Result<(), ProtocolError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
     loop {
-        tokio::select! {
-            biased;
+        // read_message uses read_exact for both the length and payload. Keep
+        // this future alive while sending outbound messages: cancelling a
+        // partial read would discard bytes and desynchronize the next frame.
+        let inbound = read_message::<_, ClientMessage>(reader);
+        tokio::pin!(inbound);
+        loop {
+            tokio::select! {
+                biased;
 
-            _ = cancel.cancelled() => {
-                drain_client_outbound_on_cancel(&server_rx, &mut writer).await;
-                break;
-            }
-
-            Ok(msg) = server_rx.recv() => {
-                if write_outbound(&mut writer, &msg).await.is_err() {
-                    break;
+                _ = cancel.cancelled() => {
+                    drain_client_outbound_on_cancel(server_rx, writer).await;
+                    return Ok(());
                 }
-            }
 
-            msg_result = read_message::<_, ClientMessage>(&mut reader) => {
-                match handle_client_inbound_message(
-                    msg_result,
-                    client_id,
-                    &event_tx,
-                    &mut writer,
-                )
-                .await?
-                {
-                    ClientSessionAction::Continue => {}
-                    ClientSessionAction::Break => break,
+                Ok(msg) = server_rx.recv() => {
+                    if write_outbound(writer, &msg).await.is_err() {
+                        return Ok(());
+                    }
+                }
+
+                msg_result = &mut inbound => {
+                    match handle_client_inbound_message(
+                        msg_result,
+                        client_id,
+                        event_tx,
+                        writer,
+                    )
+                    .await?
+                    {
+                        ClientSessionAction::Continue => break,
+                        ClientSessionAction::Break => return Ok(()),
+                    }
                 }
             }
         }
     }
-    Ok(())
 }
 enum ClientSessionAction {
     Continue,

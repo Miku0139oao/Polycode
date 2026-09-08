@@ -182,12 +182,14 @@ export function userRule(message, index) {
 export function runMessage(body, conversationId, messageId) {
   const tools = (body.tools ?? []).map(mcpDefinition);
   const instructions = 'Only request the explicitly supplied MCP tools. Polycode owns all execution and permissions. '
-    + 'No built-in tools, filesystem, shell, web, subagents, or mode switches are available.';
+    + 'No built-in tools, filesystem, shell, web, subagents, or mode switches are available. '
+    + 'The /polycode-virtual environment is transport metadata, not the native workspace. '
+    + 'For MCP file and shell tools use relative paths in the native workspace, or exact absolute paths provided by the caller. Never prepend /polycode-virtual to tool arguments.';
   const rules = body.messages.flatMap((m, i) => ['system', 'developer'].includes(m.role) ? [bytes(2, userRule(m, i))] : []);
   // Virtual context only: no cwd/env/host discovery, MCP filesystem mode or internal tool headers.
   const context = concat(...rules, bytes(4, concat(string(1, 'Polycode model transport'), string(2, '/polycode-virtual'),
     string(10, 'UTC'), string(11, '/polycode-virtual'))), ...tools.map(t => bytes(7, t)),
-    bytes(14, concat(string(1, MCP_PROVIDER), string(2, instructions))));
+    bytes(14, concat(string(1, MCP_PROVIDER), string(2, instructions), string(3, MCP_PROVIDER))));
   const parts = messageParts(body.messages.at(-1));
   const images = parts.filter(p => p.type === 'image').map((p, i) => bytes(1,
     concat(string(2, `${messageId}-image-${i}`), string(7, p.mimeType), bytes(8, p.data))));
@@ -222,17 +224,24 @@ export const bidiRequest = id => string(1, id);
 export const appendRequest = (id, seq, data) => concat(string(1, Buffer.from(data).toString('hex')), bytes(2, bidiRequest(id)), uint(3, seq));
 export function parseExec(data) {
   const fs = fields(data);
-  if (fs.some(f => ![1, 11, 15].includes(f.id)) || !fs.some(f => f.id === 11)) {
+  if (fs.some(f => ![1, 11, 15, 19, 55].includes(f.id)) || !fs.some(f => f.id === 11)) {
     throw fail('unsupported_builtin', 'Cursor requested a non-MCP/built-in operation; denied without execution.');
   }
   const id = number(one(fs, 1, 0, false) ?? 0n);
   const execId = one(fs, 15, 2, false);
+  // Official optional trace context and a flag permitting additional hook
+  // response context. Neither requests execution; this adapter emits no hooks.
+  one(fs, 19, 2, false);
+  const acceptsHookContext = one(fs, 55, 0, false);
+  if (acceptsHookContext !== undefined && acceptsHookContext > 1n) throw malformed();
   const args = fields(one(fs, 11));
-  only(args, [1, 2, 3, 4, 5]);
+  only(args, [1, 2, 3, 4, 5, 9]);
   const name = text(one(args, 1));
   const toolCallId = text(one(args, 3));
   const providerIdentifier = text(one(args, 4));
   const toolName = text(one(args, 5));
+  const serverIdentifier = one(args, 9, 2, false);
+  if (serverIdentifier && text(serverIdentifier) !== MCP_PROVIDER) throw malformed();
   if (!toolCallId || toolCallId.length > 512 || !toolName || providerIdentifier !== MCP_PROVIDER || name !== `${MCP_PROVIDER}-${toolName}`) throw malformed();
   const argData = concat(...args.filter(f => f.id === 2).map(f => { if (f.wire !== 2) throw malformed(); return bytes(1, f.value); }));
   return { id, execId: execId ? text(execId) : undefined, name, toolCallId, providerIdentifier, toolName, args: decodeMap(argData) };

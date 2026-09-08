@@ -35,6 +35,11 @@ pub enum RegisteredModelProvider {
 pub fn registered_model_provider(id: &str) -> Option<RegisteredModelProvider> {
     bridge().and_then(|b| b.registered_model_provider(id))
 }
+/// Recover the catalog identity from an exact registered subscription route.
+/// Upstream model slugs alone are not identities: two providers can share one.
+pub(crate) fn canonical_model_id(base: &str, model: &str) -> Option<String> {
+    bridge().and_then(|b| b.canonical_model_id(base, model))
+}
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Catalog {
     pub providers: Vec<Provider>,
@@ -54,7 +59,8 @@ pub struct Provider {
 pub struct Model {
     pub id: String,
     pub name: String,
-    pub context_window: u64,
+    #[serde(default)]
+    pub context_window: Option<u64>,
     #[serde(default)]
     pub reasoning_efforts: Vec<xai_grok_sampling_types::ReasoningEffortOption>,
     #[serde(default)]
@@ -306,7 +312,7 @@ impl Bridge {
                     || model.id.chars().any(char::is_control)
                     || !self.safe_text(&model.id)
                     || !self.safe_text(&model.name)
-                    || model.context_window == 0
+                    || model.context_window == Some(0)
                     || !ids.insert(&model.id)
                     || !valid_reasoning_metadata(model)
                 {
@@ -396,6 +402,17 @@ impl Bridge {
                 })
         })
     }
+    fn canonical_model_id(&self, base: &str, model: &str) -> Option<String> {
+        self.catalog().providers.iter().find_map(|provider| {
+            if base != self.model_base(provider.id)
+                || !provider.models.iter().any(|entry| entry.id == model) {
+                return None;
+            }
+            let id = format!("{}/{}", provider.id.as_str(), model);
+            (self.registered_model_provider(&id)
+                == Some(RegisteredModelProvider::Subscription(provider.id))).then_some(id)
+        })
+    }
     fn registered_model_provider(&self, id: &str) -> Option<RegisteredModelProvider> {
         let registered = self
             .registered_models
@@ -483,7 +500,7 @@ impl Bridge {
                 let mut entry = ConfigModelOverride {
                     model: Some(model.id),
                     name: Some(format!("{} / {}", provider.name, model.name)),
-                    context_window: Some(model.context_window),
+                    context_window: model.context_window,
                     supports_reasoning_effort: Some(!model.reasoning_efforts.is_empty()),
                     reasoning_efforts: model.reasoning_efforts.clone(),
                     reasoning_effort: model.default_reasoning_effort,
@@ -735,6 +752,28 @@ mod tests {
         assert!(loopback_origin("http://[::1]:1234").is_ok());
     }
     #[test]
+    fn unknown_context_window_does_not_reject_subscription_catalog() {
+        let bridge = Bridge::new("http://127.0.0.1:1234", "context-fixture-token".into()).unwrap();
+        let mut catalog: Catalog = serde_json::from_value(serde_json::json!({"providers":[{
+            "id":"cursor","name":"Cursor","loggedIn":true,
+            "models":[{"id":"unknown-context","name":"Unknown","contextWindow":null}]
+        }]}))
+        .unwrap();
+        bridge.validate_catalog(&catalog).unwrap();
+        assert_eq!(catalog.providers[0].models[0].context_window, None);
+        *bridge.catalog.write().unwrap() = catalog.clone();
+        let mut models = IndexMap::new();
+        bridge.inject(
+            &mut models,
+            &crate::agent::config::Config::default().endpoints,
+        );
+        // The catalog does not fabricate upstream capacity. The native engine
+        // still applies its own existing default budget when no override exists.
+        assert!(bridge.ready_model("cursor/unknown-context", &models["cursor/unknown-context"]));
+        catalog.providers[0].models[0].context_window = Some(0);
+        assert!(bridge.validate_catalog(&catalog).is_err());
+    }
+    #[test]
     fn overlay_keeps_native_models_and_native_config() {
         use crate::agent::config::{Config, resolve_credentials, resolve_model_list};
         let cfg = Config::default();
@@ -873,6 +912,11 @@ mod tests {
             bridge.registered_model_provider("cursor/b"),
             Some(RegisteredModelProvider::Subscription(ProviderId::Cursor))
         );
+        assert_eq!(bridge.canonical_model_id(&bridge.model_base(ProviderId::Codex), "a"), Some("codex/a".into()));
+        assert_eq!(bridge.canonical_model_id(&bridge.model_base(ProviderId::Cursor), "b"), Some("cursor/b".into()));
+        assert_eq!(bridge.canonical_model_id(&bridge.model_base(ProviderId::Cursor), "a"), None);
+        assert_eq!(bridge.canonical_model_id("http://127.0.0.1:9999/codex/v1", "a"), None);
+        assert_eq!(bridge.canonical_model_id(&bridge.model_base(ProviderId::Codex), "forged"), None);
         for unknown in [
             "grok-forged",
             "codex/forged",
@@ -895,6 +939,7 @@ mod tests {
         );
         restored.catalog.write().unwrap().providers[0].logged_in = false;
         assert_eq!(restored.registered_model_provider("codex/a"), None);
+        assert_eq!(restored.canonical_model_id(&restored.model_base(ProviderId::Codex), "a"), None);
         assert_eq!(
             restored.registered_model_provider("cursor/b"),
             Some(RegisteredModelProvider::Subscription(ProviderId::Cursor))

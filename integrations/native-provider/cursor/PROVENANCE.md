@@ -68,6 +68,37 @@ credentials/config/account files, opening a browser or calling an API:
 - `index.js` SHA-256: `fca169d7955d80a6e725f2beee2ffbbfe9642b288dcf0a877d6cb7a87d208706`
 - `6201.index.js` SHA-256: `d65b56a0a993049415693c79301d11b809258f0ca878833efe971bbd327112c0`
 
+Live Windows validation on 2026-09-08 reached OAuth/model discovery, then
+generation failed at the KV parser. Reinspection of the same installed
+`agent.v1.KvServerMessage` schema confirmed optional message field 4,
+`span_context`, alongside ID 1 and get/set oneof 2/3. The adapter accepts that
+tracing field with singular length-delimited validation; it is neither echoed
+nor treated as an instruction. Unknown fields/operations remain rejected.
+
+The live server also sent `InteractionUpdate` field 25 with wire type 0.
+Read-only inspection of installed `2026.09.02-c22c1a3/index.js` confirmed this
+as optional uint64 `message_started_at_ms`, outside the update oneof.
+Source SHA-256: `7c1957bb82b2b31f4ba53d3a9c11404fa263b31f84076e87fcb83539ac8f09a6`.
+The parser validates a singular varint timestamp and keeps it out of model
+content and tool execution. Malformed, duplicate and unknown fields still fail.
+The live stream's top-level field 8 matches `AgentServerMessage.ttft_breakdown`
+in the installed schema; it is timing telemetry, not execution or turn completion.
+`TokenDeltaUpdate` (interaction 8) and `ThinkingCompletedUpdate` (interaction 5)
+carry int32 field 1 (`tokens` and `thinking_duration_ms`). The old reference
+incorrectly treated token delta as text. These counters are validated as progress
+metadata and never fabricated into assistant text or billable usage.
+Interaction 15 (`tool_call_delta`) is a partial notification, and 16/17
+(`step_started`/`step_completed`) delimit steps. They do not execute tools or
+complete a turn; typed exec messages and `turn_ended` retain those responsibilities.
+The observed MCP exec contained fields 11/15/19/55. Official `ExecServerMessage`
+defines 19 as optional span context and 55 as optional bool
+`accept_hook_additional_contexts`. Both are validated as metadata; the adapter
+does not run hooks or return hook context. Actual builtin and remote-machine
+requests still fail. The previous parser misclassified these genuine MCP intents.
+The observed nested `McpArgs` additionally carries field 9 `server_identifier`.
+When present it must match the explicitly registered Polycode MCP provider;
+foreign identifiers and smart-mode/skip-approval flags are not accepted.
+
 The following are schema facts, independently encoded here, not copied CLI
 implementations/handlers. Anchors are generated `agent.v1` type names (searchable
 in the minified bundle), not a public or stability-guaranteed SDK contract.

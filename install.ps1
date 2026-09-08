@@ -1,27 +1,10 @@
-<# Per-user native Polycode installer: Windows PowerShell 5.1+ and existing WSL
-x86_64 with glibc >= 2.43 (Arch Linux), zlib, libgcc, libstdc++, ICU78 and Windows interop.
-
-    irm https://raw.githubusercontent.com/Miku0139oao/Polycode/main/install.ps1 | iex
-
-No provider login, browser, external agent CLI, Rust compiler or administrator needed.
--ArtifactDirectory installs local UNPUBLISHED CANDIDATE assets (still hash checked).
-If this script sits next to the six candidate files, the same directory is used
-automatically; still requires -AllowCandidate. -GitHubCandidate downloads those
-same hash-checked files from this repository's GitHub Release and treats them as
-an unpublished candidate (no authorization sidecars). Local or GitHub candidate
-preflight never means release/live acceptance. Without a candidate opt-in, an
-immutable package requires separate parent release authorization + PASS
-readiness, both bound to the exact accepted bytes.
-Classification never means published. Sidecars do not repack the runtime.
--InstallRoot/-LinuxRoot allow isolated installs; -NoPath never changes either PATH.
--StageOnly verifies/stages a release without changing the active launcher or PATH.
-Checksums detect corruption, not a compromised release publisher.
+<# Windows x64 per-user installer. No WSL or developer runtime required.
+Candidate installation is not live acceptance or official-release authorization.
+-NoPath preserves PATH; -StageOnly leaves the active launcher unchanged.
 #>
 param(
-    [ValidatePattern('^v[0-9]+\.[0-9]+\.[0-9]+$')][string]$Version = 'v0.2.0',
-    [ValidateNotNullOrEmpty()][string]$Distro = 'archlinux',
+    [ValidatePattern('^v[0-9]+\.[0-9]+\.[0-9]+$')][string]$Version = 'v0.2.1',
     [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'Polycode'),
-    [string]$LinuxRoot,
     [string]$ArtifactDirectory,
     [switch]$AllowCandidate,
     [switch]$GitHubCandidate,
@@ -31,7 +14,7 @@ param(
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$assets = @('polycode-wsl-x64.gz', 'polycode-bun-wsl-x64.gz', 'polycode-runtime.zip', 'manifest.json', 'install.ps1')
+$assets = @('polycode-windows-x64.gz', 'polycode-bun-windows-x64.gz', 'polycode-runtime.zip', 'manifest.json', 'install.ps1')
 # One-key local install: running the accepted install.ps1 from a complete
 # candidate folder does not require repeating -ArtifactDirectory.
 if (-not $ArtifactDirectory -and $PSCommandPath) {
@@ -42,8 +25,13 @@ if (-not $ArtifactDirectory -and $PSCommandPath) {
     }
     if ($complete) { $ArtifactDirectory = $here }
 }
-# irm ... | iex has no script path; treat that hosted one-liner as GitHub candidate install.
-if (-not $PSCommandPath -and -not $ArtifactDirectory) { $GitHubCandidate = $true }
+# Enable the hosted one-liner only after acceptance and public download checks.
+# Local explicit candidate verification remains available while this is false.
+$publicCandidateEnabled = $false
+if (-not $PSCommandPath -and -not $ArtifactDirectory) {
+    if (-not $publicCandidateEnabled) { throw 'Windows native acceptance is pending. Public one-command installation is not enabled. Use an isolated local candidate for development verification.' }
+    $GitHubCandidate = $true
+}
 if ($GitHubCandidate -and $ArtifactDirectory) {
     throw 'This installer is already next to local candidate files. Omit -GitHubCandidate and pass -AllowCandidate.'
 }
@@ -71,7 +59,7 @@ $bin = Join-Path $root 'bin'
 $shim = Join-Path $bin 'polycode.cmd'
 $newShim = Join-Path $bin ($id + '.cmd')
 $backup = Join-Path $bin ($id + '.backup')
-$binaryDir = $null; $linuxCreated = $false; $releaseCreated = $false
+$releaseCreated = $false
 $activated = $false; $pathTouched = $false; $committed = $false
 $oldProcessPath = $env:Path
 $oldUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -169,7 +157,7 @@ function Convert-JsonWithoutDateCoercion([string]$Text) {
     } finally { $reader.Close(); $inputText.Dispose() }
 }
 function Read-JsonObject([string]$Path) {
-    $text = Get-Content -LiteralPath $Path -Raw
+    $text = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
     # PS5.1 lacks -NoEnumerate: reject a root array BEFORE ConvertFrom-Json can
     # unwrap a singleton (or discard an empty array). Nested properties are kept
     # as-is and checked directly, never returned through an enumerating pipeline.
@@ -186,9 +174,10 @@ function Read-JsonObject([string]$Path) {
 }
 function Assert-CandidateManifest($Manifest, [bool]$Outer) {
     Assert-JsonObject $Manifest 'manifest'
-    Assert-JsonInteger $Manifest.schemaVersion 'manifest.schemaVersion' 1 2
-    foreach ($field in @('version', 'architecture', 'minimumGlibc', 'protocol', 'provenance')) { Assert-JsonString $Manifest.$field "manifest.$field" }
-    if ($Manifest.schemaVersion -eq 2) { Assert-JsonString $Manifest.classification 'manifest.classification' }
+    Assert-JsonInteger $Manifest.schemaVersion 'manifest.schemaVersion' 3 3
+    foreach ($field in @('version', 'architecture', 'platform', 'target', 'executableFormat', 'protocol', 'provenance')) { Assert-JsonString $Manifest.$field "manifest.$field" }
+    if ($Manifest.platform -cne 'windows' -or $Manifest.target -cne 'x86_64-pc-windows-msvc' -or $Manifest.architecture -cne 'x86_64' -or $Manifest.executableFormat -cne 'PE32+') { throw 'Invalid Windows manifest target.' }
+    if ($Manifest.schemaVersion -eq 3) { Assert-JsonString $Manifest.classification 'manifest.classification' }
     else { Assert-JsonString $Manifest.status 'manifest.status' }
     foreach ($field in @('classification', 'status')) {
         if ($Manifest.PSObject.Properties.Name -contains $field) { Assert-JsonString $Manifest.$field "manifest.$field" }
@@ -248,7 +237,7 @@ function Assert-DistributionAuthorization($Manifest, [string]$CandidateHash) {
         Assert-JsonString $gate.status 'readiness.gates.status'
         Assert-JsonBoolean $gate.verified 'readiness.gates.verified'
     }
-    if ($Manifest.schemaVersion -ne 2 -or $Manifest.classification -cne 'immutable-candidate' -or $Manifest.PSObject.Properties.Name -contains 'status' -or $Manifest.provenance -cne 'build-report') { throw 'Remote installation requires a provenance-attested immutable candidate; legacy or relabeled manifests cannot be promoted.' }
+    if ($Manifest.schemaVersion -ne 3 -or $Manifest.classification -cne 'immutable-candidate' -or $Manifest.PSObject.Properties.Name -contains 'status' -or $Manifest.provenance -cne 'build-report') { throw 'Remote installation requires a provenance-attested immutable candidate; legacy or relabeled manifests cannot be promoted.' }
     if ($authorization.schemaVersion -ne 1 -or $authorization.kind -cne 'polycode-distribution-authorization' -or $authorization.decision -cne 'AUTHORIZED' -or $authorization.scope -cne 'public-distribution' -or
         $authorization.parent.role -cne 'parent' -or [string]::IsNullOrWhiteSpace($authorization.parent.reviewer) -or $authorization.version -cne $Version -or
         $authorization.candidateSha256 -cne $CandidateHash -or $authorization.nativeSha256 -cne $Manifest.native.sha256 -or
@@ -272,7 +261,7 @@ function Assert-DistributionAuthorization($Manifest, [string]$CandidateHash) {
     if ($checkedAt -gt [DateTimeOffset]::UtcNow.AddMinutes(1) -or $authorizedAt -gt [DateTimeOffset]::UtcNow.AddMinutes(1) -or $authorizedAt -lt $checkedAt -or $authorizedAt -gt $checkedAt.AddDays(7)) { throw 'Stale or invalid release authorization timeline.' }
     # Authorization must be timely at promotion; an already authorized immutable
     # release does not expire seven days after publication.
-    $expectedAssets = @('install.ps1', 'polycode-bun-wsl-x64.gz', 'polycode-runtime.zip', 'polycode-wsl-x64.gz')
+    $expectedAssets = @('install.ps1', 'polycode-bun-windows-x64.gz', 'polycode-runtime.zip', 'polycode-windows-x64.gz')
     $seenAssets = @{}
     if (@($Manifest.artifacts).Count -ne $expectedAssets.Count) { throw 'Incomplete authorized asset inventory.' }
     foreach ($asset in $Manifest.artifacts) {
@@ -283,30 +272,50 @@ function Assert-DistributionAuthorization($Manifest, [string]$CandidateHash) {
     }
     if (-not $PSCommandPath -or (Get-Sha256 $PSCommandPath) -cne (Get-Sha256 (Join-Path $temp 'install.ps1'))) { throw 'Run the exact accepted install.ps1 file, not an inline or modified installer.' }
 }
+# Shared Windows process/PE validation helpers. Embedded verbatim in install.ps1.
 function Quote-Argument([string]$Value) {
     if ($Value -and $Value -notmatch '[\s"]') { return $Value }
     return '"' + ([regex]::Replace([regex]::Replace($Value, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1')) + '"'
 }
-function Wsl([string[]]$Arguments) {
+function Invoke-Native([string]$Executable, [string[]]$Arguments, [int]$TimeoutSeconds = 30) {
     $info = New-Object Diagnostics.ProcessStartInfo
-    $info.FileName = (Get-Command wsl.exe -ErrorAction Stop).Source
+    $info.FileName = $Executable
     $info.UseShellExecute = $false
-    $info.Arguments = (@(@('-d', $Distro, '--exec') + $Arguments) | ForEach-Object { Quote-Argument $_ }) -join ' '
+    $info.CreateNoWindow = $true
+    $info.Arguments = ($Arguments | ForEach-Object { Quote-Argument $_ }) -join ' '
     $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
-    $process = New-Object Diagnostics.Process; $process.StartInfo = $info
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $info
     try {
-        if (-not $process.Start()) { throw 'Cannot start WSL.' }
+        if (-not $process.Start()) { throw 'Cannot start native executable.' }
         $stdout = $process.StandardOutput.ReadToEndAsync(); $stderr = $process.StandardError.ReadToEndAsync()
-        $process.WaitForExit()
-        if ($process.ExitCode -ne 0) { throw ('WSL command failed (' + $Arguments[0] + '): ' + $stderr.GetAwaiter().GetResult()) }
-        return $stdout.GetAwaiter().GetResult().TrimEnd("`r", "`n")
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            $process.Kill(); $process.WaitForExit(); throw 'Native executable check timed out.'
+        }
+        if ($process.ExitCode -ne 0) { throw ('Native executable check failed (' + [IO.Path]::GetFileName($Executable) + '): exit ' + $process.ExitCode) }
+        return $stdout.GetAwaiter().GetResult().TrimEnd([char]13, [char]10)
     } finally { $process.Dispose() }
 }
-function LinuxPath([string]$Path) {
-    $converted = Wsl @('wslpath', '-u', $Path)
-    if (-not $converted.StartsWith('/') -or $converted.Contains("`n") -or $converted.Contains("`r")) { throw 'Invalid WSL path.' }
-    return $converted
+function Assert-WindowsExecutable([string]$Path) {
+    $stream = [IO.File]::OpenRead($Path)
+    $reader = New-Object IO.BinaryReader($stream)
+    try {
+        if ($stream.Length -lt 64 -or $reader.ReadUInt16() -ne 0x5A4D) { throw 'Executable must be x64 PE32+.' }
+        $stream.Position = 60; $offset = $reader.ReadUInt32()
+        if ($offset -lt 64 -or $offset -gt $stream.Length - 26) { throw 'Invalid PE header offset.' }
+        $stream.Position = $offset
+        if ($reader.ReadUInt32() -ne 0x4550 -or $reader.ReadUInt16() -ne 0x8664) { throw 'Executable must be x64 PE32+.' }
+        $stream.Position = $offset + 24
+        if ($reader.ReadUInt16() -ne 0x20B) { throw 'Executable must be x64 PE32+.' }
+    } finally { $reader.Dispose(); $stream.Dispose() }
 }
+function Remove-InstallTree([string]$Path, [string]$Parent) {
+    $resolved = [IO.Path]::GetFullPath($Path)
+    $base = [IO.Path]::GetFullPath($Parent).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    if (-not $resolved.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) { throw 'Cleanup path escaped installation staging.' }
+    Remove-Item -LiteralPath $resolved -Recurse -Force
+}
+
 function Expand-SafeZip([string]$Path, [string]$Destination) {
     $zip = [IO.Compression.ZipFile]::OpenRead($Path)
     try {
@@ -321,7 +330,7 @@ function Expand-SafeZip([string]$Path, [string]$Destination) {
             if ($seen.ContainsKey($key)) { throw "Duplicate archive path: $name" }
             $seen[$key] = $true
         }
-        foreach ($required in @('polycode.ps1', 'integrations/launch.ps1', 'integrations/native-provider/launch.mjs', 'LICENSE', 'THIRD-PARTY-NOTICES', 'third-party/BUN-LICENSE.md', 'third-party/dependencies.json', 'release-manifest.json')) {
+        foreach ($required in @('polycode.ps1', 'integrations/launch.ps1', 'integrations/windows-process.ps1', 'integrations/native-provider/launch.mjs', 'LICENSE', 'THIRD-PARTY-NOTICES', 'third-party/BUN-LICENSE.md', 'third-party/dependencies.json', 'release-manifest.json')) {
             if (-not $seen.ContainsKey($required)) { throw "Incomplete runtime archive: $required" }
         }
     } finally { $zip.Dispose() }
@@ -339,15 +348,8 @@ function Expand-Gzip([string]$Path, [string]$Destination) {
 }
 try {
     if ($root -match '[;\r\n]') { throw 'InstallRoot cannot contain semicolons or newlines (PATH safety).' }
-    if ((Wsl @('uname', '-m')) -ne 'x86_64') { throw 'This release supports WSL x86_64 only.' }
-    $glibc = Wsl @('getconf', 'GNU_LIBC_VERSION')
-    if ($glibc -notmatch '^glibc (\d+\.\d+)(?:\D|$)' -or [version]$Matches[1] -lt [version]'2.43') { throw 'This binary requires glibc >= 2.43. Older Ubuntu distros are not supported by this release.' }
-    if (-not $LinuxRoot) {
-        $homePath = Wsl @('printenv', 'HOME')
-        $LinuxRoot = "$homePath/.local/share/polycode"
-    }
-    if (-not $LinuxRoot.StartsWith('/') -or $LinuxRoot -match '[\r\n]' -or $LinuxRoot.TrimEnd('/') -eq '') { throw 'LinuxRoot must be a non-root absolute WSL directory.' }
-    $binaryDir = $LinuxRoot.TrimEnd('/') + '/' + $id
+    if ($env:OS -ne 'Windows_NT' -or -not [Environment]::Is64BitOperatingSystem -or $env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') { throw 'This release supports Windows x64 only.' }
+    if ([Environment]::OSVersion.Version.Build -lt 19045) { throw 'Windows 10 22H2 or Windows 11 is required.' }
     New-Item -ItemType Directory -Path $temp | Out-Null
     $base = "https://github.com/Miku0139oao/Polycode/releases/download/$Version"
     if (-not $ArtifactDirectory) {
@@ -382,12 +384,11 @@ try {
     $outer = Read-JsonObject (Join-Path $temp 'manifest.json')
     Assert-CandidateManifest $manifest $false
     Assert-CandidateManifest $outer $true
-    if ($manifest.version -ne $Version -or $manifest.architecture -ne 'x86_64' -or $manifest.minimumGlibc -ne '2.43' -or $manifest.protocol -ne 'native-model-bridge') { throw 'Runtime release manifest does not match the requested native release.' }
-    $immutable = $manifest.schemaVersion -eq 2 -and $manifest.classification -ceq 'immutable-candidate' -and $manifest.PSObject.Properties.Name -notcontains 'status'
-    $legacyLocal = $ArtifactDirectory -and $manifest.schemaVersion -eq 1 -and $manifest.status -ceq 'unpublished-candidate'
-    if (-not $immutable -and -not $legacyLocal) { throw 'Unknown or relabeled candidate classification.' }
-    if ($outer.schemaVersion -ne $manifest.schemaVersion -or
-        ($manifest.schemaVersion -eq 2 -and ($outer.classification -cne $manifest.classification -or $outer.PSObject.Properties.Name -contains 'status')) -or
+    if ($manifest.version -ne $Version -or $manifest.architecture -ne 'x86_64' -or $manifest.platform -cne 'windows' -or $manifest.target -cne 'x86_64-pc-windows-msvc' -or $manifest.executableFormat -cne 'PE32+' -or $manifest.protocol -ne 'native-model-bridge') { throw 'Runtime release manifest does not match the requested native release.' }
+    $immutable = $manifest.schemaVersion -eq 3 -and $manifest.classification -ceq 'immutable-candidate' -and $manifest.PSObject.Properties.Name -notcontains 'status'
+    if (-not $immutable) { throw 'Unknown or relabeled candidate classification.' }
+    if ($outer.version -cne $manifest.version -or $outer.target -cne $manifest.target -or $outer.platform -cne $manifest.platform -or $outer.executableFormat -cne $manifest.executableFormat -or $outer.architecture -cne $manifest.architecture -or $outer.protocol -cne $manifest.protocol -or $outer.schemaVersion -ne $manifest.schemaVersion -or
+        ($manifest.schemaVersion -eq 3 -and ($outer.classification -cne $manifest.classification -or $outer.PSObject.Properties.Name -contains 'status')) -or
         ($manifest.schemaVersion -eq 1 -and $outer.status -cne $manifest.status) -or
         $outer.native.sha256 -cne $manifest.native.sha256 -or $outer.bun.sha256 -cne $manifest.bun.sha256) { throw 'Candidate manifest identity mismatch.' }
     if ($ArtifactDirectory -or $GitHubCandidate) {
@@ -412,32 +413,31 @@ try {
             Copy-Item -LiteralPath (Join-Path $temp $sidecar) -Destination (Join-Path $runtimeStage $sidecar)
         }
     }
-    # Never overwrite even the same version: both filesystems use a fresh release ID.
-    Wsl @('mkdir', '-p', '--', $LinuxRoot) | Out-Null
-    Wsl @('mkdir', '--', $binaryDir) | Out-Null
-    $linuxCreated = $true
-    foreach ($item in @(@{ name = 'polycode'; archive = $assets[0] }, @{ name = 'bun'; archive = $assets[1] })) {
-        $file = Join-Path $temp $item.name
+    # Executables live with the runtime in one versioned Windows directory.
+    foreach ($item in @(@{ name = 'polycode.exe'; archive = $assets[0] }, @{ name = 'bun.exe'; archive = $assets[1] })) {
+        $file = Join-Path $runtimeStage $item.name
+        if (Test-Path -LiteralPath $file) { throw 'Executable must not be embedded in runtime ZIP.' }
         Expand-Gzip (Join-Path $temp $item.archive) $file
-        $expected = $(if ($item.name -eq 'polycode') { $manifest.native } else { $manifest.bun })
-        if ($expected.sha256 -notmatch '^[a-f0-9]{64}$' -or (Get-Sha256 $file) -ne $expected.sha256 -or (Get-Item -LiteralPath $file).Length -ne $expected.bytes) { throw "Decompressed executable integrity mismatch: $($item.name)" }
-        $header = [IO.File]::OpenRead($file)
-        try { $magic = New-Object byte[] 20; if ($header.Read($magic, 0, 20) -ne 20 -or [BitConverter]::ToString($magic[0..5]) -ne '7F-45-4C-46-02-01' -or [BitConverter]::ToUInt16($magic, 18) -ne 62) { throw 'Executable must be x86_64 little-endian ELF.' } } finally { $header.Dispose() }
-        Wsl @('install', '-m', '755', '--', (LinuxPath $file), "$binaryDir/$($item.name)") | Out-Null
+        $expected = $(if ($item.name -eq 'polycode.exe') { $manifest.native } else { $manifest.bun })
+        if ((Get-Sha256 $file) -cne $expected.sha256 -or (Get-Item -LiteralPath $file).Length -ne $expected.bytes) { throw 'Decompressed executable integrity mismatch.' }
+        Assert-WindowsExecutable $file
     }
-    $help = Wsl @('timeout', '30', "$binaryDir/polycode", '--help')
+    $help = Invoke-Native (Join-Path $runtimeStage 'polycode.exe') @('--help')
     foreach ($flag in @('--no-external-acp', '--polycode-native', '--polycode-provider')) {
-        if (-not $help.Contains($flag)) { throw "Not a native Polycode binary: missing $flag. The old prototype cannot be installed as v0.2.0." }
+        if (-not $help.Contains($flag)) { throw "Not a native Polycode binary: missing $flag." }
     }
-    if ((Wsl @('timeout', '30', "$binaryDir/bun", '--version')) -ne $manifest.bun.version) { throw 'Installed Bun version mismatch.' }
-    # Load the complete bundle with the shipped Bun without starting the service,
-    # signing in, launching a browser, or executing the TUI.
-    Wsl @('timeout', '30', "$binaryDir/bun", '-e', 'const entry=process.argv[1]; process.argv[1]="polycode-install-check"; await import(entry)', (LinuxPath (Join-Path $runtimeStage 'integrations/native-provider/launch.mjs'))) | Out-Null
-    @{ binary = "$binaryDir/polycode"; runtime = "$binaryDir/bun"; distro = $Distro; version = $Version } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $runtimeStage 'install-config.json') -Encoding UTF8
+    if ((Invoke-Native (Join-Path $runtimeStage 'bun.exe') @('--version')) -cne $manifest.bun.version) { throw 'Installed Bun version mismatch.' }
+    Invoke-Native (Join-Path $runtimeStage 'bun.exe') @('-e', 'const entry=process.argv[1]; process.argv[1]="polycode-install-check"; await import(entry)', (Join-Path $runtimeStage 'integrations/native-provider/launch.mjs')) | Out-Null
+    if (Test-Path -LiteralPath (Join-Path $runtimeStage 'install-config.json')) { throw 'Install config must not be embedded in runtime ZIP.' }
+    @{ schemaVersion = 1; platform = 'windows'; binary = (Join-Path $release 'polycode.exe'); runtime = (Join-Path $release 'bun.exe'); version = $Version } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $runtimeStage 'install-config.json') -Encoding UTF8
     New-Item -ItemType Directory -Force -Path (Split-Path $release) | Out-Null
     New-Item -ItemType Directory -Path $release | Out-Null
     $releaseCreated = $true
     Get-ChildItem -LiteralPath $runtimeStage -Force | Copy-Item -Destination $release -Recurse -Force
+    # Check the relocated, installed entrypoint before replacing any launcher.
+    $entryHelp = Invoke-Native (Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe') @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $release 'polycode.ps1'), '-Project', $release, '--', '--help')
+    if (-not $entryHelp.Contains('--polycode-native')) { throw 'Installed entrypoint check failed.' }
+
     if (-not $StageOnly) {
         New-Item -ItemType Directory -Force -Path $bin | Out-Null
         @('@echo off', 'setlocal DisableDelayedExpansion', ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\releases\' + $id + '\polycode.ps1" %*'), 'exit /b %errorlevel%') | Set-Content -LiteralPath $newShim -Encoding ASCII
@@ -476,14 +476,13 @@ try {
             }
         }
         if ($launcherRestored) {
-            if ($releaseCreated) { try { Remove-Item -LiteralPath $release -Recurse -Force } catch { Write-Warning "Could not remove failed release: $_" } }
-            if ($linuxCreated) { try { Wsl @('rm', '-rf', '--', $binaryDir) | Out-Null } catch { Write-Warning "Could not remove failed WSL release: $_" } }
+            if ($releaseCreated) { try { Remove-InstallTree $release $root } catch { Write-Warning "Could not remove failed release: $_" } }
         }
     }
     $cleanup = @($newShim, $temp)
     if ($committed -or $launcherRestored) { $cleanup += $backup }
     foreach ($file in $cleanup) {
-        try { if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Recurse -Force } }
+        try { if (Test-Path -LiteralPath $file) { Remove-InstallTree $file $(if ($file -eq $temp) { [IO.Path]::GetTempPath() } else { $root }) } }
         catch { Write-Warning "Could not remove installer temporary path ${file}: $_" }
     }
 }

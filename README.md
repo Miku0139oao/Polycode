@@ -16,14 +16,16 @@ selection in the same TUI**, while retaining Grok's native agent engine, tools,
 MCP, permissions, sessions, and features. It is not an official xAI, OpenAI,
 or Cursor release.
 
-**The v0.2.0 Windows installation recommendation is withdrawn.**
-The published [v0.2.0 prerelease](https://github.com/Miku0139oao/Polycode/releases/tag/v0.2.0)
-launches through WSL and has user-reported failures across Grok, ChatGPT and Cursor.
-Do not treat it as a working Windows-native release. A Windows-native replacement
-is under validation in [PR #1](https://github.com/Miku0139oao/Polycode/pull/1);
-real-provider and clean-Windows acceptance is not complete.
+**Windows native candidate under validation; no usable public installer is advertised yet.**
+**The v0.2.0 WSL installation recommendation is withdrawn.**
+The published v0.2.0 WSL candidate has user-reported failures across all providers.
+Historical development-binary results do not establish that package or the new Windows build.
 
-[Install](#installation-status) ·
+The earlier external-ACP prototype (`d549db3`) replaced the agent and does **not**
+meet this architecture. Its passing tests and live logins are historical evidence,
+not proof of native completion.
+
+[Install](#install-polycode-windows-native) ·
 [Provider selection and limitations](integrations/README.md) ·
 [Verification status](integrations/VERIFICATION.md)
 
@@ -33,7 +35,7 @@ commands, searches the web, and manages long-running tasks — interactively,
 headlessly for scripting/CI, or embedded in editors via the Agent Client
 Protocol (ACP).
 
-[Install Polycode](#installation-status) ·
+[Install Polycode](#install-polycode-windows-native) ·
 [Building from source](#building-from-source) ·
 [Documentation](#documentation) ·
 [Repository layout](#repository-layout) ·
@@ -53,22 +55,45 @@ integration or release status.
 
 ---
 
-## Installation status
+## Install Polycode (Windows native)
 
-**There is currently no supported public Windows installation command.**
-The previous one-command installer selects the historical WSL-based v0.2.0
-candidate. Its Windows installation recommendation is withdrawn because that
-package requires WSL and users have reported failures with every provider.
+**Not ready for public installation.** Do not use the old v0.2.0 WSL candidate as
+the Windows installation target. Its reported provider failures remain under
+investigation; Linux development tests are not acceptance of that package.
 
-Windows-native Polycode is the replacement target: a Windows x64 executable
-and Windows runtime, with no WSL requirement. The candidate is being validated
-in [PR #1](https://github.com/Miku0139oao/Polycode/pull/1). Local build or mock-test
-success does not establish real login, generation, or clean-Windows acceptance.
-An install command will be restored after the replacement is accepted.
+The Windows candidate targets Windows 10 22H2 / Windows 11 x64 and PowerShell
+5.1 / 7. It bundles the MSVC native TUI and Windows Bun and directly starts Windows
+processes. WSL, Rust, Node, a separate Bun installation and external provider CLIs
+are not required. ARM64 is not a supported native target for this candidate.
 
-Existing v0.2.0 assets and older integration documents are historical development
-material, not a current installation recommendation. See the
-[known issues in the v0.2.0 release notes](https://github.com/Miku0139oao/Polycode/releases/tag/v0.2.0).
+For developer verification of a locally built candidate:
+
+```powershell
+.\install.ps1 -ArtifactDirectory D:\candidate-out -AllowCandidate -InstallRoot D:\polycode-test -NoPath
+D:\polycode-test\bin\polycode.cmd -Project D:\my-project
+```
+
+`-StageOnly` verifies a new version directory without replacing the active
+launcher or changing PATH. `-NoPath` preserves both process and user PATH.
+Installation failures restore the previous entrypoint; successful upgrades
+retain old version directories.
+
+Windows provider credentials live in `%LOCALAPPDATA%\Polycode\auth`, outside
+version directories. Use launcher option `-AuthDirectory D:\isolated-auth` for
+isolated verification. Log in through the TUI; WSL tokens/sessions are not imported.
+
+The Windows workflow builds downloadable Actions artifacts first. Publishing
+uses the same accepted bytes and requires evidence for clean Windows 10/11
+installs, all three real provider logins/generations, coding, resume, and targeted
+Task/MCP/billing regression. Mock Grok responses cannot satisfy real generation.
+
+No real paid Grok requests are currently authorized. Until test quota becomes
+available and every gate passes, no new prerelease or local activation occurs.
+Stable release authorization remains separate.
+
+See [Windows validation](integrations/WINDOWS_VALIDATION.md). Linux/WSL source
+development can use the explicit Bun bridge CLI; it is not the default Windows
+installation path.
 
 ## Building from source
 
