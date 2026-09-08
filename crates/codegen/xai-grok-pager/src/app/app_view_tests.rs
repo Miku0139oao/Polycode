@@ -1670,7 +1670,10 @@ fn assert_tier_restricted_commands_absent(app: &AppView) {
             "/{name} must be denied on a restricted tier"
         );
     }
-    assert!(reg.get("cost").is_none(), "/cost alias must be denied");
+    for name in ["usage", "cost"] {
+        assert!(reg.get(name).is_some(), "/{name} must remain available");
+        assert!(!reg.is_restricted(name), "/{name} must not trigger an upsell");
+    }
 }
 fn assert_tier_restricted_commands_present(app: &AppView) {
     let reg = app.welcome_prompt.slash_controller.registry();
@@ -1682,7 +1685,7 @@ fn assert_tier_restricted_commands_present(app: &AppView) {
     }
 }
 #[test]
-fn apply_auth_meta_restricts_usage_for_free_tier() {
+fn apply_auth_meta_keeps_usage_for_free_tier() {
     let mut app = test_app();
     advertise_media_tools(&mut app);
     app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
@@ -1694,7 +1697,7 @@ fn apply_auth_meta_restricts_usage_for_free_tier() {
     assert!(app.usage_visible);
 }
 #[test]
-fn apply_auth_meta_restricts_usage_for_x_basic_tier() {
+fn apply_auth_meta_keeps_usage_for_x_basic_tier() {
     let mut app = test_app();
     advertise_media_tools(&mut app);
     let meta = xai_grok_shell::auth::AuthMeta {

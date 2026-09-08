@@ -628,7 +628,7 @@ pub(super) async fn run_auth_flow_steps(
         "auth: no OAuth2 configuration available (neither enterprise OIDC nor xAI OAuth2 configured)"
     );
     anyhow::bail!(
-        "No OAuth2 configuration available. Run `grok login` to authenticate, or contact your administrator if you use enterprise SSO."
+        "No OAuth2 configuration available. Run `polycode login` to authenticate, or contact your administrator if you use enterprise SSO."
     )
 }
 /// Non-interactive auth refresh: returns valid credentials if available without ever triggering interactive login (browser, device code, etc.).
@@ -815,7 +815,7 @@ pub async fn ensure_authenticated_or_noninteractive(
             .map(Some)
     }
 }
-/// Unified `grok login` handler for CLI entry points (tui, pager).
+/// Unified `polycode login` handler for CLI entry points (tui, pager).
 ///
 /// Precedence: `--oauth` forces loopback, `--device-auth` forces device.
 /// Otherwise `GROK_LOGIN_DEVICE_FLOW` env, then `[auth] login_device_flow` config, then the loopback default.
@@ -892,7 +892,7 @@ async fn run_cli_login_steps(
 }
 /// Sync this principal's config now rather than waiting for the background tick.
 /// Stay quiet about absence or failure during login; confirm only when config was actually applied.
-/// `grok setup` reports the no-config case.
+/// `polycode setup` reports the no-config case.
 pub(crate) async fn apply_post_login_config(authenticated: GrokAuth) -> anyhow::Result<()> {
     let outcome = crate::managed_config::post_login_sync(Some(authenticated)).await;
     match outcome {
@@ -904,7 +904,7 @@ pub(crate) async fn apply_post_login_config(authenticated: GrokAuth) -> anyhow::
         }
         crate::managed_config::ManagedConfigSync::Staged => {
             eprintln!(
-                "Managed configuration update verified; it takes effect the next time Grok starts."
+                "Managed configuration update verified; it takes effect the next time Polycode starts."
             );
         }
         _ => {}
@@ -1776,7 +1776,7 @@ mod tests {
         );
         assert_eq!(extract("some opaque output"), "some opaque output");
     }
-    /// CLI `grok login` passes `on_stderr=None`; stderr must be inherited so sign-in URLs appear in real time.
+    /// CLI `polycode login` passes `on_stderr=None`; stderr must be inherited so sign-in URLs appear in real time.
     /// Piped stderr with no reader deadlocks once the child writes past the pipe buffer (~64 KiB).
     #[tokio::test]
     async fn external_provider_cli_path_does_not_deadlock_on_large_stderr() {

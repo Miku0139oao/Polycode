@@ -20,6 +20,7 @@ pub mod effort_levels;
 pub mod exit;
 pub mod expand;
 pub mod export;
+pub mod fast;
 pub mod feedback;
 pub mod find;
 pub mod fork;
@@ -86,6 +87,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(new::NewCommand),
         // Per turn.
         Arc::new(effort::EffortCommand),
+        Arc::new(fast::FastCommand),
         Arc::new(model::ModelCommand),
         Arc::new(provider::ProviderCommand),
         Arc::new(context::ContextCommand),
@@ -539,7 +541,7 @@ mod tests {
         assert!(matches!(run_usage("delete", true), CommandResult::Error(_)));
     }
     #[test]
-    fn usage_non_consumer_is_bare_only() {
+    fn usage_non_consumer_can_show_but_not_manage() {
         assert!(matches!(
             run_usage("", false),
             CommandResult::Action(Action::ShowUsage)
@@ -548,7 +550,10 @@ mod tests {
             run_usage("manage", false),
             CommandResult::Error(_)
         ));
-        assert!(matches!(run_usage("show", false), CommandResult::Error(_)));
+        assert!(matches!(
+            run_usage("show", false),
+            CommandResult::Action(Action::ShowUsage)
+        ));
     }
     #[test]
     fn usage_takes_args_only_for_consumer() {
@@ -602,7 +607,7 @@ mod tests {
         );
     }
     #[test]
-    fn usage_hidden_when_command_not_visible() {
+    fn usage_external_auth_keeps_session_usage_without_billing() {
         let models = ModelState::default();
         let ctx = crate::slash::command::AppCtx {
             models: &models,
@@ -616,12 +621,18 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
-        assert!(!usage::UsageCommand.visible(&ctx));
+        assert!(usage::UsageCommand.visible(&ctx));
         assert!(!usage::UsageCommand.takes_args_now(&ctx));
         assert!(usage::UsageCommand.suggest_args(&ctx, "").is_none());
+        for arg in ["", "show", "  show  "] {
+            assert!(matches!(
+                run_usage_gated(arg, true, false),
+                CommandResult::Action(Action::ShowUsage)
+            ));
+        }
         assert!(matches!(
-            run_usage_gated("", true, false),
-            CommandResult::Error(msg) if msg.contains("not available")
+            run_usage_gated("manage", true, false),
+            CommandResult::Error(_)
         ));
     }
     #[test]

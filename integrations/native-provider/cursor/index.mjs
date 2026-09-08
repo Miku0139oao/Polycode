@@ -124,11 +124,15 @@ export function createCursorProvider({
   maxPollAttempts = 150,
   loginTimeoutMs = 10 * 60 * 1000,
   requestTimeoutMs = 30000,
-  sessionTtlMs = 2 * 60 * 1000,
-  maxSessionMs = 15 * 60 * 1000,
+  sessionTtlMs = 2 * 60 * 1000, // Remote-reader idle/backpressure timeout, not native execution time.
+  parkedToolTimeoutMs = 10 * 60 * 60 * 1000 + 5 * 60 * 1000, // Native tools allow 10h; reserve 5m for result delivery.
+  maxSessionMs = 24 * 60 * 60 * 1000, // Hard abandonment bound across all tool rounds.
   maxSessions = 16,
+  setTimeoutImpl = setTimeout,
+  clearTimeoutImpl = clearTimeout,
 } = {}) {
-  for (const n of [pollIntervalMs, maxPollAttempts, loginTimeoutMs, requestTimeoutMs, sessionTtlMs, maxSessionMs, maxSessions]) {
+  if (typeof setTimeoutImpl !== 'function' || typeof clearTimeoutImpl !== 'function') throw invalid();
+  for (const n of [pollIntervalMs, maxPollAttempts, loginTimeoutMs, requestTimeoutMs, sessionTtlMs, parkedToolTimeoutMs, maxSessionMs, maxSessions]) {
     if (!Number.isSafeInteger(n) || n <= 0 || n > 2147483647) throw invalid();
   }
   let closed = false;
@@ -142,13 +146,13 @@ export function createCursorProvider({
     live(signal);
     const controller = new AbortController();
     const off = onAbort(signal, () => controller.abort());
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeoutImpl(() => controller.abort(), timeoutMs);
     operations.add(controller);
-    return { controller, signal: controller.signal, finish() { clearTimeout(timer); off(); operations.delete(controller); } };
+    return { controller, signal: controller.signal, finish() { clearTimeoutImpl(timer); off(); operations.delete(controller); } };
   }
   function drop(session) {
-    clearTimeout(session.timer);
-    clearTimeout(session.maxTimer);
+    clearTimeoutImpl(session.timer);
+    clearTimeoutImpl(session.maxTimer);
     session.off?.();
     sessions.delete(session);
     session.controller.abort();
@@ -156,9 +160,9 @@ export function createCursorProvider({
     session.base = undefined;
     session.expected = undefined;
   }
-  function touch(session) {
-    clearTimeout(session.timer);
-    session.timer = setTimeout(() => drop(session), sessionTtlMs);
+  function touch(session, timeoutMs = sessionTtlMs) {
+    clearTimeoutImpl(session.timer);
+    session.timer = setTimeoutImpl(() => drop(session), timeoutMs);
     session.timer.unref?.();
   }
   async function authResult(response, signal, oldRefresh) {
@@ -240,7 +244,16 @@ export function createCursorProvider({
       // Establish unique ownership before configuration: a changed choice/model must not select
       // another parked connection whose backend happened to reuse the exact assistant call.
       const matches = [...sessions].filter(s => s.account === account && s.base === prefix && s.expected && assistantMatches(body.messages.at(-2), s.expected, body.model) && last.tool_call_id === s.pending.toolCallId);
-      if (matches.length !== 1 || matches[0].config !== config) throw fail('continuation_mismatch', 'No unique matching live Cursor tool call for this credential, transcript and configuration. Do not replay; restart explicitly.', 409);
+      if (matches.length !== 1 || matches[0].config !== config) {
+        // Diagnostic candidates never authorize submission or select a connection.
+        const pending = [...sessions].filter(s => s.account === account && s.pending?.toolCallId === last.tool_call_id);
+        const reason = matches.length > 1 || pending.length > 1 ? 'Multiple live Cursor calls match this result.'
+          : pending.length === 0 ? 'No live Cursor call owns this result; the turn may have expired or been closed.'
+          : pending[0].config !== config ? 'Cursor configuration changed while a native tool call was pending.'
+          : pending[0].base !== prefix ? 'Cursor transcript changed while a native tool call was pending (for example, compaction or context injection).'
+          : 'The native assistant message differs from the pending Cursor call.';
+        throw fail('continuation_mismatch', `${reason} Do not replay; restart explicitly.`, 409);
+      }
       session = matches[0];
       if (session.busy) throw fail('session_busy', 'Cursor continuation is already in progress.', 409);
       session.busy = true; // Reserve before the first await; duplicate results can never be submitted twice.
@@ -251,7 +264,7 @@ export function createCursorProvider({
       session = { account, config, base, busy: true, controller: new AbortController(),
         seen: new Set(body.messages.flatMap(m => (m.tool_calls ?? []).map(c => c.id))) };
       sessions.add(session);
-      session.maxTimer = setTimeout(() => drop(session), maxSessionMs);
+      session.maxTimer = setTimeoutImpl(() => drop(session), maxSessionMs);
       session.maxTimer.unref?.();
     }
     session.off = onAbort(signal, () => drop(session));
@@ -330,7 +343,7 @@ export function createCursorProvider({
         // A completed HTTP response no longer owns cancellation of a parked remote turn.
         session.off?.(); session.off = undefined;
         if (sessions.has(session)) {
-          if (session.pending) touch(session);
+          if (session.pending) touch(session, parkedToolTimeoutMs);
           else drop(session); // A remote text completion no longer needs its connection.
         }
       }

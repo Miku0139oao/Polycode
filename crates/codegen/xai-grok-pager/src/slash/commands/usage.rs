@@ -2,7 +2,7 @@
 //! Only native Grok consumer accounts can open native xAI billing here.
 //!
 //! External-auth deployments (`auth_provider_command`) never reach grok.com billing.
-//! [`AppCtx::usage_command_visible`] hides and refuses the command there.
+//! Session usage remains available independently of billing and model registration.
 
 use crate::app::actions::Action;
 use crate::slash::command::{
@@ -91,12 +91,8 @@ impl SlashCommand for UsageCommand {
         takes_args: true,
     }
 
-    fn visible(&self, ctx: &AppCtx) -> bool {
-        ctx.usage_command_visible
-            || matches!(
-                UsageProvider::for_models(ctx.models),
-                UsageProvider::Subscription(_)
-            )
+    fn visible(&self, _ctx: &AppCtx) -> bool {
+        true
     }
 
     fn takes_args_now(&self, ctx: &AppCtx) -> bool {
@@ -131,18 +127,12 @@ impl SlashCommand for UsageCommand {
 
     fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         let provider = UsageProvider::for_models(ctx.models);
-        if !ctx.usage_command_visible && !matches!(provider, UsageProvider::Subscription(_)) {
-            return CommandResult::Error("/usage is not available.".into());
-        }
         let arg = args.trim();
-        if !provider.permits_native_billing() {
+        if !provider.permits_native_billing()
+            || !ctx.usage_command_visible
+            || !ctx.billing_surface_visible
+        {
             return non_native_usage(arg);
-        }
-        if !ctx.billing_surface_visible {
-            return match arg {
-                "" => CommandResult::Action(Action::ShowUsage),
-                _ => CommandResult::Error(format!("Unknown argument: {arg}. Use /usage")),
-            };
         }
         match arg {
             "" | "show" => CommandResult::Action(Action::ShowUsage),

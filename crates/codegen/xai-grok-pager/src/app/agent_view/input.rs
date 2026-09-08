@@ -2499,6 +2499,55 @@ mod plan_approval_model_handoff_tests {
     use crossterm::event::Event;
     use std::sync::Arc;
     #[test]
+    fn model_picker_types_cross_provider_ids_and_preserves_draft() {
+        use crate::app::actions::Action;
+        use crate::app::app_view::InputOutcome;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut agent = make_agent();
+        for provider in ["codex", "cursor"] {
+            let id = acp::ModelId::new(format!("{provider}/gpt-5.5"));
+            agent.session.models.available.insert(
+                id.clone(),
+                acp::ModelInfo::new(id, "GPT 5.5".to_string()),
+            );
+        }
+        agent.prompt.set_text("keep this draft");
+        agent.plan_approval_view = Some(make_plan_approval_view_state());
+        agent.reopen_plan_approval();
+        let reg = ActionRegistry::defaults();
+        agent.handle_input(&Event::Key(key!('m', CONTROL).to_key_event()), &reg);
+        for ch in "gpt-5.5".chars() {
+            agent.handle_input(
+                &Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+                &reg,
+            );
+        }
+        assert!(matches!(
+            &agent.active_modal,
+            Some(ActiveModal::ArgPicker { items, .. }) if items.len() == 2
+        ));
+        for _ in 0..7 {
+            agent.handle_input(&Event::Key(key!(Backspace).to_key_event()), &reg);
+        }
+        agent.handle_input(&Event::Paste("cursor/gpt-5.5".into()), &reg);
+        assert!(matches!(
+            &agent.active_modal,
+            Some(ActiveModal::ArgPicker { items, .. })
+                if items.len() == 1 && items[0].insert_text == "cursor/gpt-5.5"
+        ));
+        let outcome = agent.handle_input(&Event::Key(key!(Enter).to_key_event()), &reg);
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::SendSlashCommandPreservingDraft(command))
+                if command == "/model cursor/gpt-5.5"
+        ));
+        assert_eq!(agent.prompt.text(), "keep this draft");
+        assert!(agent.active_modal.is_none());
+        assert!(agent.plan_approval_view.is_some());
+    }
+
+    #[test]
     fn model_picker_during_plan_approval() {
         let mut agent = make_agent();
         let id = acp::ModelId::new(Arc::from("test-model"));

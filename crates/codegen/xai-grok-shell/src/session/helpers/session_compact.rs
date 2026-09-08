@@ -493,8 +493,10 @@ pub(crate) async fn generate_session_compact(
             let chat_messages: Vec<ChatRequestMessage> =
                 conversation_to_chat_messages(chat_history);
             let mut message =
-                ChatCompletionRequest::new(sampling_config.model.to_owned(), chat_messages)
-                    .with_temperature(1.0);
+                ChatCompletionRequest::new(sampling_config.model.to_owned(), chat_messages);
+            if let Some(temperature) = sampling_config.temperature {
+                message = message.with_temperature(temperature);
+            }
             // Prefix-cache alignment (see doc comment)
             // `tool_choice` is set only when tools are present; Chat Completions rejects it otherwise
             if !tools.is_empty() {
@@ -603,7 +605,7 @@ pub(crate) async fn generate_session_compact(
                 tools,
                 hosted_tools,
                 model: Some(sampling_config.model.to_owned()),
-                temperature: Some(1.0),
+                temperature: sampling_config.temperature,
                 x_grok_conv_id: Some(session_id.to_string()),
                 x_grok_req_id: Some(format!("xai-compact-{}", uuid::Uuid::new_v4())),
                 x_grok_session_id: Some(session_id.to_string()),
@@ -726,7 +728,7 @@ pub(crate) async fn generate_session_compact(
                 tools,
                 hosted_tools,
                 model: Some(sampling_config.model.to_owned()),
-                temperature: Some(1.0),
+                temperature: sampling_config.temperature,
                 x_grok_conv_id: Some(session_id.to_string()),
                 x_grok_req_id: Some(format!("xai-compact-{}", uuid::Uuid::new_v4())),
                 x_grok_session_id: Some(session_id.to_string()),

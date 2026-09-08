@@ -245,6 +245,16 @@ impl Bridge {
         // Do not echo response bytes, URLs, reqwest errors, or parser errors to logs.
         serde_json::from_slice(&bytes).map_err(|_| "Invalid bridge response".into())
     }
+    pub(crate) async fn fast_supported(&self, id: &str) -> Result<bool, String> {
+        let (provider, model) = id.split_once('/').ok_or("Invalid subscription model")?;
+        let result: serde_json::Value = self.request(
+            Method::POST,
+            "control/fast-capability",
+            Some(serde_json::json!({"provider": provider, "model": model})),
+        ).await?;
+        result.get("supported").and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| "Invalid fast capability response".to_owned())
+    }
     pub fn catalog(&self) -> Catalog {
         self.catalog.read().expect("bridge catalog").clone()
     }

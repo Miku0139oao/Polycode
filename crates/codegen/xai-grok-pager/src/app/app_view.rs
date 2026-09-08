@@ -542,13 +542,12 @@ fn parse_esc_ttl(raw: Option<String>) -> Duration {
 /// Matching covers aliases automatically via [`crate::slash::registry::CommandRegistry::set_restricted_commands`].
 ///
 /// Current set:
-/// - `usage`: coding credit / billing UI (alias: `/cost`)
 /// - `imagine`: image generation entry point
 /// - `imagine-video`: video generation entry point
 /// - `voice`: voice dictation entry point.
 ///   The Ctrl+Space / F8 keybinding is gated separately in [`crate::app::dispatch::voice`], since it bypasses the slash registry.
 pub(crate) const TIER_RESTRICTED_COMMANDS: &[&str] =
-    &["usage", "imagine", "imagine-video", "voice"];
+    &["imagine", "imagine-video", "voice"];
 /// Whether a subscription-tier display name is a tier with restricted commands: the free tier and X Basic.
 /// Free covers no subscription (`None`) or an explicit "Free"; X Basic covers CCP display name "X Basic" with JWT claim fallback "x_basic".
 /// Everything else (paid tiers and unknown future names) is unrestricted (fail-open).

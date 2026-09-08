@@ -676,7 +676,7 @@ impl ActiveModal {
                 ..
             } => match command.as_str() {
                 "model" | "m" if !args_query.is_empty() => "Pick reasoning effort",
-                "model" | "m" => "Pick model",
+                "model" | "m" | "provider" => "Pick model",
                 "theme" | "t" => "Pick theme",
                 _ => "Pick option",
             },

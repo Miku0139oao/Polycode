@@ -424,6 +424,97 @@ fn test_config_responses(base_url: &str) -> SamplerConfig {
     config
 }
 
+async fn assert_compaction_temperature(api_backend: ApiBackend, temperature: Option<f32>) {
+    use std::sync::{Arc, Mutex};
+
+    let captured = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let cap = captured.clone();
+    let (path, summary_events): (&str, fn() -> Vec<Event>) = match api_backend {
+        ApiBackend::ChatCompletions => ("/v1/chat/completions", summary_stream),
+        ApiBackend::Responses => ("/v1/responses", responses_summary_stream),
+        ApiBackend::Messages => unreachable!(),
+    };
+    let app = Router::new().route(
+        path,
+        post(move |body: axum::Json<serde_json::Value>| {
+            let cap = cap.clone();
+            async move {
+                cap.lock().unwrap().push(body.0);
+                Sse::new(stream::iter(
+                    summary_events()
+                        .into_iter()
+                        .map(Ok::<_, std::convert::Infallible>),
+                ))
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    let mut config = test_config(&format!("http://{addr}/v1"));
+    config.api_backend = api_backend;
+    config.temperature = temperature;
+    let client = Client::new(config.clone()).unwrap();
+    let output = generate_session_compact(
+        vec![ConversationItem::user("Summarize the conversation so far.")],
+        0,
+        vec![],
+        vec![],
+        client,
+        acp::SessionId::new("test-temperature"),
+        &config,
+        std::time::Duration::from_secs(5),
+        0,
+        crate::util::config::CompactionToolChoice::Auto,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap_or_else(|err| panic!("compaction must succeed: {err:?}"));
+
+    let _ = shutdown_tx.send(());
+    server.await.unwrap();
+    assert_eq!(output.content, "<summary>ok</summary>");
+    let bodies = captured.lock().unwrap();
+    assert_eq!(bodies.len(), 1);
+    match temperature {
+        None => assert!(
+            bodies[0].get("temperature").is_none(),
+            "unset temperature must be absent, not null or a forced default: {}",
+            bodies[0]
+        ),
+        Some(expected) => assert_eq!(bodies[0]["temperature"], json!(expected)),
+    }
+}
+
+#[tokio::test]
+async fn chat_compaction_omits_unset_temperature() {
+    assert_compaction_temperature(ApiBackend::ChatCompletions, None).await;
+}
+
+#[tokio::test]
+async fn chat_compaction_preserves_explicit_temperature() {
+    assert_compaction_temperature(ApiBackend::ChatCompletions, Some(0.25)).await;
+}
+
+#[tokio::test]
+async fn responses_compaction_omits_unset_temperature() {
+    assert_compaction_temperature(ApiBackend::Responses, None).await;
+}
+
+#[tokio::test]
+async fn responses_compaction_preserves_explicit_temperature() {
+    assert_compaction_temperature(ApiBackend::Responses, Some(0.25)).await;
+}
+
 #[tokio::test]
 async fn responses_below_trigger_preserves_images_and_tools() {
     use std::sync::{Arc, Mutex};

@@ -335,6 +335,75 @@ test('sequential remote MCP requests across multiple native continuations retain
   assert.deepEqual(mock.appends.map(a => a.seq), [0, 1, 2, 3, 4]);
 });
 
+for (const stream of [false, true]) test(`native-normalized multi-round tools retain exact ownership (stream=${stream})`, async t => {
+  let completed = 0;
+  const mock = mockProtocol(c => c.send(execFrame({ callId: 'native-0' })), (c, record) => {
+    if (record.message[0].id !== 5) return;
+    completed++;
+    if (completed === 4) c.send(textFrame('finished'), doneFrame());
+    else c.send(textFrame(completed % 2 ? 'Working.\n' : ''), execFrame({ id: 7 + completed, callId: `native-${completed}` }));
+  });
+  const instance = provider(t, mock);
+  // conversation_item_to_chat_message emits string content and preserves argument bytes.
+  let request = body({ stream, messages: [{ role: 'system', content: 'Native policy' }, { role: 'user', content: 'Use tools' }] });
+  for (let round = 0; round < 4; round++) {
+    const response = await instance.complete(request, A);
+    assert.equal(response.status, 200);
+    let message;
+    if (stream) {
+      const events = await sse(response);
+      const deltas = events.flatMap(e => e.choices?.[0]?.delta ?? []);
+      message = { role: 'assistant', content: deltas.map(d => d.content ?? '').join(''),
+        tool_calls: deltas.flatMap(d => d.tool_calls ?? []).map(({ index, ...call }) => call) };
+    } else message = (await response.json()).choices[0].message;
+    // The native stream accumulator annotates every stored assistant with the response model.
+    message = { ...message, content: message.content ?? '', model_id: request.model };
+    assert.equal(message.tool_calls[0].id, `native-${round}`);
+    request = continuation(request, message, `result-${round}`);
+  }
+  const final = await instance.complete(request, A);
+  assert.equal(final.status, 200);
+  if (stream) assert.equal((await sse(final)).at(-2).choices[0].finish_reason, 'stop');
+  else assert.equal((await final.json()).choices[0].message.content, 'finished');
+  assert.equal(mock.connections.size, 1);
+  assert.deepEqual(mock.appends.map(r => r.seq), Array.from({ length: 9 }, (_, i) => i));
+  assert.deepEqual(mock.appends.filter(r => r.message[0].id === 2).map(decodeResult).map(r => r.content),
+    ['result-0', 'result-1', 'result-2', 'result-3']);
+  assert.equal((await instance.complete(request, A)).status, 409, 'Completed tools cannot be replayed');
+});
+
+for (const [label, mutate, diagnostic] of [
+  ['pruning', r => { r.messages[3].content = '[Tool result omitted — too old]'; }, /transcript changed/],
+  ['compaction', r => { r.messages.splice(1, 3, { role: 'user', content: 'Compacted summary' }); }, /transcript changed/],
+  ['memory injection', r => { r.messages[0].content += '\nUpdated memory'; }, /transcript changed/],
+  ['plan-mode definitions', r => { r.tools = []; }, /configuration changed/],
+  ['model', r => { r.model = 'changed-model'; }, /configuration changed/],
+  ['choice', r => { r.tool_choice = 'none'; }, /configuration changed/],
+  ['assistant mutation', r => { r.messages.at(-2).content += 'changed'; }, /assistant message differs/],
+]) test(`native ${label} between tool rounds fails closed without replay`, async t => {
+  const mock = mockProtocol(c => c.send(execFrame({ callId: 'round-1' })), (c, record) => {
+    if (record.message[0].id === 5) c.send(execFrame({ id: 8, callId: 'round-2' }));
+  });
+  const instance = provider(t, mock);
+  let request = body({ messages: [{ role: 'system', content: 'Policy' }, { role: 'user', content: 'Task' }] });
+  for (let round = 0; round < 2; round++) {
+    const response = await instance.complete(request, A);
+    assert.equal(response.status, 200);
+    const message = (await response.json()).choices[0].message;
+    request = continuation(request, { ...message, content: message.content ?? '', model_id: request.model });
+  }
+  const changed = structuredClone(request);
+  mutate(changed);
+  const response = await instance.complete(changed, A);
+  assert.equal(response.status, 409);
+  const error = (await response.json()).error;
+  assert.equal(error.code, 'continuation_mismatch');
+  assert.match(error.message, diagnostic);
+  assert.match(error.message, /Do not replay; restart explicitly/);
+  assert.equal(mock.connections.size, 1);
+  assert.deepEqual(mock.appends.map(r => r.seq), [0, 1, 2], 'No result, close, retry or replacement run');
+});
+
 test('concurrent duplicate initial requests and tool results cannot double submit', async t => {
   const mock = mockProtocol(c => c.send(execFrame()), async (c, record) => {
     if (record.message[0].id === 2) await sleep(10);
@@ -352,9 +421,103 @@ test('concurrent duplicate initial requests and tool results cannot double submi
   assert.deepEqual(mock.appends.map(a => a.seq), [0, 1, 2]);
 });
 
+function virtualTimers() {
+  let time = 0;
+  const timers = new Map();
+  return {
+    now: () => time,
+    setTimeoutImpl(fn, ms) { const id = { unref() {} }; timers.set(id, { at: time + ms, fn }); return id; },
+    clearTimeoutImpl(id) { timers.delete(id); },
+    async advance(ms) {
+      const end = time + ms;
+      for (;;) {
+        const next = [...timers].sort((a, b) => a[1].at - b[1].at)[0];
+        if (!next || next[1].at > end) break;
+        time = next[1].at;
+        timers.delete(next[0]);
+        next[1].fn();
+        await Promise.resolve();
+      }
+      time = end;
+      await Promise.resolve();
+    },
+    count: () => timers.size,
+  };
+}
+
+for (const stream of [false, true]) test(`long native tools survive idle and old absolute deadlines (stream=${stream})`, async t => {
+  const clock = virtualTimers();
+  let round = 0;
+  const mock = mockProtocol(c => c.send(execFrame({ callId: 'long-0' })), (c, record) => {
+    if (record.message[0].id === 5) c.send(execFrame({ id: 8 + round, callId: `long-${++round}` }));
+  });
+  const instance = provider(t, mock, { ...clock, maxSessions: 1 });
+  let request = body({ stream });
+  const pause = async () => {
+    const response = await instance.complete(request, A);
+    assert.equal(response.status, 200);
+    let message;
+    if (stream) {
+      const deltas = (await sse(response)).flatMap(e => e.choices?.[0]?.delta ?? []);
+      message = { role: 'assistant', content: '', tool_calls: deltas.flatMap(d => d.tool_calls ?? []).map(({ index, ...call }) => call) };
+    } else message = (await response.json()).choices[0].message;
+    request = continuation(request, { ...message, content: message.content ?? '', model_id: request.model });
+  };
+  await pause();
+  await clock.advance(121000);
+  assert.equal([...mock.connections.values()][0].cancelled, false);
+  await pause();
+  await clock.advance(16 * 60 * 1000);
+  await pause();
+  await clock.advance(10 * 60 * 60 * 1000);
+  await pause();
+  assert.equal(mock.connections.size, 1);
+  assert.deepEqual(mock.appends.map(r => r.seq), [0, 1, 2, 3, 4, 5, 6]);
+  assert.equal((await instance.complete(body({ messages: [{ role: 'user', content: 'Other task' }] }), A)).status, 429);
+  await clock.advance(10 * 60 * 60 * 1000 + 5 * 60 * 1000);
+  assert.equal([...mock.connections.values()][0].cancelled, true, 'Abandoned native wait remains bounded');
+  assert.equal((await instance.complete(request, A)).status, 409);
+  assert.equal(mock.appends.length, 7, 'Expired result is never replayed');
+  assert.equal(clock.count(), 0);
+});
+
+test('absolute lifecycle cap remains bounded even with repeated legitimate tool rounds', async t => {
+  const clock = virtualTimers();
+  let round = 0;
+  const mock = mockProtocol(c => c.send(execFrame({ callId: 'cap-0' })), (c, record) => {
+    if (record.message[0].id === 5) c.send(execFrame({ callId: `cap-${++round}` }));
+  });
+  const instance = provider(t, mock, clock);
+  let request = body();
+  for (let i = 0; i < 3; i++) {
+    const response = await instance.complete(request, A);
+    assert.equal(response.status, 200);
+    request = continuation(request, (await response.json()).choices[0].message);
+    await clock.advance(8 * 60 * 60 * 1000);
+  }
+  assert.equal([...mock.connections.values()][0].cancelled, true, '24h absolute cap does not slide');
+  assert.equal((await instance.complete(request, A)).status, 409);
+  assert.equal(mock.appends.length, 5);
+  assert.equal(clock.count(), 0);
+});
+
+test('explicit absolute cap and provider close cancel long parked waits', async t => {
+  for (const close of [false, true]) {
+    const clock = virtualTimers(), mock = mockProtocol(c => c.send(execFrame()));
+    const instance = provider(t, mock, { ...clock, maxSessionMs: 1000 });
+    const request = body(), first = await (await instance.complete(request, A)).json();
+    if (close) instance.close();
+    else await clock.advance(1000);
+    assert.equal([...mock.connections.values()][0].cancelled, true);
+    assert.equal((await instance.complete(continuation(request, first.choices[0].message), A)).status, close ? 503 : 409);
+    assert.equal(mock.appends.length, 1);
+    assert.equal(clock.count(), 0);
+  }
+});
+
 test('parked-session TTL closes remote reader and continuation fails explicitly', async t => {
   const mock = mockProtocol(c => c.send(execFrame()));
-  const instance = provider(t, mock, { sessionTtlMs: 30 });
+  const instance = provider(t, mock, { parkedToolTimeoutMs: 30 });
   const request = body();
   const first = await (await instance.complete(request, A)).json();
   await sleep(70);

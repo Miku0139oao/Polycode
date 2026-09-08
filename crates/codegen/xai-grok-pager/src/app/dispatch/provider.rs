@@ -25,6 +25,11 @@ fn option(label: &str, description: &str, id: &str) -> QuestionOption {
     }
 }
 fn close_card(app: &mut AppView) {
+    if let Some(agent) = app.provider.target.and_then(|id| app.agents.get_mut(&id))
+        && matches!(agent.active_modal.as_ref(), Some(crate::views::modal::ActiveModal::ArgPicker { command, .. }) if command == "provider")
+    {
+        agent.active_modal = None;
+    }
     if let Some(id) = app.provider.target
         && let Some(agent) = app.agents.get_mut(&id)
         && agent
@@ -140,55 +145,47 @@ fn menu(app: &mut AppView) {
         });
     }
 }
-fn models(app: &mut AppView, provider: Choice) {
-    let options = match provider {
-        Choice::Grok => app
-            .models
-            .available
-            .iter()
-            .filter(|(id, _)| !id.0.starts_with("codex/") && !id.0.starts_with("cursor/"))
-            .map(|(id, m)| option(&m.name, "Native model", &format!("model:{}", id.0)))
-            .collect::<Vec<_>>(),
-        Choice::Subscription(id) => app
-            .provider
-            .catalog
-            .providers
-            .iter()
-            .filter(|p| p.id == id)
-            .flat_map(|p| {
-                p.models.iter().map(move |m| {
-                    option(
-                        &m.name,
-                        &format!(
-                            "{}; {}",
-                            m.context_window
-                                .map(|size| format!("{size} token context"))
-                                .unwrap_or_else(|| {
-                                    "Context capacity not provided; native default budget".into()
-                                }),
-                            if m.reasoning_efforts.is_empty() {
-                                "provider does not expose reasoning effort control"
-                            } else {
-                                "choose native reasoning effort next"
-                            }
-                        ),
-                        &format!("model:{}/{}", id.as_str(), m.id),
-                    )
-                })
-            })
-            .collect(),
-    };
-    if options.is_empty() {
+fn models(app: &mut AppView, _provider: Choice) {
+    use crate::views::{modal::ActiveModal, picker::PickerState};
+
+    let items = app
+        .models
+        .available
+        .iter()
+        .map(|(id, model)| {
+            let provider = if id.0.starts_with("codex/") {
+                "OpenAI ChatGPT"
+            } else if id.0.starts_with("cursor/") {
+                "Cursor"
+            } else {
+                "Grok native"
+            };
+            crate::slash::command::ArgItem {
+                display: format!("{} [{}]", model.name, id.0),
+                description: provider.into(),
+                match_text: format!("{provider} {} {}", model.name, id.0),
+                insert_text: id.0.to_string(),
+            }
+        })
+        .collect::<Vec<_>>();
+    if items.is_empty() {
         app.show_toast("No models available yet; use /login or /provider refresh");
         menu(app);
-    } else {
-        card(
-            app,
-            "Choose a model for this native session".into(),
-            options,
-            false,
-        );
+        return;
     }
+    close_card(app);
+    let Some(agent) = app.provider.target.and_then(|id| app.agents.get_mut(&id)) else {
+        return;
+    };
+    agent.active_modal = Some(ActiveModal::ArgPicker {
+        command: "provider".into(),
+        args_query: String::new(),
+        items: items.clone(),
+        original_items: items,
+        state: PickerState::input_active(),
+        previous_palette: None,
+        window: Default::default(),
+    });
 }
 fn cancel(app: &mut AppView) -> Vec<Effect> {
     close_card(app);

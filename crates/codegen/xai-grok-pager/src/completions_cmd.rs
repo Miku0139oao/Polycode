@@ -1,4 +1,4 @@
-//! `grok completions <shell>`: generate shell completion scripts.
+//! `polycode completions <shell>`: generate shell completion scripts.
 //!
 //! Used by the installers and npm postinstall; must stay side-effect free (no network, auth, tracing, or tokio).
 
@@ -9,15 +9,15 @@ use crate::app::PagerArgs;
 
 /// Generate and print the completion script for the given shell.
 pub fn run(shell: Shell) {
-    // Ensure the script always uses the public "grok" name (matches historical behavior and what the installers and docs expect)
-    let mut cmd = PagerArgs::command().name("grok");
+    // Completion scripts target the public launcher, not the internal binary name.
+    let mut cmd = PagerArgs::command().name("polycode");
     if shell != Shell::Zsh {
-        generate(shell, &mut cmd, "grok", &mut std::io::stdout());
+        generate(shell, &mut cmd, "polycode", &mut std::io::stdout());
         return;
     }
     // zsh needs post-processing (see fix_zsh_root_prompt_positional).
     let mut buf = Vec::new();
-    generate(shell, &mut cmd, "grok", &mut buf);
+    generate(shell, &mut cmd, "polycode", &mut buf);
     match String::from_utf8(buf) {
         Ok(script) => print!("{}", fix_zsh_root_prompt_positional(&script)),
         // clap_complete output is generated from Rust strings, so this arm is unreachable in practice
@@ -34,7 +34,7 @@ pub fn run(shell: Shell) {
 ///
 /// The generated root `_arguments` spec emits a `'::prompt …'` slot before the subcommand slot but dispatches subcommands with `case $line[2]`.
 /// zsh assigns the typed subcommand to the *prompt* slot (`$line[1]`), leaves `$line[2]` empty, and the dispatch falls through.
-/// `grok worktree <TAB>` then re-offers every top-level command.
+/// `polycode worktree <TAB>` then re-offers every top-level command.
 /// (`hide = true` on the positional does not change the generated script.)
 ///
 /// Completing an arbitrary prompt string is useless, so drop the prompt slot and shift the root dispatch to `$line[1]`.
@@ -57,8 +57,8 @@ fn fix_zsh_root_prompt_positional(script: &str) -> String {
             r#"words=($line[1] "${words[@]}")"#,
         ),
         (
-            r#"curcontext="${curcontext%:*:*}:grok-command-$line[2]:""#,
-            r#"curcontext="${curcontext%:*:*}:grok-command-$line[1]:""#,
+            r#"curcontext="${curcontext%:*:*}:polycode-command-$line[2]:""#,
+            r#"curcontext="${curcontext%:*:*}:polycode-command-$line[1]:""#,
         ),
         (r#"case $line[2] in"#, r#"case $line[1] in"#),
     ] {
@@ -73,14 +73,14 @@ mod tests {
 
     /// Generate the zsh completion script exactly like `run` does.
     fn zsh_script() -> String {
-        let mut cmd = PagerArgs::command().name("grok");
+        let mut cmd = PagerArgs::command().name("polycode");
         let mut buf = Vec::new();
-        generate(Shell::Zsh, &mut cmd, "grok", &mut buf);
+        generate(Shell::Zsh, &mut cmd, "polycode", &mut buf);
         String::from_utf8(buf).expect("completion script is UTF-8")
     }
 
     // The optional `[PROMPT]` positional (app/cli.rs) makes clap_complete emit a `::prompt` slot before the subcommand slot
-    // Dispatch happens on `$line[2]`, so `grok worktree <TAB>` re-offered every top-level command (upstream clap-rs/clap#6282)
+    // Dispatch happens on `$line[2]`, so `polycode worktree <TAB>` re-offered every top-level command (upstream clap-rs/clap#6282)
     #[test]
     fn zsh_completions_drop_prompt_slot_and_dispatch_on_line_1() {
         let raw = zsh_script();
@@ -102,15 +102,15 @@ mod tests {
             "root dispatch must be shifted to $line[1]"
         );
         assert!(
-            fixed.contains(r#"curcontext="${curcontext%:*:*}:grok-command-$line[1]:""#),
+            fixed.contains(r#"curcontext="${curcontext%:*:*}:polycode-command-$line[1]:""#),
             "root dispatch context must use $line[1]"
         );
         // Subcommand dispatch blocks (already on $line[1]) must survive.
         assert!(
-            fixed.contains("grok-worktree-command-$line[1]"),
+            fixed.contains("polycode-worktree-command-$line[1]"),
             "nested subcommand dispatch must be untouched"
         );
         // The subcommand list itself must still be offered at the root.
-        assert!(fixed.contains("_grok_commands"), "root command list intact");
+        assert!(fixed.contains("_polycode_commands"), "root command list intact");
     }
 }

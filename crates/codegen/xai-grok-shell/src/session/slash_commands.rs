@@ -65,6 +65,16 @@ fn resolve_compact(args: &str) -> BuiltinAction {
 /// Order here is the display order in autocomplete.
 pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     BuiltinCommand {
+        name: "fast",
+        description: "Control priority processing where supported (may cost more)",
+        argument_hint: Some("on|off|status"),
+        aliases: &[],
+        model_authored_eligibility: ModelAuthoredEligibility::Denied,
+        gate: BuiltinGate::AlwaysOn,
+        workflow_projection: WorkflowProjection::None,
+        resolve: |args| BuiltinAction::Fast { args: args.to_string() },
+    },
+    BuiltinCommand {
         name: "compact",
         description: "Compress conversation history to save context window",
         argument_hint: Some("optional context about what to preserve"),
@@ -485,6 +495,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "exit",
     "expand",
     "export",
+    "fast",
     "feedback",
     "find",
     "fork",
@@ -1230,6 +1241,7 @@ pub(super) enum SlashCommandOutcome {
 }
 #[derive(Debug)]
 pub(super) enum BuiltinAction {
+    Fast { args: String },
     Compact {
         user_context: Option<String>,
     },
@@ -1299,6 +1311,7 @@ pub(super) enum BuiltinAction {
 impl BuiltinAction {
     pub(crate) fn command_name(&self) -> &'static str {
         match self {
+            BuiltinAction::Fast { .. } => "fast",
             BuiltinAction::Compact { .. } => "compact",
             BuiltinAction::SetYolo { .. } => "yolo",
             BuiltinAction::FlushMemory => "flush",
@@ -1333,6 +1346,7 @@ impl BuiltinAction {
     }
     pub(crate) fn args_provided(&self) -> bool {
         match self {
+            BuiltinAction::Fast { args } => !args.is_empty(),
             BuiltinAction::Compact { user_context } => user_context.is_some(),
             BuiltinAction::SetYolo { .. } => true,
             BuiltinAction::FlushMemory => false,

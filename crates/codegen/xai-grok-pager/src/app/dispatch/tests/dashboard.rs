@@ -2082,7 +2082,7 @@ fn dashboard_does_not_advertise_or_dispatch_doctor() {
 /// claim it only works in a session.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
-fn dashboard_slash_usage_hidden_for_external_auth() {
+fn dashboard_slash_usage_explains_missing_session_for_external_auth() {
     let mut app = three_agent_app();
     app.has_external_auth_provider = true;
     app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
@@ -2100,7 +2100,7 @@ fn dashboard_slash_usage_hidden_for_external_auth() {
         .as_deref()
         .expect("error toast for gated /usage");
     assert!(
-        toast.contains("/usage is not available"),
+        toast.contains("Session usage is unavailable until the session starts."),
         "unexpected toast: {toast}"
     );
     assert!(

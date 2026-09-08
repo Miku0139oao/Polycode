@@ -87,9 +87,9 @@ pub(super) fn request(home: &Path, shell: &str) -> FixRequest {
 fn canonical_and_short_ids_resolve_to_canonical_id() {
     assert_eq!(resolve_fix_id("terminal.ssh-wrap").unwrap(), SSH_WRAP_ID);
     let command = human_fix_command(SSH_WRAP_ID).expect("SSH fix command");
-    assert_eq!(command, "grok doctor fix ssh-wrap");
+    assert_eq!(command, "polycode doctor fix ssh-wrap");
     assert_eq!(
-        resolve_fix_id(command.strip_prefix("grok doctor fix ").unwrap()).unwrap(),
+        resolve_fix_id(command.strip_prefix("polycode doctor fix ").unwrap()).unwrap(),
         SSH_WRAP_ID
     );
     assert!(human_fix_command(DiagnosticId::new("terminal", "unknown")).is_none());
@@ -207,7 +207,7 @@ fn tmux_fix_registry_resolves_every_short_and_canonical_id() {
         assert_eq!(resolve_fix_id(&id.to_string()).unwrap(), id);
         assert_eq!(
             human_fix_command(id).unwrap(),
-            format!("grok doctor fix {handle}")
+            format!("polycode doctor fix {handle}")
         );
     }
 }
@@ -714,12 +714,12 @@ fn tmux_stale_plan_and_idempotence_reuse_managed_writer_safety() {
 fn bash_zsh_and_fish_plans_use_exact_paths_and_aliases() {
     let temp = tempfile::tempdir().unwrap();
     for (shell, relative, alias) in [
-        ("/bin/bash", ".bashrc", "alias ssh='grok wrap ssh'"),
-        ("/bin/zsh", ".zshrc", "alias ssh='grok wrap ssh'"),
+        ("/bin/bash", ".bashrc", "alias ssh='polycode wrap ssh'"),
+        ("/bin/zsh", ".zshrc", "alias ssh='polycode wrap ssh'"),
         (
             "/usr/local/bin/fish",
             ".config/fish/config.fish",
-            "alias ssh 'grok wrap ssh'",
+            "alias ssh 'polycode wrap ssh'",
         ),
     ] {
         let plan = plan_fix(request(temp.path(), shell), &report(), &terminal()).unwrap();
@@ -744,6 +744,24 @@ fn bash_zsh_and_fish_plans_use_exact_paths_and_aliases() {
         );
         assert!(plan.caveats().iter().any(|line| line.contains("~^Z")));
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn legacy_managed_ssh_alias_is_updated_in_the_existing_namespace() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join(".bashrc");
+    std::fs::write(
+        &path,
+        "# >>> grok doctor >>>\n# >>> terminal.ssh-wrap >>>\nalias ssh='grok wrap ssh'\n# <<< terminal.ssh-wrap <<<\n# <<< grok doctor <<<\n",
+    )
+    .unwrap();
+
+    let plan = plan_fix(request(temp.path(), "/bin/bash"), &report(), &terminal()).unwrap();
+    assert!(plan.change().will_write);
+    assert!(plan.change().block.contains("# >>> grok doctor >>>"));
+    assert!(plan.change().block.contains("alias ssh='polycode wrap ssh'"));
+    assert!(!plan.change().block.contains("alias ssh='grok wrap ssh'"));
 }
 
 #[test]
@@ -943,7 +961,7 @@ fn comments_and_managed_alias_do_not_create_false_conflicts() {
     let path = temp.path().join(".zshrc");
     std::fs::write(
         &path,
-        "# alias ssh='ssh -A'\n# >>> grok doctor >>>\n# >>> terminal.ssh-wrap >>>\nalias ssh='grok wrap ssh'\n# <<< terminal.ssh-wrap <<<\n# <<< grok doctor <<<\n",
+        "# alias ssh='ssh -A'\n# >>> grok doctor >>>\n# >>> terminal.ssh-wrap >>>\nalias ssh='polycode wrap ssh'\n# <<< terminal.ssh-wrap <<<\n# <<< grok doctor <<<\n",
     )
     .unwrap();
     let plan = plan_fix(request(temp.path(), "/bin/zsh"), &report(), &terminal()).unwrap();
@@ -957,11 +975,11 @@ fn managed_alias_with_later_unmanaged_conflict_is_not_configured() {
     let cases = [
         (
             ShellKind::Bash,
-            "# >>> grok doctor >>>\n# >>> terminal.ssh-wrap >>>\nalias ssh='grok wrap ssh'\n# <<< terminal.ssh-wrap <<<\n# <<< grok doctor <<<\nalias ssh='ssh -A'\n",
+            "# >>> grok doctor >>>\n# >>> terminal.ssh-wrap >>>\nalias ssh='polycode wrap ssh'\n# <<< terminal.ssh-wrap <<<\n# <<< grok doctor <<<\nalias ssh='ssh -A'\n",
         ),
         (
             ShellKind::Fish,
-            "# >>> grok doctor >>>\n# >>> terminal.ssh-wrap >>>\nalias ssh 'grok wrap ssh'\n# <<< terminal.ssh-wrap <<<\n# <<< grok doctor <<<\nfunction ssh\n  command ssh -A $argv\nend\n",
+            "# >>> grok doctor >>>\n# >>> terminal.ssh-wrap >>>\nalias ssh 'polycode wrap ssh'\n# <<< terminal.ssh-wrap <<<\n# <<< grok doctor <<<\nfunction ssh\n  command ssh -A $argv\nend\n",
         ),
     ];
     for (shell, content) in cases {
@@ -1061,9 +1079,9 @@ fn configured_report_reaches_pass_state_only_for_exact_managed_alias() {
 fn shell_aliases_expand_to_exact_argv_and_bypass_is_explicit() {
     let temp = tempfile::tempdir().unwrap();
     let capture = temp.path().join("capture");
-    let grok = temp.path().join("grok");
+    let polycode = temp.path().join("polycode");
     std::fs::write(
-        &grok,
+        &polycode,
         format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
             capture.display()
@@ -1071,11 +1089,11 @@ fn shell_aliases_expand_to_exact_argv_and_bypass_is_explicit() {
     )
     .unwrap();
     use std::os::unix::fs::PermissionsExt as _;
-    std::fs::set_permissions(&grok, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&polycode, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     if let Some(bash) = find_on_path("bash") {
         let rc = temp.path().join("bashrc");
-        std::fs::write(&rc, "alias ssh='grok wrap ssh'\n").unwrap();
+        std::fs::write(&rc, "alias ssh='polycode wrap ssh'\n").unwrap();
         let command = format!(
             "source '{}'; source '{}'; eval 'ssh -p 2222 host'",
             rc.display(),
@@ -1106,7 +1124,7 @@ fn shell_aliases_expand_to_exact_argv_and_bypass_is_explicit() {
     }
     if let Some(zsh) = find_on_path("zsh") {
         let rc = temp.path().join("zshrc");
-        std::fs::write(&rc, "alias ssh='grok wrap ssh'\n").unwrap();
+        std::fs::write(&rc, "alias ssh='polycode wrap ssh'\n").unwrap();
         let command = format!(
             "source '{}'; source '{}'; eval 'ssh -p 2222 host'",
             rc.display(),
@@ -1146,7 +1164,7 @@ fn shell_aliases_expand_to_exact_argv_and_bypass_is_explicit() {
     };
     let mut shell = std::process::Command::new(bash);
     shell
-        .args(["-ic", "alias ssh='grok wrap ssh'; command ssh host"])
+        .args(["-ic", "alias ssh='polycode wrap ssh'; command ssh host"])
         .env("CAPTURE", &capture)
         .env(
             "PATH",
@@ -1168,18 +1186,18 @@ fn shell_aliases_expand_to_exact_argv_and_bypass_is_explicit() {
 
     if let Some(fish) = find_on_path("fish") {
         let fish_capture = temp.path().join("fish-capture");
-        let fish_grok = temp.path().join("fish-grok");
+        let fish_polycode = temp.path().join("fish-polycode");
         std::fs::write(
-            &fish_grok,
+            &fish_polycode,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
                 fish_capture.display()
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&fish_grok, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&fish_polycode, std::fs::Permissions::from_mode(0o755)).unwrap();
         let rc = temp.path().join("config.fish");
-        std::fs::write(&rc, "alias ssh 'fish-grok wrap ssh'\n").unwrap();
+        std::fs::write(&rc, "alias ssh 'fish-polycode wrap ssh'\n").unwrap();
         let command = format!(
             "source '{}'; source '{}'; ssh -p 2222 host; env | string match -rq '^ssh='; and exit 9; or exit 0",
             rc.display(),

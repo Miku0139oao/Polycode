@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
 import { codexReasoningMetadata } from './model-settings.mjs';
+import { codexFastMetadata } from './fast.mjs';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 // Public Codex OAuth flow, also used by OpenCode/Pi. No CLI credential extraction.
@@ -33,7 +34,8 @@ export function toResponses(body) {
   for (const key of ['temperature', 'top_p', 'max_tokens', 'max_completion_tokens', 'max_output_tokens', 'stop', 'seed', 'frequency_penalty', 'presence_penalty', 'logit_bias', 'logprobs', 'top_logprobs', 'n']) {
     if (body[key] !== undefined && body[key] !== null) throw unsupported(`ChatGPT subscription transport does not support ${key}; remove this explicit option.`);
   }
-  const allowed = new Set(['model', 'messages', 'tools', 'stream', 'stream_options', 'tool_choice', 'parallel_tool_calls', 'response_format', 'reasoning_effort', 'reasoning']);
+  const allowed = new Set(['model', 'messages', 'tools', 'stream', 'stream_options', 'tool_choice', 'parallel_tool_calls', 'response_format', 'reasoning_effort', 'reasoning', 'service_tier']);
+  if (body.service_tier != null && body.service_tier !== 'priority') throw unsupported('Unsupported ChatGPT service tier.');
   if (Object.keys(body).some(key => !allowed.has(key) && body[key] != null)) throw unsupported('Unsupported ChatGPT subscription request option.');
   if (body.reasoning_effort != null && body.reasoning?.effort != null && body.reasoning_effort !== body.reasoning.effort) throw unsupported('Conflicting ChatGPT reasoning effort options.');
   if (body.reasoning && Object.keys(body.reasoning).some(key => !['effort', 'summary'].includes(key))) throw unsupported('Unsupported ChatGPT reasoning option.');
@@ -79,6 +81,7 @@ export function toResponses(body) {
     else if (format.type === 'json_schema' && format.json_schema?.name && format.json_schema?.schema) request.text = { format: { ...format.json_schema, type: 'json_schema' } };
     else throw new Error('Unsupported structured response format');
   }
+  if (body.service_tier === 'priority') request.service_tier = 'priority';
   const effort = body.reasoning_effort ?? body.reasoning?.effort;
   if (effort || body.reasoning?.summary) request.reasoning = { ...(effort ? { effort } : {}), summary: body.reasoning?.summary ?? 'auto' };
   return { request, originals };
@@ -233,7 +236,7 @@ export function createCodexProvider({ fetchImpl = fetch, httpFactory = createSer
       if (!r.ok) throw Object.assign(new Error(`ChatGPT model discovery failed (HTTP ${r.status})`), { code: 'upstream_http_error', status: r.status });
       const data = await r.json(), models = data.models ?? data.data;
       if (!Array.isArray(models)) throw new Error('Invalid ChatGPT model catalog');
-      return models.filter(m => m.visibility !== 'hide').map(m => ({ id: m.slug ?? m.id ?? m.model, name: m.display_name ?? m.displayName ?? m.slug ?? m.id, contextWindow: m.context_window ?? m.contextWindow ?? 128000, ...codexReasoningMetadata(m) }));
+      return models.filter(m => m.visibility !== 'hide').map(m => ({ id: m.slug ?? m.id ?? m.model, name: m.display_name ?? m.displayName ?? m.slug ?? m.id, contextWindow: m.context_window ?? m.contextWindow ?? 128000, ...codexReasoningMetadata(m), ...codexFastMetadata(m) }));
     },
     async complete(body, c, { signal } = {}) {
       const { request, originals } = toResponses(body);

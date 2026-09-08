@@ -10,7 +10,7 @@
 //! When the whole-table parse fails, fields that fail to parse on their own are pruned (one warning each) and the table is parsed again.
 //! Non-table values are dropped with a warning.
 //!
-//! Warnings are retained on `Config::config_warnings` and surfaced by `grok inspect`.
+//! Warnings are retained on `Config::config_warnings` and surfaced by `polycode inspect`.
 
 use indexmap::IndexMap;
 use serde::Serialize;
@@ -36,7 +36,7 @@ pub enum ConfigWarningKind {
 }
 
 /// What a [`ConfigWarning`] is about.
-/// Serialize-only: `grok inspect --json` emits it, nothing deserializes it back.
+/// Serialize-only: `polycode inspect --json` emits it, nothing deserializes it back.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(tag = "target", rename_all = "camelCase")]
 pub enum WarningTarget {
@@ -264,7 +264,7 @@ pub(crate) fn log_config_warnings(warnings: &[ConfigWarning]) {
     if !warnings.is_empty() {
         tracing::warn!(
             warnings = warnings.len(),
-            "config: parsed with warnings; run `grok inspect` for details"
+            "config: parsed with warnings; run `polycode inspect` for details"
         );
     }
 }

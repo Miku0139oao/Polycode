@@ -53,6 +53,43 @@ async fn fixture() -> (
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn fast_survives_only_effort_only_commit_on_exact_route_and_model() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for (effort_only, same_route, same_model, fast_on, expected) in [
+                (true, true, true, true, true),
+                (true, true, true, false, false),
+                (false, true, true, true, false),
+                (false, true, false, true, false),
+                (true, false, true, true, false),
+                (true, true, false, true, false),
+            ] {
+                let (actor, mut pending, _reply, _persist) = fixture().await;
+                pending.effort_only = effort_only;
+                pending.sampling_config.reasoning_effort = Some(ReasoningEffort::High);
+                // Stale queued headers must not enable fast on a different selection.
+                pending.sampling_config.extra_headers.insert("x-polycode-fast".into(), "on".into());
+                let mut live = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                live.base_url = if same_route { pending.sampling_config.base_url.clone() } else { "https://other-provider.invalid/v1".into() };
+                live.model = if same_model { pending.sampling_config.model.clone() } else { "different-model".into() };
+                live.reasoning_effort = Some(ReasoningEffort::Low);
+                live.extra_headers.shift_remove("x-polycode-fast");
+                if fast_on {
+                    live.extra_headers.insert("x-polycode-fast".into(), "on".into());
+                }
+                actor.chat_state_handle.update_sampling_config(live);
+                actor.commit_pending_model_switch(&mut pending).await.unwrap();
+                let after = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                assert_eq!(after.extra_headers.get("x-polycode-fast").map(String::as_str), expected.then_some("on"));
+                assert_eq!(after.reasoning_effort, Some(ReasoningEffort::High));
+                let request_config = actor.reconstruct_full_config().await;
+                assert_eq!(request_config.extra_headers.get("x-polycode-fast").map(String::as_str), expected.then_some("on"));
+            }
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn model_settings_busy_admission_does_not_change_live_sampling_or_permission() {
     tokio::task::LocalSet::new()
         .run_until(async {

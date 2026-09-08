@@ -5,7 +5,7 @@ use super::{
     app_view::AppView,
 };
 
-pub(crate) const UNSUPPORTED: &str = "Unavailable with external ACP. Use the external agent's controls; native Grok features are disabled.";
+pub(crate) const UNSUPPORTED: &str = "Unavailable with external ACP. Use the external agent's controls; native Polycode features are disabled.";
 
 pub(crate) fn effect_allowed(effect: &Effect) -> bool {
     // Deliberately an allowlist: a new native feature must not accidentally access

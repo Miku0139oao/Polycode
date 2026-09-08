@@ -105,6 +105,13 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo test --locked --release --target x86_64-pc-windows-msvc -p xai-grok-shell --lib outbound_messages_preserve_partial_inbound_frames -j2 -- --test-threads=1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Compaction and fast mode regression
+        shell: pwsh
+        run: |
+          cargo test --locked --release --target x86_64-pc-windows-msvc -p xai-grok-shell --lib session_compact -j2 -- --test-threads=1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked --release --target x86_64-pc-windows-msvc -p xai-grok-shell --lib fast -j2 -- --test-threads=1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Package Windows candidate
         shell: pwsh
         env:

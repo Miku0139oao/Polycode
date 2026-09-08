@@ -655,6 +655,12 @@ impl AgentView {
                 InputOutcome::Changed
             }
             ArgPickerStep::Closed => {
+                if command_clone == "provider" {
+                    self.active_modal = None;
+                    return InputOutcome::Action(Action::Provider(
+                        crate::app::provider::Command::Cancel,
+                    ));
+                }
                 if in_effort_phase && self.try_arg_picker_step_back_from_effort() {
                     return InputOutcome::Changed;
                 }
@@ -676,6 +682,12 @@ impl AgentView {
                 InputOutcome::Changed
             }
             ArgPickerStep::Selected(item) => {
+                if command_clone == "provider" {
+                    self.active_modal = None;
+                    return InputOutcome::Action(Action::Provider(
+                        crate::app::provider::Command::Model(item.insert_text),
+                    ));
+                }
                 let chains_to_effort = matches!(command_clone.as_str(), "model" | "m")
                     && item.insert_text.ends_with(char::is_whitespace);
                 if chains_to_effort {
@@ -1423,6 +1435,12 @@ impl AgentView {
             let outcome = mw::handle_modal_mouse(window, mouse.kind, mouse.column, mouse.row);
             match outcome {
                 ModalWindowOutcome::CloseRequested => {
+                    if matches!(self.active_modal.as_ref(), Some(ActiveModal::ArgPicker { command, .. }) if command == "provider") {
+                        self.active_modal = None;
+                        return InputOutcome::Action(Action::Provider(
+                        crate::app::provider::Command::Cancel,
+                    ));
+                    }
                     // Match keyboard Esc: step back from model effort phase before fully dismissing the ArgPicker
                     if self.try_arg_picker_step_back_from_effort() {
                         return InputOutcome::Changed;
@@ -1882,7 +1900,7 @@ impl AgentView {
                 // Arg picker: ModalWindow chrome and picker content
                 let title = match command.as_str() {
                     "model" | "m" if !args_query.is_empty() => "Pick reasoning effort",
-                    "model" | "m" => "Pick model",
+                    "model" | "m" | "provider" => "Pick model",
                     "theme" | "t" => "Pick theme",
                     _ => "Pick option",
                 };

@@ -34,8 +34,26 @@ impl SlashCommand for ModelCommand {
         }
 
         // Effort phase if input is "<reasoning-model> ", else model phase.
-        if let Some(model_id) = detect_effort_phase(ctx.models, args_query) {
-            return Some(build_effort_items(ctx.models, &model_id));
+        if let Some((model_id, model_query)) = detect_effort_phase(ctx.models, args_query) {
+            let effort_query = args_query[model_query.len()..].trim();
+            let mut matcher = crate::slash::matcher::FuzzyMatcher::new();
+            let options = ctx.models.reasoning_effort_options_for(&model_id);
+            let items = build_effort_items(ctx.models, &model_id)
+                .into_iter()
+                .zip(options)
+                .filter_map(|(mut item, option)| {
+                    if !effort_query.is_empty()
+                        && matcher.indices_for(effort_query, &option.id).is_none()
+                    {
+                        return None;
+                    }
+                    // Match the typed alias, but keep insertion canonical and filter only the effort suffix.
+                    let sort_prefix = item.match_text.split_once(' ')?.0;
+                    item.match_text = format!("{sort_prefix} {model_query} {}", option.id);
+                    Some(item)
+                })
+                .collect();
+            return Some(items);
         }
         Some(build_model_items(ctx.models))
     }
@@ -70,7 +88,9 @@ impl SlashCommand for ModelCommand {
             };
         }
 
-        CommandResult::Error(format!("Unknown model: {trimmed}"))
+        CommandResult::Error(format!(
+            "Unknown or ambiguous model: {trimmed}. Use /model to search, or enter a full provider/model ID."
+        ))
     }
 }
 
@@ -95,14 +115,26 @@ fn split_trailing_token(args: &str) -> Option<(&str, &str)> {
     Some((prefix, last))
 }
 
-/// Returns the matched model id when `args_query` is `"<reasoning-model> ..."`.
+/// Returns the matched model id and typed alias when `args_query` is `"<reasoning-model> ..."`.
 /// Candidates are tried longest name first to disambiguate names that share a prefix.
-fn detect_effort_phase(models: &ModelState, args_query: &str) -> Option<acp::ModelId> {
+fn detect_effort_phase<'a>(
+    models: &ModelState,
+    args_query: &'a str,
+) -> Option<(acp::ModelId, &'a str)> {
     let mut candidates: Vec<(&acp::ModelId, &str)> = models
         .available
         .iter()
         .filter(|(_, info)| supports_reasoning_effort(info))
-        .map(|(id, info)| (id, info.name.as_str()))
+        .flat_map(|(id, info)| {
+            [
+                Some((id, id.0.as_ref())),
+                Some((id, info.name.as_str())),
+                id.0.split_once('/').map(|(_, name)| (id, name)),
+                info.name.split_once(" / ").map(|(_, name)| (id, name)),
+            ]
+            .into_iter()
+            .flatten()
+        })
         .collect();
     candidates.sort_by_key(|(_, name)| std::cmp::Reverse(name.len()));
 
@@ -111,8 +143,9 @@ fn detect_effort_phase(models: &ModelState, args_query: &str) -> Option<acp::Mod
             && args_query.is_char_boundary(name.len())
             && args_query[..name.len()].eq_ignore_ascii_case(name)
             && args_query[name.len()..].starts_with(char::is_whitespace)
+            && models.resolve_by_name_or_id(name).as_ref() == Some(id)
         {
-            return Some(id.clone());
+            return Some((id.clone(), &args_query[..name.len()]));
         }
     }
     None
@@ -127,23 +160,35 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
         let is_current = current_id == Some(id);
         let supports = supports_reasoning_effort(info);
 
-        let display = if is_current {
-            format!("{} (current)", info.name)
+        let qualified =
+            id.0.contains('/') || models.resolve_by_name_or_id(&info.name).as_ref() != Some(id);
+        let label = if qualified {
+            format!("{} [{}]", info.name, id.0)
         } else {
             info.name.clone()
         };
+        let display = if is_current {
+            format!("{label} (current)")
+        } else {
+            label
+        };
+        let selection = if qualified { id.0.as_ref() } else { &info.name };
 
         // A trailing space on reasoning models signals "more input expected" to the prompt widget
         // Enter then advances to the effort phase instead of submitting
         let insert_text = if supports {
-            format!("{} ", info.name)
+            format!("{selection} ")
         } else {
-            info.name.clone()
+            selection.to_string()
         };
 
         items.push(ArgItem {
             display,
-            match_text: info.name.clone(),
+            match_text: if qualified {
+                format!("{} {}", info.name, id.0)
+            } else {
+                info.name.clone()
+            },
             insert_text,
             description: info.description.clone().unwrap_or_default(),
         });
@@ -158,7 +203,13 @@ fn build_effort_items(models: &ModelState, model_id: &acp::ModelId) -> Vec<ArgIt
         Some(info) => info,
         None => return Vec::new(),
     };
-    let model_name = info.name.clone();
+    let model_name = if model_id.0.contains('/')
+        || models.resolve_by_name_or_id(&info.name).as_ref() != Some(model_id)
+    {
+        model_id.0.to_string()
+    } else {
+        info.name.clone()
+    };
     let is_current_model = models.current.as_ref() == Some(model_id);
     let options = models.reasoning_effort_options_for(model_id);
     build_effort_arg_items(
@@ -232,8 +283,12 @@ mod tests {
         );
         let items = build_effort_items(&state, &id);
         assert_eq!(items.len(), 2);
-        assert!(items.iter().any(|i| i.insert_text == "Actual minimal"));
-        assert!(items.iter().any(|i| i.insert_text == "Actual high"));
+        assert!(
+            items
+                .iter()
+                .any(|i| i.insert_text == "codex/actual minimal")
+        );
+        assert!(items.iter().any(|i| i.insert_text == "codex/actual high"));
         assert!(!items.iter().any(|i| i.insert_text.contains("xhigh")));
         let mut ctx = dummy_exec_ctx(&state);
         assert!(matches!(
@@ -252,6 +307,137 @@ mod tests {
             matches!(ModelCommand.run(&mut ctx, "Cursor Actual high"), CommandResult::Error(message) if message.contains("does not support reasoning effort"))
         );
     }
+    #[test]
+    fn bare_model_names_resolve_across_providers_only_when_unique() {
+        let mut state = ModelState::default();
+        let (id, info) = plain_model("codex/gpt-5.5", "ChatGPT / GPT 5.5");
+        state.available.insert(id.clone(), info);
+        assert_eq!(state.resolve_by_name_or_id("GPT-5.5"), Some(id.clone()));
+        assert_eq!(state.resolve_by_name_or_id("GPT 5.5"), Some(id.clone()));
+        let (other, info) = plain_model("cursor/gpt-5.5", "Cursor / GPT 5.5");
+        state.available.insert(other.clone(), info);
+        assert_eq!(state.resolve_by_name_or_id("gpt-5.5"), None);
+        assert_eq!(state.resolve_by_name_or_id("GPT 5.5"), None);
+        assert_eq!(state.resolve_by_name_or_id("codex/gpt-5.5"), Some(id));
+        assert_eq!(state.resolve_by_name_or_id("cursor/gpt-5.5"), Some(other));
+    }
+
+    #[test]
+    fn cross_provider_models_are_searchable_and_commit_the_selected_id() {
+        let mut state = ModelState::default();
+        for provider in ["codex", "cursor"] {
+            let (id, info) = model_with_reasoning(&format!("{provider}/gpt-5.5"), "GPT 5.5");
+            state.available.insert(id, info);
+        }
+        assert!(detect_effort_phase(&state, "GPT 5.5 ").is_none());
+        let items = build_model_items(&state);
+        assert_eq!(items.len(), 2);
+        for (item, provider) in items.iter().zip(["codex", "cursor"]) {
+            let id = format!("{provider}/gpt-5.5");
+            assert!(item.match_text.contains("GPT 5.5"));
+            assert!(item.match_text.contains(&id));
+            assert!(item.display.contains(&id));
+            assert_eq!(item.insert_text, format!("{id} "));
+            let (resolved, _) = detect_effort_phase(&state, &item.insert_text).unwrap();
+            assert_eq!(resolved.0.as_ref(), id);
+            let efforts = build_effort_items(&state, &resolved);
+            assert!(!efforts.is_empty());
+            for effort in efforts {
+                assert!(effort.insert_text.starts_with(&format!("{id} ")));
+                let mut ctx = dummy_exec_ctx(&state);
+                assert!(matches!(
+                    ModelCommand.run(&mut ctx, &effort.insert_text),
+                    CommandResult::Action(Action::SwitchModel { model_id, .. }) if model_id == resolved
+                ));
+            }
+            let mut ctx = dummy_exec_ctx(&state);
+            assert!(matches!(
+                ModelCommand.run(&mut ctx, &id),
+                CommandResult::Action(Action::SetDefaultModel(model_id)) if model_id == resolved
+            ));
+        }
+    }
+
+    #[test]
+    fn controller_refresh_matches_model_aliases_and_filters_effort_suffix() {
+        let mut state = ModelState::default();
+        let (id, info) = model_with_reasoning("codex/gpt-5.5", "ChatGPT / GPT 5.5");
+        state.available.insert(id, info);
+        let mut controller = crate::slash::SlashController::with_builtins(".".into());
+        let slash = crate::slash::SlashState::default();
+        for alias in ["ChatGPT / GPT 5.5", "GPT 5.5", "gpt-5.5", "codex/gpt-5.5"] {
+            for (suffix, expected) in [
+                ("", vec!["xhigh", "high", "medium", "low"]),
+                ("h", vec!["xhigh", "high"]),
+                ("low", vec!["low"]),
+                ("medium", vec!["medium"]),
+                ("bogus", vec![]),
+                ("GPT", vec![]),
+                ("5.5", vec![]),
+            ] {
+                let text = format!("/model {alias} {suffix}");
+                controller.refresh(&slash, &text, text.len(), &state);
+                let snapshot = slash.snapshot();
+                assert_eq!(snapshot.open, !expected.is_empty(), "{text}");
+                let mut actual: Vec<_> = snapshot
+                    .matches
+                    .iter()
+                    .map(|row| row.insert_text.as_str())
+                    .collect();
+                let mut expected: Vec<_> = expected
+                    .iter()
+                    .map(|effort| format!("codex/gpt-5.5 {effort}"))
+                    .collect();
+                actual.sort_unstable();
+                expected.sort_unstable();
+                assert_eq!(actual, expected, "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_native_and_subscription_collisions_insert_resolvable_ids() {
+        for reasoning in [false, true] {
+            let mut state = ModelState::default();
+            for id in ["grok-4.5", "cursor/grok-4.5"] {
+                let (id, info) = if reasoning {
+                    model_with_reasoning(id, "Grok 4.5")
+                } else {
+                    plain_model(id, "Grok 4.5")
+                };
+                state.available.insert(id, info);
+            }
+            assert!(state.resolve_by_name_or_id("Grok 4.5").is_none());
+            let mut controller = crate::slash::SlashController::with_builtins(".".into());
+            let slash = crate::slash::SlashState::default();
+            let text = "/model Grok 4.5";
+            controller.refresh(&slash, text, text.len(), &state);
+            let snapshot = slash.snapshot();
+            assert_eq!(snapshot.matches.len(), 2);
+            for row in &snapshot.matches {
+                let id = state.resolve_by_name_or_id(row.insert_text.trim()).unwrap();
+                assert_eq!(row.insert_text.trim(), id.0.as_ref());
+                let mut ctx = dummy_exec_ctx(&state);
+                assert!(matches!(
+                    ModelCommand.run(&mut ctx, row.insert_text.trim()),
+                    CommandResult::Action(Action::SetDefaultModel(resolved)) if resolved == id
+                ));
+                if reasoning {
+                    let text = format!("/model {}low", row.insert_text);
+                    controller.refresh(&slash, &text, text.len(), &state);
+                    let efforts = slash.snapshot();
+                    assert_eq!(efforts.matches.len(), 1);
+                    let effort = &efforts.matches[0];
+                    assert_eq!(effort.insert_text, format!("{} low", id.0));
+                    assert!(matches!(
+                        ModelCommand.run(&mut ctx, &effort.insert_text),
+                        CommandResult::Action(Action::SwitchModel { model_id, .. }) if model_id == id
+                    ));
+                }
+            }
+        }
+    }
+
     #[test]
     fn split_trailing_token_splits_on_final_whitespace() {
         assert_eq!(
@@ -356,9 +542,9 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Fullscreen,
             current_title: None,
         };
-        // Still in effort phase; the matcher upstream narrows to high and xhigh
+        // Filter the effort suffix independently of the model alias.
         let items = cmd.suggest_args(&ctx, "Reasoning X h").unwrap();
-        assert_eq!(items.len(), 4);
+        assert_eq!(items.len(), 2);
     }
 
     #[test]

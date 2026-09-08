@@ -150,8 +150,18 @@ impl SessionActor {
             self.handle_rebuild_agent_for_definition(definition).await?;
             pending.skip_prompt_rewrite = true;
         }
+        let mut sampling_config = pending.sampling_config.clone();
+        sampling_config.extra_headers.shift_remove("x-polycode-fast");
+        if pending.effort_only
+            && let Some(previous) = self.chat_state_handle.get_sampling_config().await
+            && previous.base_url == sampling_config.base_url
+            && previous.model == sampling_config.model
+            && previous.extra_headers.get("x-polycode-fast").is_some_and(|value| value == "on")
+        {
+            sampling_config.extra_headers.insert("x-polycode-fast".into(), "on".into());
+        }
         self.handle_set_session_model(
-            pending.sampling_config.clone(),
+            sampling_config,
             pending.use_concise,
             pending.is_family_switch,
             pending.apply_prompt_override,
@@ -385,6 +395,9 @@ impl SessionActor {
         if let Some(routed) = self.models_manager.model_for_effort(&cfg.model, effort) {
             cfg.model = routed;
         }
+        if previous_model != cfg.model {
+            cfg.extra_headers.shift_remove("x-polycode-fast");
+        }
         cfg.reasoning_effort = Some(effort);
         let model_id = acp::ModelId::new(
             crate::polycode::canonical_model_id(&cfg.base_url, &cfg.model)
@@ -392,6 +405,7 @@ impl SessionActor {
         );
         let mut primary = self.reconstruct_full_config().await;
         primary.model = cfg.model.clone();
+        primary.extra_headers = cfg.extra_headers.clone();
         primary.reasoning_effort = cfg.reasoning_effort;
         let (client, model) = self.selected_summary_client(&primary)?;
         self.abort_title_refresh();

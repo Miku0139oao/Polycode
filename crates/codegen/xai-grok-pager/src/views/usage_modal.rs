@@ -863,6 +863,11 @@ fn usage_limit_lines(
             lines.push(Line::default());
         }
         lines.push(muted_line(theme, "Loading session usage\u{2026}"));
+    } else {
+        lines.push(muted_line(
+            theme,
+            "Session usage is unavailable until the session starts.",
+        ));
     }
     lines
 }
@@ -1039,6 +1044,29 @@ mod tests {
                 subscription_tier: Some("SuperGrok".to_string()),
             },
         )
+    }
+
+    #[test]
+    fn usage_without_session_explains_missing_data_for_every_provider() {
+        use xai_grok_shell::polycode::ProviderId;
+        for provider in [
+            UsageProvider::NativeGrok,
+            UsageProvider::Subscription(ProviderId::Codex),
+            UsageProvider::Subscription(ProviderId::Cursor),
+            UsageProvider::Unavailable,
+        ] {
+            let mut state = state_with_session();
+            state.ctx.provider = provider;
+            state.ctx.session_id = None;
+            let text = usage_limit_lines(&state, None, &Theme::current())
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains("Session usage is unavailable until the session starts."));
+            assert!(!text.contains("Loading session usage"));
+            assert!(!text.contains("$0"));
+        }
     }
 
     #[test]

@@ -3,6 +3,7 @@ import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 export { CredentialStore } from './store.mjs';
 import { catalogRevision, validateReasoningMetadata, validateSelectedEffort } from './model-settings.mjs';
 import { diagnostic } from './diagnostics.mjs';
+import { applyFast, FAST_HEADER, supportsFast } from './fast.mjs';
 
 function waiter(promise, signal) {
   if (!signal) return promise;
@@ -127,6 +128,12 @@ export class NativeProviderService {
       const url = new URL(req.url, this.url);
       if (req.method === 'GET' && url.pathname === '/control/catalog') return reply(await this.catalog(false, signal));
       if (req.method === 'POST' && url.pathname === '/control/refresh') { await readBody(); return reply(await this.catalog(true, signal)); }
+      if (req.method === 'POST' && url.pathname === '/control/fast-capability') {
+        const b = await readBody();
+        const snapshot = await this.credentialSnapshot(b.provider, signal);
+        const models = await this.modelsFor(b.provider, snapshot, true, signal);
+        return reply({ supported: supportsFast(b.provider, models.find(m => m.id === b.model)) });
+      }
       if (req.method === 'POST' && url.pathname === '/control/validate-model') {
         const b = await readBody();
         const snapshot = await this.credentialSnapshot(b.provider, signal);
@@ -153,10 +160,12 @@ export class NativeProviderService {
         if (typeof body.model !== 'string') throw error('Model is required');
         if (body.model.startsWith(provider + '/')) body.model = body.model.slice(provider.length + 1);
         const snapshot = await this.credentialSnapshot(provider, signal);
-        const models = await this.modelsFor(provider, snapshot, false, signal);
+        const priorityRequested = req.headers[FAST_HEADER] === 'on' || body.service_tier === 'priority';
+        const models = await this.modelsFor(provider, snapshot, priorityRequested, signal);
         const model = models.find(m => m.id === body.model);
         if (!model) throw error('Model is not advertised by the selected provider');
         validateSelectedEffort(model, body);
+        applyFast(provider, model, body, req.headers[FAST_HEADER]);
         return this.providers[provider].complete(body, snapshot.credential, { signal });
       }
       throw error('Unknown bridge endpoint', 404);

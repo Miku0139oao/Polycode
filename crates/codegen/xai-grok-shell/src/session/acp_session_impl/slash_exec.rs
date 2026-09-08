@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "fast.rs"]
+mod fast;
+
 impl SessionActor {
     /// Execute a built-in slash command (e.g. `/compact`, `/yolo`).
     pub(super) fn execute_builtin_slash_command(
@@ -18,6 +21,11 @@ impl SessionActor {
                 },
             );
             match action {
+                BuiltinAction::Fast { args } => {
+                    let text = self.execute_fast_command(&args).await;
+                    self.send_host_turn_slash_command_output(&text).await;
+                    ok_end_turn(0, None)
+                }
                 BuiltinAction::Compact { user_context } => {
                     self.run_compact(user_context).await?;
                     ok_end_turn(0, None)

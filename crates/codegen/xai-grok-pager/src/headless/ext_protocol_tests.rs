@@ -417,7 +417,7 @@ fn headless_version_mismatch_logs_warn_with_both_versions() {
         "log names the method: {logs}"
     );
     let banner = crate::glyphs::sanitize_toast_message(
-        "⚠ Version mismatch: client 0.1.157, leader 0.1.150. Restart grok to match",
+        "⚠ Version mismatch: client 0.1.157, leader 0.1.150. Restart Polycode to match",
     );
     assert!(
         logs.contains(banner.as_ref()),
@@ -441,7 +441,7 @@ fn headless_version_mismatch_without_message_still_warns() {
     assert!(is_none);
     assert!(logs.contains("WARN"), "logged at warn level: {logs}");
     let banner = crate::glyphs::sanitize_toast_message(
-        "⚠ Version mismatch: client 0.1.157, leader 0.1.150. Restart grok to match",
+        "⚠ Version mismatch: client 0.1.157, leader 0.1.150. Restart Polycode to match",
     );
     assert!(
         logs.contains(banner.as_ref()),

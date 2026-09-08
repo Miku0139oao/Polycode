@@ -118,7 +118,7 @@ impl ExternalAgentConfig {
             || args.reasoning_effort.is_some()
         {
             bail!(
-                "external ACP does not support Grok permission overrides, agent/system prompt/rules or reasoning-effort flags; configure the external agent instead"
+                "external ACP does not support Polycode permission overrides, agent/system prompt/rules or reasoning-effort flags; configure the external agent instead"
             );
         }
         Ok(())
@@ -128,7 +128,7 @@ impl ExternalAgentConfig {
 pub(crate) fn unsupported() -> acp::Error {
     acp::Error::new(
         acp::ErrorCode::MethodNotFound.into(),
-        "Unsupported by external ACP backend (native Grok extensions are disabled)",
+        "Unsupported by external ACP backend (native Polycode extensions are disabled)",
     )
 }
 

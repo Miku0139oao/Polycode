@@ -1524,13 +1524,22 @@ fn session_usage_keeps_scroll_when_page_flip_off() {
 }
 
 #[test]
-fn show_usage_on_welcome_screen_is_noop() {
-    let mut app = test_app();
-    let effects = dispatch(Action::ShowUsage, &mut app);
-    assert!(
-        effects.is_empty(),
-        "ShowUsage with no active agent should be a no-op"
-    );
+fn show_usage_on_welcome_screen_explains_missing_session() {
+    for mode in [
+        crate::app::ScreenMode::Fullscreen,
+        crate::app::ScreenMode::Minimal,
+    ] {
+        let mut app = test_app();
+        app.screen_mode = mode;
+        let effects = dispatch(Action::ShowUsage, &mut app);
+        assert!(effects.is_empty());
+        assert_eq!(
+            app.welcome_toast
+                .as_ref()
+                .map(|(message, _)| message.as_str()),
+            Some("Session usage is unavailable until the session starts.")
+        );
+    }
 }
 
 #[test]
@@ -1618,6 +1627,94 @@ fn show_usage_opens_modal_on_usage_limit_tab_with_fetches() {
             ]
         ),
         "got: {effects:?}"
+    );
+}
+
+#[test]
+fn external_auth_usage_fetches_session_data_without_native_billing() {
+    let mut app = test_app_with_agent();
+    app.has_external_auth_provider = true;
+    app.usage_visible = true;
+    let effects = dispatch(Action::ShowUsage, &mut app);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::FetchSessionUsage { .. }))
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::FetchBilling { .. }))
+    );
+    assert!(!usage_modal_state(&app).billing_loading);
+    assert!(dispatch(Action::ManageBilling, &mut app).is_empty());
+    app.screen_mode = crate::app::ScreenMode::Minimal;
+    for redirect in [None, Some("https://native.example/billing".into())] {
+        app.usage_billing_redirect_url = redirect;
+        let before = agent_scrollback_len(&app);
+        assert!(
+            super::super::status::append_consumer_billing_surface(&mut app, AgentId(0)).is_empty()
+        );
+        assert_eq!(agent_scrollback_len(&app), before);
+    }
+}
+
+#[test]
+fn usage_modal_reopens_when_billing_access_changes() {
+    for external_auth in [false, true] {
+        let mut app = test_app_with_agent();
+        dispatch(Action::ShowUsage, &mut app);
+        let old_nonce = current_usage_nonce(&app);
+        assert!(usage_modal_state(&app).billing_loading);
+        if external_auth {
+            app.has_external_auth_provider = true;
+        } else {
+            app.usage_visible = false;
+        }
+        let effects = dispatch(Action::ShowUsage, &mut app);
+        assert_ne!(old_nonce, current_usage_nonce(&app));
+        assert!(!usage_modal_state(&app).ctx.usage_visible);
+        assert!(!usage_modal_state(&app).billing_loading);
+        assert!(matches!(
+            effects.as_slice(),
+            [
+                Effect::ShowContextInfo { .. },
+                Effect::ShowSessionInfo { .. },
+                Effect::FetchSessionUsage { .. },
+            ]
+        ));
+        assert!(dispatch(Action::ShowUsage, &mut app).is_empty());
+
+        app.has_external_auth_provider = false;
+        app.usage_visible = true;
+        let effects = dispatch(Action::ShowUsage, &mut app);
+        assert!(usage_modal_state(&app).ctx.usage_visible);
+        assert!(usage_modal_state(&app).billing_loading);
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::FetchBilling { .. }))
+        );
+    }
+}
+
+#[test]
+fn usage_modal_refetches_when_session_starts() {
+    let mut app = test_app_with_agent();
+    app.agents.get_mut(&AgentId(0)).unwrap().session.session_id = None;
+    dispatch(Action::ShowUsage, &mut app);
+    let old_nonce = current_usage_nonce(&app);
+    app.agents.get_mut(&AgentId(0)).unwrap().session.session_id = Some("started-session".into());
+    let effects = dispatch(Action::ShowUsage, &mut app);
+    assert_ne!(old_nonce, current_usage_nonce(&app));
+    assert_eq!(
+        usage_modal_state(&app).ctx.session_id.as_deref(),
+        Some("started-session")
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::FetchSessionUsage { .. }))
     );
 }
 

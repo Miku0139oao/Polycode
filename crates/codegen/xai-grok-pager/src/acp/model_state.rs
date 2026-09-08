@@ -226,13 +226,25 @@ impl ModelState {
 
     /// Resolve a user-supplied name to a `ModelId` via case-insensitive ASCII match against the catalog.
     pub fn resolve_by_name_or_id(&self, query: &str) -> Option<acp::ModelId> {
-        self.available.iter().find_map(|(id, info)| {
-            if info.name.eq_ignore_ascii_case(query) || id.0.as_ref().eq_ignore_ascii_case(query) {
-                Some(id.clone())
-            } else {
-                None
-            }
-        })
+        self.available
+            .keys()
+            .find(|id| id.0.as_ref().eq_ignore_ascii_case(query))
+            .cloned()
+            .or_else(|| {
+                let mut matches = self.available.iter().filter(|(id, info)| {
+                    info.name.eq_ignore_ascii_case(query)
+                        || id
+                            .0
+                            .split_once('/')
+                            .is_some_and(|(_, name)| name.eq_ignore_ascii_case(query))
+                        || info
+                            .name
+                            .split_once(" / ")
+                            .is_some_and(|(_, name)| name.eq_ignore_ascii_case(query))
+                });
+                let (id, _) = matches.next()?;
+                matches.next().is_none().then(|| id.clone())
+            })
     }
 
     pub fn display_name_for(&self, id: &acp::ModelId) -> String {

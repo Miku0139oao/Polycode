@@ -166,15 +166,24 @@ fn model_settings_selection_captures_the_picker_catalog_revision() {
     use super::super::provider::queue_model_switch;
     let mut app = test_app_with_agent();
     let model = acp::ModelId::new("codex/actual");
-    app.models.available.insert(model.clone(), acp::ModelInfo::new(model.clone(), "Actual"));
+    app.models
+        .available
+        .insert(model.clone(), acp::ModelInfo::new(model.clone(), "Actual"));
     app.provider.catalog = serde_json::from_value(serde_json::json!({"providers":[{
         "id":"codex","name":"ChatGPT","loggedIn":true,"catalogRevision":"a".repeat(64),
-        "models":[{"id":"actual","name":"Actual","contextWindow":64000}]}]})).unwrap();
+        "models":[{"id":"actual","name":"Actual","contextWindow":64000}]}]}))
+    .unwrap();
     let effects = queue_model_switch(&mut app, AgentId(0), model, None);
-    let Effect::PolycodeSwitchModel(selection) = &effects[0] else { panic!("expected queued switch") };
+    let Effect::PolycodeSwitchModel(selection) = &effects[0] else {
+        panic!("expected queued switch")
+    };
     assert_eq!(selection.catalog_revision, Some("a".repeat(64)));
     app.provider.catalog.providers[0].catalog_revision = Some("b".repeat(64));
-    assert_eq!(selection.catalog_revision, Some("a".repeat(64)), "refresh must not silently upgrade a pending target's account/catalog");
+    assert_eq!(
+        selection.catalog_revision,
+        Some("a".repeat(64)),
+        "refresh must not silently upgrade a pending target's account/catalog"
+    );
 }
 
 #[test]
@@ -356,10 +365,172 @@ fn polycode_native_and_subscription_catalogs_coexist_in_the_existing_model_picke
             .available
             .contains_key(&grok)
     );
-    let q = app.agents[&AgentId(0)].question_view.as_ref().unwrap();
-    assert_eq!(
-        q.questions[0].options[0].id.as_deref(),
-        Some("model:cursor/actual")
+    let crate::views::modal::ActiveModal::ArgPicker { items, state, .. } =
+        app.agents[&AgentId(0)].active_modal.as_ref().unwrap()
+    else {
+        panic!("expected searchable picker")
+    };
+    assert_eq!(items.len(), 2);
+    assert!(items.iter().any(|item| item.insert_text == "native-grok"));
+    assert!(items.iter().any(|item| item.insert_text == "cursor/actual"));
+    assert!(state.search_active);
+    assert!(app.agents[&AgentId(0)].question_view.is_none());
+}
+
+#[test]
+fn polycode_provider_picker_selection_routes_through_reasoning_effort_card() {
+    use crossterm::event::KeyCode;
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model = acp::ModelId::new("codex/reasoning");
+    app.models.available.clear();
+    app.models.available.insert(
+        model.clone(),
+        acp::ModelInfo::new(model, "Reasoning").meta(
+            serde_json::json!({"supportsReasoningEffort":true,"reasoningEfforts":["high"]})
+                .as_object()
+                .cloned(),
+        ),
     );
-    assert!(q.response_tx.is_none());
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .prompt
+        .set_text("keep draft");
+    dispatch_enabled(
+        &mut app,
+        Command::Choose {
+            provider: Choice::Grok,
+            login: false,
+        },
+    );
+    let crate::app::app_view::InputOutcome::Action(Action::Provider(command)) =
+        provider_picker_key(&mut app, KeyCode::Enter)
+    else {
+        panic!("selection missing")
+    };
+    let effects = dispatch_enabled(&mut app, command);
+    assert!(effects.is_empty());
+    assert!(app.agents[&id].active_modal.is_none());
+    let question = app.agents[&id].question_view.as_ref().unwrap();
+    assert!(
+        question.questions[0]
+            .options
+            .iter()
+            .any(|o| o.id.as_deref() == Some("model-effort:high:codex/reasoning"))
+    );
+    assert!(question.response_tx.is_none());
+    dispatch_enabled(&mut app, Command::Cancel);
+    assert_eq!(app.agents[&id].prompt.text(), "keep draft");
+}
+
+fn provider_picker_key(
+    app: &mut AppView,
+    code: crossterm::event::KeyCode,
+) -> crate::app::app_view::InputOutcome {
+    app.handle_input(&crossterm::event::Event::Key(
+        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE),
+    ))
+}
+
+#[test]
+fn polycode_provider_picker_search_filter_select_at_startup() {
+    use crate::views::modal::ActiveModal;
+    use crossterm::event::KeyCode;
+    let mut app = test_app();
+    let native = acp::ModelId::new("native-grok");
+    let cursor = acp::ModelId::new("cursor/actual");
+    app.models.available.clear();
+    app.models
+        .available
+        .insert(native.clone(), acp::ModelInfo::new(native, "Shared"));
+    app.models.available.insert(
+        cursor.clone(),
+        acp::ModelInfo::new(cursor.clone(), "Shared"),
+    );
+    app.provider.catalog = serde_json::from_value(serde_json::json!({"providers":[{
+        "id":"cursor","name":"Cursor","loggedIn":true,
+        "models":[{"id":"actual","name":"Shared"}]}]}))
+    .unwrap();
+    let effects = dispatch_enabled(
+        &mut app,
+        Command::Choose {
+            provider: Choice::Grok,
+            login: false,
+        },
+    );
+    let id = app.provider.local_target.unwrap();
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::CreateSession { .. }))
+    );
+    for c in "CURSOR".chars() {
+        provider_picker_key(&mut app, KeyCode::Char(c));
+    }
+    let Some(ActiveModal::ArgPicker { items, state, .. }) = app.agents[&id].active_modal.as_ref()
+    else {
+        panic!("picker missing")
+    };
+    assert_eq!(state.query(), "CURSOR");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].insert_text, "cursor/actual");
+    provider_picker_key(&mut app, KeyCode::Char('z'));
+    let Some(ActiveModal::ArgPicker { items, .. }) = app.agents[&id].active_modal.as_ref() else {
+        panic!("picker missing")
+    };
+    assert!(items.is_empty());
+    assert!(!matches!(
+        provider_picker_key(&mut app, KeyCode::Enter),
+        crate::app::app_view::InputOutcome::Action(_)
+    ));
+    provider_picker_key(&mut app, KeyCode::Backspace);
+    let crate::app::app_view::InputOutcome::Action(Action::Provider(command)) =
+        provider_picker_key(&mut app, KeyCode::Enter)
+    else {
+        panic!("selection missing")
+    };
+    assert!(matches!(&command, Command::Model(model) if model == "cursor/actual"));
+    let effects = dispatch_enabled(&mut app, command);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::CreateSession { .. }))
+    );
+    assert!(app.provider.creating);
+    assert_eq!(app.provider.local_target, Some(id));
+}
+
+#[test]
+fn polycode_provider_picker_escape_retires_startup_without_creation() {
+    use crossterm::event::KeyCode;
+    let mut app = test_app();
+    let model = acp::ModelId::new("native-grok");
+    app.models
+        .available
+        .insert(model.clone(), acp::ModelInfo::new(model, "Grok"));
+    dispatch_enabled(
+        &mut app,
+        Command::Choose {
+            provider: Choice::Grok,
+            login: false,
+        },
+    );
+    let id = app.provider.local_target.unwrap();
+    provider_picker_key(&mut app, KeyCode::Char('g'));
+    let crate::app::app_view::InputOutcome::Action(Action::Provider(command)) =
+        provider_picker_key(&mut app, KeyCode::Esc)
+    else {
+        panic!("cancel missing")
+    };
+    assert!(matches!(command, Command::Cancel));
+    let effects = dispatch_enabled(&mut app, command);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::CreateSession { .. }))
+    );
+    assert!(app.provider.local_target.is_none());
+    assert!(!app.agents.contains_key(&id));
+    assert_eq!(app.active_view, ActiveView::Welcome);
 }

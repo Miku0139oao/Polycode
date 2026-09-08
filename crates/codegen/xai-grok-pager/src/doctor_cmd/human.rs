@@ -5,11 +5,11 @@ use crate::diagnostics::{
 };
 use crate::host::{DisplayServer, HostOs};
 
-const LIVE_TUI_PROBE_CTA: &str = "Some checks only run in Grok. Start Grok and run /doctor.";
+const LIVE_TUI_PROBE_CTA: &str = "Some checks only run in Polycode. Start Polycode and run /doctor.";
 
 pub(super) fn format(report: &DiagnosticReport) -> String {
     let facts = &report.facts;
-    let mut out = String::from("Grok Doctor\n\nEnvironment\n");
+    let mut out = String::from("Polycode Doctor\n\nEnvironment\n");
 
     fact(&mut out, "terminal", &facts.terminal.to_string());
     match &facts.xtversion {

@@ -68,7 +68,7 @@ pub(super) fn open_usage_info_modal_for_provider(
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
-    let usage_visible = app.usage_visible;
+    let usage_visible = app.usage_visible && !app.has_external_auth_provider;
     let redirect_url = app.usage_billing_redirect_url.clone();
     let tier = app.subscription_tier.clone();
     let show_resolved_model = app.show_resolved_model;
@@ -85,6 +85,8 @@ pub(super) fn open_usage_info_modal_for_provider(
     if let Some(state) = usage_modal_state_mut(agent)
         && state.ctx.provider == provider
         && state.ctx.active_model == active_model
+        && state.ctx.session_id.as_deref() == session_id.as_ref().map(|id| id.0.as_ref())
+        && state.ctx.usage_visible == usage_visible
     {
         state.set_tab(tab);
         return vec![];
@@ -364,6 +366,10 @@ pub(super) fn dispatch_show_context_info(app: &mut AppView) -> Vec<Effect> {
 /// `/usage`: open the usage modal on its "Usage limit" tab.
 /// Minimal mode keeps the scrollback flow: session token/cost, then consumer credits.
 pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
+    if !matches!(app.active_view, ActiveView::Agent(id) if app.agents.contains_key(&id)) {
+        app.show_toast("Session usage is unavailable until the session starts.");
+        return vec![];
+    }
     if !app.screen_mode.is_minimal() {
         return open_usage_info_modal(app, crate::views::usage_modal::UsageInfoTab::UsageLimit);
     }
@@ -459,7 +465,11 @@ pub(super) fn append_consumer_billing_surface_for_provider(
     let Some(agent) = app.agents.get(&agent_id) else {
         return vec![];
     };
-    if !provider.permits_native_billing() || agent.chat_kind || !app.usage_visible {
+    if !provider.permits_native_billing()
+        || agent.chat_kind
+        || !app.usage_visible
+        || app.has_external_auth_provider
+    {
         return vec![];
     }
     // Remote-settings kill switch (`grok_build_usage_redirect_url`): link out instead of fetching billing from the backend
@@ -498,7 +508,7 @@ pub(super) fn dispatch_manage_billing(app: &mut AppView) -> Vec<Effect> {
         app.show_toast("Native xAI billing is separate; choose an active native Grok session");
         return vec![];
     }
-    if !app.usage_visible {
+    if !app.usage_visible || app.has_external_auth_provider {
         return vec![];
     }
     super::router::dispatch(

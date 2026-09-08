@@ -67,8 +67,8 @@ fn collect_report_joins_registry_and_flags_untracked() {
     let tmp = tempfile::TempDir::new().unwrap();
     let base = dunce::canonicalize(tmp.path()).unwrap();
     let home = base.join("grok-home");
-    let tracked = home.join("worktrees/xai/wt-tracked");
-    let untracked = home.join("worktrees/xai/wt-untracked");
+    let tracked = home.join("worktrees").join("xai").join("wt-tracked");
+    let untracked = home.join("worktrees").join("xai").join("wt-untracked");
     let external = base.join("external-repo");
     std::fs::create_dir_all(&tracked).unwrap();
     std::fs::create_dir_all(&untracked).unwrap();
@@ -817,7 +817,12 @@ fn print_report_renders_registry_notices() {
             name: "a corrupt registry names the file even with no rows",
             registry: RegistryState::Corrupt,
             rows: false,
-            expected: &["Worktree registry is damaged", "Remove", "worktrees.db"],
+            expected: &[
+                "Worktree registry is damaged",
+                "Remove",
+                "worktrees.db",
+                "`polycode worktree db rebuild`",
+            ],
             absent: &[],
         },
         Case {
@@ -872,8 +877,8 @@ fn print_report_renders_registry_notices() {
 // Bare `gc` reclaims nothing: without `--max-age` the age pass is off, and the pass only walks registry records
 #[test]
 fn reclaim_hint_names_a_sequence_that_frees_space() {
-    const AGE: &str = "run `grok worktree gc --max-age 7d --dry-run`";
-    const RM: &str = "Remove one with `grok worktree rm --dry-run <path>`";
+    const AGE: &str = "run `polycode worktree gc --max-age 7d --dry-run`";
+    const RM: &str = "Remove one with `polycode worktree rm --dry-run <path>`";
     let tracked = tracked_row(60, record("wt-1", 0));
 
     let text = render_report(&worktrees_report(vec![tracked], 100), 0);
