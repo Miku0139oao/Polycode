@@ -5,7 +5,7 @@ on:
       action:
         description: Build an artifact, or publish previously accepted bytes
         type: choice
-        options: [build, publish]
+        options: [build, publish, terminal-probe]
         default: build
       version:
         description: New immutable prerelease tag
@@ -19,6 +19,27 @@ permissions:
   contents: read
   actions: read
 jobs:
+  terminal-probe:
+    if: inputs.action == 'terminal-probe'
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - shell: pwsh
+        run: |
+          npm install --prefix .ci/pty --no-audit --no-fund node-pty@1.1.0
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $env:NODE_PTY_MODULE = "$PWD\.ci\pty\node_modules\node-pty"
+          node integrations/tests/windows-terminal-probe.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-terminal-probe
+          path: windows-terminal-probe.json
   build:
     if: inputs.action == 'build'
     runs-on: windows-2022
