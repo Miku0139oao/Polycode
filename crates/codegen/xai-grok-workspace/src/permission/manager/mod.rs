@@ -1263,11 +1263,15 @@ fn session_grant_pre_decision(
     bash_evaluation: Option<&BashEvaluation>,
     state: &PermissionState,
     allow_edits_for_session: bool,
+    allow_computer_for_session: bool,
     static_domain_matcher: &DomainMatcher,
     honor_static_web_allowlist: bool,
     yolo_pin: Option<&'static str>,
 ) -> Option<(Decision, &'static str)> {
     match access {
+        AccessKind::Computer(_) if allow_computer_for_session => {
+            grant_allow(reasons::SESSION_GRANT)
+        }
         AccessKind::MCPTool { name, .. } => mcp_pre_decision(name, state, false, false).map(|d| {
             let reason = if matches!(d, Decision::Reject(_)) {
                 reasons::SESSION_DENY
@@ -1306,7 +1310,8 @@ fn session_grant_pre_decision(
         | AccessKind::Grep { .. }
         | AccessKind::WebSearch(_)
         | AccessKind::Edit(_)
-        | AccessKind::AgentMessage { .. } => None,
+        | AccessKind::AgentMessage { .. }
+        | AccessKind::Computer(_) => None,
     }
 }
 
@@ -1459,6 +1464,8 @@ pub fn spawn_permission_manager_with_pin(
         let mut project_instructions: Option<String> = None;
         let mut pin_refusal_logged = false;
         let mut allow_edits_for_session = false;
+        // Session-scoped "allow computer use" grant; in-memory only, cleared with `ResetState`.
+        let mut allow_computer_for_session = false;
         let prompt_policy = permission_config
             .as_ref()
             .map(|c| c.prompt_policy)
@@ -1511,6 +1518,7 @@ pub fn spawn_permission_manager_with_pin(
                     state = PermissionState::default();
                     replace_state_on_disk(&cwd, &state, client_id_ref).await;
                     allow_edits_for_session = false;
+                    allow_computer_for_session = false;
                     tracing::info!(
                         "Permission state reset to defaults (including session edit allow)"
                     );
@@ -1557,6 +1565,9 @@ pub fn spawn_permission_manager_with_pin(
                         }
                         AccessKind::AgentMessage { subagent_id } => {
                             ("agent_message".to_owned(), Some(subagent_id.clone()))
+                        }
+                        AccessKind::Computer(summary) => {
+                            ("computer".to_owned(), Some(summary.clone()))
                         }
                     };
 
@@ -1767,6 +1778,7 @@ pub fn spawn_permission_manager_with_pin(
                             bash_evaluation.as_ref(),
                             &state,
                             allow_edits_for_session,
+                            allow_computer_for_session,
                             &static_domain_matcher,
                             !(auto_mode && web_fetch_allowlist_is_default),
                             yolo_pin,
@@ -2194,6 +2206,8 @@ pub fn spawn_permission_manager_with_pin(
                             }
                         }
                         AccessKind::AgentMessage { .. } => None,
+                        AccessKind::Computer(_) => allow_computer_for_session
+                            .then_some((Decision::Allow, reasons::SESSION_GRANT)),
                         AccessKind::WebFetch(url) => match url::Url::parse(url) {
                             Ok(parsed_url) => {
                                 if let Some(reject) =
@@ -2435,6 +2449,13 @@ pub fn spawn_permission_manager_with_pin(
                                 PromptOutcome::AllowOnce => Decision::Allow,
                                 PromptOutcome::AllowEditsForSession => {
                                     allow_edits_for_session = true;
+                                    Decision::Allow
+                                }
+                                PromptOutcome::AllowAlways
+                                    if matches!(&access, AccessKind::Computer(_)) =>
+                                {
+                                    // Desktop control grants are session-scoped and never persisted.
+                                    allow_computer_for_session = true;
                                     Decision::Allow
                                 }
                                 PromptOutcome::AllowAlways => {
@@ -10572,6 +10593,121 @@ mod tests {
                 let d3 = decide(&reloaded, access(), tool_call()).await;
                 assert!(matches!(&d3, Decision::Reject(r) if r.contains("previously rejected")));
                 assert_eq!(reload_prompts.borrow().len(), 0);
+            })
+            .await;
+    }
+
+    /// The `computer` tool always prompts; "allow for the rest of this session" suppresses
+    /// later prompts in the same manager but is never written to disk and never bleeds into
+    /// other access kinds.
+    #[tokio::test]
+    async fn computer_session_grant_is_in_memory_only() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+
+                /// Picks "allow computer use for the rest of this session" when offered,
+                /// otherwise allow-once; records every prompt.
+                #[derive(Default)]
+                struct ComputerSessionClient {
+                    prompts: std::rc::Rc<std::cell::RefCell<Vec<acp::RequestPermissionRequest>>>,
+                }
+                #[async_trait::async_trait(?Send)]
+                impl acp::Client for ComputerSessionClient {
+                    async fn request_permission(
+                        &self,
+                        args: acp::RequestPermissionRequest,
+                    ) -> acp::Result<acp::RequestPermissionResponse> {
+                        let pick = |id: &str| {
+                            args.options
+                                .iter()
+                                .find(|o| o.option_id.0.as_ref() == id)
+                                .map(|o| o.option_id.clone())
+                        };
+                        let option_id =
+                            pick(crate::permission::prompter::ALLOW_COMPUTER_SESSION_OPTION_ID)
+                                .or_else(|| pick("allow-once"))
+                                .expect("prompt offers allow-once");
+                        self.prompts.borrow_mut().push(args);
+                        Ok(acp::RequestPermissionResponse::new(
+                            acp::RequestPermissionOutcome::Selected(
+                                acp::SelectedPermissionOutcome::new(option_id),
+                            ),
+                        ))
+                    }
+                    async fn session_notification(
+                        &self,
+                        _: acp::SessionNotification,
+                    ) -> acp::Result<()> {
+                        Ok(())
+                    }
+                }
+
+                let client = ComputerSessionClient::default();
+                let prompts = client.prompts.clone();
+                let (mgr, _e) = manager_with_recording_client_remember(
+                    &cwd,
+                    None,
+                    client,
+                    ClientType::GrokPager,
+                    true,
+                );
+
+                let d = decide(
+                    &mgr,
+                    AccessKind::Computer("click left at (10, 20)".into()),
+                    tool_call(),
+                )
+                .await;
+                assert_eq!(d, Decision::Allow);
+                assert_eq!(prompts.borrow().len(), 1, "first computer call must prompt");
+
+                let d2 = decide(
+                    &mgr,
+                    AccessKind::Computer("type \"hello\"".into()),
+                    tool_call(),
+                )
+                .await;
+                assert_eq!(d2, Decision::Allow);
+                assert_eq!(
+                    prompts.borrow().len(),
+                    1,
+                    "session grant suppresses the second computer prompt"
+                );
+
+                let persisted = crate::permission::state::load_state_from_disk(&cwd, None).await;
+                assert_eq!(
+                    serde_json::to_value(&persisted).unwrap(),
+                    serde_json::to_value(PermissionState::default()).unwrap(),
+                    "desktop-control grants must never be persisted"
+                );
+
+                // The grant is scoped to `computer`: an edit still reaches the prompt.
+                let edit = decide(&mgr, AccessKind::Edit("src/main.rs".into()), tool_call()).await;
+                assert_eq!(edit, Decision::Allow);
+                assert_eq!(
+                    prompts.borrow().len(),
+                    2,
+                    "computer grant must not pre-decide edits"
+                );
+
+                let reload_client = RecordingClient::default();
+                let reload_prompts = reload_client.prompts.clone();
+                let (reloaded, _e2) =
+                    manager_with_recording_client(&cwd, None, reload_client, ClientType::GrokPager);
+                let d3 = decide(
+                    &reloaded,
+                    AccessKind::Computer("click left at (10, 20)".into()),
+                    tool_call(),
+                )
+                .await;
+                assert!(
+                    matches!(d3, Decision::Reject(_)),
+                    "fresh manager prompts again"
+                );
+                assert_eq!(reload_prompts.borrow().len(), 1);
             })
             .await;
     }

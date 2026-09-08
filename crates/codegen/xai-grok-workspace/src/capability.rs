@@ -97,6 +97,7 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::Monitor,
     ToolKind::GoalUpdate,
     ToolKind::Workflow,
+    ToolKind::ComputerUse,
     ToolKind::Other,
 ];
 
@@ -141,6 +142,9 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
 
         BackgroundTaskAction | WaitTasksAction | KillTaskAction | Task | ActiveAgentMessage
         | Monitor | Workflow => matches!(mode, M::Execute),
+
+        // Desktop control drives arbitrary applications: execute class.
+        ComputerUse => matches!(mode, M::Execute),
 
         // Integration dispatch.
         UseTool => matches!(mode, M::ReadWrite | M::Execute),

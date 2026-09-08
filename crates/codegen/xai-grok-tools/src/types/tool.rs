@@ -103,6 +103,8 @@ pub enum ToolKind {
     Monitor,
     GoalUpdate,
     Workflow,
+    /// Desktop computer use: screenshot plus mouse/keyboard actions on the local display.
+    ComputerUse,
     #[serde(other)]
     Other,
 }

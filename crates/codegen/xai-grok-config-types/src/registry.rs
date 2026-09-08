@@ -52,6 +52,10 @@ pub enum Feature {
     /// long task before compaction. Model-agnostic port of Codex's experimental
     /// context management (token-budget tier). Off by default.
     ContextBudget,
+    /// Expose the first-party `computer` tool (screenshot + mouse/keyboard actions on the
+    /// local desktop). Model-agnostic port of Codex's computer use; every call goes through
+    /// the native permission flow. Off by default.
+    ComputerUse,
 }
 
 /// How one feature is written on each surface it can be set from.
@@ -248,6 +252,14 @@ pub const FEATURES: &[FeatureSpec] = &[
         env: "GROK_CONTEXT_BUDGET",
         default_enabled: false,
         remote: Some(|settings| settings.context_budget_enabled),
+    },
+    FeatureSpec {
+        id: Feature::ComputerUse,
+        key: "computer_use",
+        path: "features.computer_use",
+        env: "GROK_COMPUTER_USE",
+        default_enabled: false,
+        remote: Some(|settings| settings.computer_use_enabled),
     },
 ];
 

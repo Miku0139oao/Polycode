@@ -77,6 +77,7 @@ fn registered_settings() {
             ),
             ("dock", ("GROK_DOCK", false)),
             ("context_budget", ("GROK_CONTEXT_BUDGET", false)),
+            ("computer_use", ("GROK_COMPUTER_USE", false)),
         ]),
     );
 }
@@ -111,6 +112,7 @@ fn every_registered_feature_reads_its_own_remote_setting() {
             }
             Feature::Dock => settings.dock_enabled = Some(value),
             Feature::ContextBudget => settings.context_budget_enabled = Some(value),
+            Feature::ComputerUse => settings.computer_use_enabled = Some(value),
             // The one row with no remote tier, stated as such rather than as a projection that reads nothing
             Feature::BackendTools => {
                 assert!(spec.remote.is_none(), "{} grew a remote tier", spec.key);

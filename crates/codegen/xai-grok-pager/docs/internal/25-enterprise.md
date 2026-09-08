@@ -31,6 +31,7 @@ Grok controls, not promises of support by an external ACP agent.
 | `repo_status_in_system_prompt` | true |
 | `dock` | false |
 | `context_budget` | false |
+| `computer_use` | false |
 
 See [environment names](22-environment-variables.md). A default is not an
 entitlement: other configuration sources and runtime capabilities can change it.

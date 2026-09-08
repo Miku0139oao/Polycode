@@ -13,6 +13,7 @@ pub(super) fn drain_tool_layer_extracted_images(
             std::mem::take(&mut fc.extracted_images)
         }
         ToolsToolOutput::MCP(mcp) => std::mem::take(&mut mcp.extracted_images),
+        ToolsToolOutput::ComputerUse(cu) => std::mem::take(&mut cu.extracted_images),
         _ => Vec::new(),
     }
 }

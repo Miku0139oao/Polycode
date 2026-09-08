@@ -1371,6 +1371,9 @@ pub(crate) async fn run_shell_child(
         ctx.resolve_subagent_rate_limit_max_attempts(&subagent_model_id),
         ctx.web_search_sampling_config.clone(),
         ctx.web_fetch_config.clone(),
+        // Desktop control stays with the interactive main session; subagents never get the
+        // `computer` tool (they run unattended and cannot be prompted by the user).
+        xai_grok_tools::implementations::grok_build::computer_use::ComputerUseConfig::Disabled,
         ctx.image_gen_config.clone(),
         ctx.video_gen_config.clone(),
         ctx.app_builder_deployer_config.clone(),

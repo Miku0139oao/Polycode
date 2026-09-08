@@ -94,6 +94,8 @@ codebase_indexing = true               # code graph indexing (default: true)
 two_pass_compaction = true             # prefire two-pass compaction (default: true)
 context_budget = false                 # per-turn context-budget reminder so any model can pace a
                                        # long task before compaction (default: false; experimental)
+computer_use = false                   # expose the `computer` tool: screenshot + mouse/keyboard on
+                                       # the local desktop; every call asks permission (default: false)
 remote_fetch = true                    # allow optional online model-catalog fetches (default: true;
                                        # set false for firewalled/air-gapped deployments; background
                                        # managed-config sync has its own switch: managed_config)
@@ -226,9 +228,17 @@ allow_local = false                            # true = allow localhost / 127.0.
 allowed_domains = ["docs.x.ai", "arxiv.org"]
 # ...or block these domains instead (leave allowed_domains unset):
 # excluded_domains = ["reddit.com", "pinterest.com"]
+
+[toolset.computer_use]                 # only used when features.computer_use = true
+display = ":0"                         # Linux/X11 DISPLAY to drive (default: the process DISPLAY)
+max_screenshot_dimension = 1280        # longest screenshot side in px; bigger screens are downscaled
+max_actions_per_call = 20              # cap on actions per `computer` call
+settle_ms = 500                        # pause before the screenshot after input actions
 ```
 
 `allow_local` is off by default (SSRF fail-closed). Turn it on (or set `GROK_WEB_FETCH_ALLOW_LOCAL=1`) and `web_fetch` may reach **explicit** loopback hosts only — private, link-local, and cloud-metadata ranges stay blocked. Resolution: TOML > env > default off.
+
+`[toolset.computer_use]` tunes the `computer` tool (Codex-style computer use, available to every model). The tool is off unless `features.computer_use = true` (or `GROK_COMPUTER_USE=1`). It drives the local desktop through platform tooling — `xdotool` plus a screenshot CLI (`scrot`, `maim`, `import`, `gnome-screenshot`, or `spectacle`) on Linux/X11, `screencapture` + `osascript` on macOS (grant Screen Recording and Accessibility to your terminal), and PowerShell on Windows. The model works in screenshot pixel coordinates; the tool maps them onto the physical screen. Every call is a permission prompt (allow once, allow for the rest of the session, or reject); subagents never receive the tool.
 
 `[toolset.web_search]` constrains the `web_search` tool's domains — the allowlist/blocklist the search itself runs under (not a post-filter). `allowed_domains` and `excluded_domains` are **mutually exclusive**; if you set both, the allowlist wins and the blocklist is dropped with a warning. An empty or absent list is unbounded. This applies to both the backend-hosted search (models with server-side search) and the client-side fallback. A configured policy is **authoritative**: it cannot be bypassed by the model — the model's own per-call `allowed_domains` is ignored whenever you have set `allowed_domains` or `excluded_domains` here (so a blocklist is a real block). The model's per-call allowlist only applies when you have configured nothing. Resolution: requirements → user `config.toml` → managed → default (unset). Config is read at session start, so edit it before starting a session — changes don't apply mid-session.
 
@@ -785,6 +795,8 @@ The key ones. See the README for the complete list.
 | `GROK_WORKFLOWS` | Enable (`1`) or disable (`0`) background workflows and select the `/goal` driver (default on: host-owned workflow driver; off: legacy `update_goal`) |
 | `GROK_WEB_FETCH` | Enable (`1`) or disable (`0`) the web_fetch tool |
 | `GROK_WEB_FETCH_ALLOW_LOCAL` | Allow `web_fetch` to explicit loopback hosts only (`localhost` / `127.0.0.0/8` / `::1`). Same as `[toolset.web_fetch] allow_local`. Default off; private/metadata stay blocked. |
+| `GROK_COMPUTER_USE` | Enable (`1`) or disable (`0`) the `computer` desktop-control tool |
+| `GROK_COMPUTER_USE_DISPLAY` | X11 `DISPLAY` for the `computer` tool on Linux. Same as `[toolset.computer_use] display`. |
 | `GROK_AGENT` | Custom agent definition path or name |
 | `GROK_SANDBOX` | Sandbox profile (off, workspace, devbox, read-only, strict; or a custom profile name) |
 | `GROK_EXIT_TIMEOUT_SECS` | Seconds after a quit is requested before the process is force-exited if teardown hangs (default: 20, `0` disables; a hard exit follows 5s later) |

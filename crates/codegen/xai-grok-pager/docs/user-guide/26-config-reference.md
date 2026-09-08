@@ -203,6 +203,7 @@ User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/con
 | `features.compaction_mode` | `summary / transcript / segments` | `yes` | `user` | Compaction strategy. Also GROK_COMPACTION_MODE. |
 | `features.compaction_tool_choice` | `string` | `yes` | `user` | Tool-choice hint used during compaction. |
 | `features.compaction_verbatim_input` | `boolean` | `pin` | `user` | Enable or disable `compaction_verbatim_input`. Default true. Also `GROK_COMPACTION_VERBATIM_INPUT`. |
+| `features.computer_use` | `boolean` | `pin` | `user` | Expose the `computer` tool (desktop screenshot + mouse/keyboard actions); every call is permission-gated. Default false. Also `GROK_COMPUTER_USE`. |
 | `features.context_budget` | `boolean` | `pin` | `user` | Inject a per-turn context-budget reminder (used/remaining tokens, distance to auto-compact) so any model can pace a long task. Default false. Also `GROK_CONTEXT_BUDGET`. |
 | `features.dock` | `boolean` | `pin` | `user` | Enable or disable `dock`. Default false. Also `GROK_DOCK`. |
 | `features.feedback` | `boolean` | `pin` | `user` | Enable or disable `feedback`. Default true. Also `GROK_FEEDBACK_ENABLED`. |
@@ -555,6 +556,10 @@ User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/con
 | `toolset.bash.max_timeout_secs` | `number` | `yes` | `user` | Cap on model-requested foreground timeouts. |
 | `toolset.bash.output_byte_limit` | `number` | `yes` | `user` | Max captured bash output in bytes. |
 | `toolset.bash.timeout_secs` | `number` | `yes` | `user` | Foreground bash command timeout in seconds. |
+| `toolset.computer_use.display` | `string` | `yes` | `user` | X11 DISPLAY driven by the `computer` tool on Linux. Also GROK_COMPUTER_USE_DISPLAY. |
+| `toolset.computer_use.max_actions_per_call` | `number` | `yes` | `user` | Cap on actions per `computer` call. Default 20. |
+| `toolset.computer_use.max_screenshot_dimension` | `number` | `yes` | `user` | Longest screenshot side in px; larger screens are downscaled. Default 1280. |
+| `toolset.computer_use.settle_ms` | `number` | `yes` | `user` | Pause before the screenshot after input actions, in ms. Default 500. |
 | `toolset.file_toolset` | `standard / hashline` | `yes` | `user` | File edit tool scheme. |
 | `toolset.web_fetch.allowed_domains` | `string[]` | `yes` | `user` | Domain allowlist override for web_fetch. |
 | `toolset.web_fetch.proxy_endpoint` | `string` | `yes` | `user` | Egress proxy URL for web_fetch. Also GROK_WEB_FETCH_PROXY. |

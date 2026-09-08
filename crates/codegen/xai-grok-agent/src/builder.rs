@@ -87,6 +87,8 @@ pub struct AgentBuilder {
     /// When true, web search and X search go to the agentic sampler as native server-side tools instead of registering as local Function tools.
     backend_search: bool,
     web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
+    computer_use_config:
+        xai_grok_tools::implementations::grok_build::computer_use::ComputerUseConfig,
     lsp: Option<std::sync::Arc<dyn xai_grok_tools::implementations::lsp::LspBackend>>,
     image_gen_config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
     video_gen_config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
@@ -222,6 +224,7 @@ impl AgentBuilder {
             web_search_config: Default::default(),
             backend_search: false,
             web_fetch_config: Default::default(),
+            computer_use_config: Default::default(),
             lsp: None,
             image_gen_config: Default::default(),
             video_gen_config: Default::default(),
@@ -433,6 +436,18 @@ impl AgentBuilder {
         config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     ) -> Self {
         self.web_fetch_config = config;
+        self
+    }
+    /// Set the computer-use configuration.
+    ///
+    /// When `Enabled`, the `computer` tool (desktop screenshot + mouse/keyboard) is registered.
+    /// When `Disabled` (default), the tool is not registered.
+    /// Feature-flagged via remote settings `computer_use_enabled`, `[features] computer_use`, and `GROK_COMPUTER_USE`.
+    pub fn with_computer_use_config(
+        mut self,
+        config: xai_grok_tools::implementations::grok_build::computer_use::ComputerUseConfig,
+    ) -> Self {
+        self.computer_use_config = config;
         self
     }
     pub fn with_lsp(
@@ -692,6 +707,12 @@ impl AgentBuilder {
                 use xai_grok_tools::implementations::grok_build;
                 tool_config.tools.push((&grok_build::WebFetchTool).into());
             }
+            if self.computer_use_config.is_enabled() {
+                use xai_grok_tools::implementations::grok_build;
+                tool_config
+                    .tools
+                    .push((&grok_build::ComputerUseTool).into());
+            }
             if self.lsp.is_some() {
                 tool_config
                     .tools
@@ -839,6 +860,14 @@ impl AgentBuilder {
             && let Some(obj) = params_value.as_object()
         {
             merge_tool_params(&mut tool_config, &["GrokBuild:web_fetch"], obj);
+        }
+        if let xai_grok_tools::implementations::grok_build::computer_use::ComputerUseConfig::Enabled {
+            ref params,
+        } = self.computer_use_config
+            && let Ok(params_value) = serde_json::to_value(params)
+            && let Some(obj) = params_value.as_object()
+        {
+            merge_tool_params(&mut tool_config, &["GrokBuild:computer"], obj);
         }
         if let Some(ref bash_params) = self.bash_params_json {
             merge_tool_params(
@@ -1371,6 +1400,50 @@ mod tests {
     #[tokio::test]
     async fn active_agent_messages_predeclared_is_not_duplicated() {
         assert_eq!(active_agent_message_tool_count(Some(true), true).await, 1);
+    }
+    /// `computer` is model-facing only when the `computer_use` feature turns the config on;
+    /// the default (`Disabled`) toolset must not advertise desktop control.
+    #[tokio::test]
+    async fn computer_tool_is_registered_only_when_computer_use_is_enabled() {
+        use xai_grok_tools::computer::local::LocalTerminalBackend;
+        use xai_grok_tools::implementations::grok_build::computer_use::{
+            COMPUTER_USE_TOOL_NAME, ComputerUseConfig, ComputerUseParams,
+        };
+        let build = |config: ComputerUseConfig| {
+            AgentBuilder::new(
+                std::env::temp_dir(),
+                Arc::new(LocalTerminalBackend::new()),
+                ToolNotificationHandle::noop(),
+            )
+            .from_definition(crate::config::AgentDefinition::default_grok_build())
+            .with_computer_use_config(config)
+        };
+        let count = |defs: Vec<xai_grok_sampling_types::ToolDefinition>| {
+            defs.iter()
+                .filter(|d| d.function.name == COMPUTER_USE_TOOL_NAME)
+                .count()
+        };
+
+        let disabled = build(ComputerUseConfig::Disabled)
+            .build()
+            .await
+            .expect("agent should build")
+            .tool_definitions()
+            .await;
+        assert_eq!(count(disabled), 0, "off by default");
+
+        let enabled = build(ComputerUseConfig::Enabled {
+            params: ComputerUseParams {
+                max_actions_per_call: Some(3),
+                ..Default::default()
+            },
+        })
+        .build()
+        .await
+        .expect("agent should build")
+        .tool_definitions()
+        .await;
+        assert_eq!(count(enabled), 1, "registered exactly once when enabled");
     }
     #[tokio::test]
     async fn active_agent_messages_are_absent_from_child_toolsets() {

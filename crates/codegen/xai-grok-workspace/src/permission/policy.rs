@@ -772,6 +772,11 @@ fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>, cwd: Option<&Path
             glob_matches(subagent_id, MatchContext::Freeform, cr.matcher)
                 || subagent_id.starts_with(pattern)
         }
+        // Only `Any` rules reach here (there is no `Computer` tool filter); match the action summary.
+        AccessKind::Computer(summary) => {
+            glob_matches(summary, MatchContext::Freeform, cr.matcher)
+                || summary.starts_with(pattern)
+        }
     }
 }
 

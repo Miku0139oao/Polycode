@@ -27,5 +27,6 @@ External ACP children intentionally do not inherit `GROK_*` variables.
 | `GROK_REPO_STATUS_IN_SYSTEM_PROMPT` | repo_status_in_system_prompt |
 | `GROK_DOCK` | dock |
 | `GROK_CONTEXT_BUDGET` | context_budget |
+| `GROK_COMPUTER_USE` | computer_use |
 
 `GROK_BACKEND_SEARCH` predates the `backend_tools` key; its spelling is intentional.
