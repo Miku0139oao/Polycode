@@ -149,6 +149,7 @@ jobs:
             windows-smoke-report.json
             windows-tools-report.json
             windows-tools-node-report.json
+            windows-tools-terminal.txt
             windows-terminal-probe.json
             windows-smoke-terminal-*.json
   publish:
