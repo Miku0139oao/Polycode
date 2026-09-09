@@ -121,7 +121,7 @@ jobs:
       - name: Package Windows candidate
         shell: pwsh
         env:
-          CANDIDATE_VERSION: ${{ inputs.version }}
+          CANDIDATE_VERSION: ${{ inputs.version || 'v0.2.1' }}
         run: |
           ./integrations/package-release.ps1 -Binary "$PWD/target/x86_64-pc-windows-msvc/release/xai-grok-pager.exe" -Runtime (Get-Command bun.exe).Source -BuildReport "$PWD/native-build.json" -Output "$PWD/candidate-out" -Version $env:CANDIDATE_VERSION
       - name: Install and run candidate in a real Windows terminal
