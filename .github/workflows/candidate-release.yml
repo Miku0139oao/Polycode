@@ -1,5 +1,11 @@
 name: Windows candidate
 on:
+  push:
+    branches:
+      # One-shot trigger so Cloud Agent can start a candidate build without
+      # actions:write (workflow_dispatch returns 403 for the integration token).
+      # Do not merge this branch; the trigger is unused on main.
+      - cursor/windows-candidate-ci-b060
   workflow_dispatch:
     inputs:
       action:
