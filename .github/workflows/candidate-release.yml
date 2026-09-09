@@ -47,7 +47,7 @@ jobs:
           name: windows-terminal-probe
           path: windows-terminal-probe.json
   build:
-    if: inputs.action == 'build'
+    if: github.event_name == 'push' || inputs.action == 'build'
     runs-on: windows-2022
     timeout-minutes: 180
     steps:
