@@ -2,6 +2,7 @@ pub mod acp_types;
 pub mod announcement_state;
 pub mod commands;
 pub(crate) mod compaction_config;
+pub(crate) mod context_budget;
 pub(crate) mod doom_loop_telemetry;
 pub mod handle;
 pub(crate) mod memory_state;

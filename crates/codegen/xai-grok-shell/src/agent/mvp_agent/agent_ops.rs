@@ -2296,6 +2296,22 @@ impl MvpAgent {
         }
         WebFetchConfig::Enabled { params }
     }
+    /// Prepare the computer-use configuration.
+    ///
+    /// Enabled gate: `GROK_COMPUTER_USE` env > `[features] computer_use` > remote settings
+    /// `computer_use_enabled` > default (false). Params come from `[toolset.computer_use]`.
+    pub(super) fn prepare_computer_use_config(
+        &self,
+    ) -> xai_grok_tools::implementations::grok_build::computer_use::ComputerUseConfig {
+        use xai_grok_tools::implementations::grok_build::computer_use::ComputerUseConfig;
+        let cfg = self.cfg.borrow();
+        if !cfg.is_feature_enabled(crate::agent::config::Feature::ComputerUse) {
+            return ComputerUseConfig::Disabled;
+        }
+        ComputerUseConfig::Enabled {
+            params: cfg.toolset.computer_use.resolve_params(),
+        }
+    }
     /// Construct from pre-built components.
     /// Use when the caller needs the `ModelsManager` handle externally (e.g. `run_leader` wires it to the config watcher).
     /// Otherwise prefer [`Self::new`].
@@ -4400,6 +4416,10 @@ impl MvpAgent {
         );
         let compaction_mode = pins.mode;
         let two_pass_enabled = pins.two_pass;
+        let context_budget_enabled = self
+            .cfg
+            .borrow()
+            .is_feature_enabled(crate::agent::config::Feature::ContextBudget);
         let subscription_choice = crate::polycode::is_bridge_endpoint(&sampling_config.base_url)
             .then(|| session_model_id.clone());
         let (session_model_id, mut sampling_config) = self
@@ -4539,6 +4559,7 @@ impl MvpAgent {
         let video_gen_config = self.prepare_video_gen_config();
         let app_builder_deployer_config = self.prepare_app_builder_deployer_config();
         let web_fetch_config = self.prepare_web_fetch_config();
+        let computer_use_config = self.prepare_computer_use_config();
         let write_file_enabled = self
             .cfg
             .borrow()
@@ -4781,6 +4802,7 @@ impl MvpAgent {
                     compaction_verbatim_input,
                     compaction_tool_choice,
                     two_pass_enabled,
+                    context_budget_enabled,
                     buffering_settings,
                     origin_client.clone(),
                     self.codebase_indexes.clone(),
@@ -4819,6 +4841,7 @@ impl MvpAgent {
                     subagent_rate_limit_max_attempts,
                     web_search_sampling_config,
                     web_fetch_config,
+                    computer_use_config,
                     image_gen_config,
                     video_gen_config,
                     app_builder_deployer_config,

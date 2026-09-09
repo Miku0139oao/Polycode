@@ -701,6 +701,10 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::SendSubagentMessageTool>();
         b.register::<grok_build::WebSearchTool>();
         b.register_with_params::<grok_build::WebFetchTool, grok_build::web_fetch::WebFetchParams>();
+        b.register_with_params::<
+                grok_build::ComputerUseTool,
+                grok_build::computer_use::ComputerUseParams,
+            >();
         b.register::<grok_build::LspTool>();
         b.register::<grok_build::ImageGenTool>();
         b.register::<grok_build::ImageEditTool>();

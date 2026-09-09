@@ -2660,6 +2660,34 @@ impl SessionActor {
                 request.x_grok_turn_idx =
                     Some(self.chat_state_handle.get_prompt_index().await.to_string());
                 request.x_grok_agent_id = Some(xai_grok_telemetry::id::agent_id());
+                // Model-agnostic context-budget reminder (opt-in `context_budget` feature).
+                // Ephemeral: appended to this request only, never persisted into history.
+                // Read the gate into a local so the agent borrow is not held across awaits.
+                let context_budget_enabled = self
+                    .agent
+                    .borrow()
+                    .compaction_policy()
+                    .context_budget_enabled;
+                if context_budget_enabled
+                    && let Some(context_window) = self
+                        .chat_state_handle
+                        .get_sampling_config()
+                        .await
+                        .map(|c| c.context_window)
+                {
+                    let used = self.chat_state_handle.get_estimated_total_tokens().await;
+                    if let Some(reminder) =
+                        crate::session::context_budget::build_context_budget_reminder(
+                            used,
+                            context_window,
+                            self.compaction.threshold_percent.get(),
+                        )
+                    {
+                        request.items.push(
+                            xai_grok_sampling_types::ConversationItem::system_reminder(reminder),
+                        );
+                    }
+                }
                 request.x_grok_transient_retry =
                     (transient_retry_attempts > 0).then(|| transient_retry_attempts.to_string());
                 if request.x_grok_deployment_id.is_none() {

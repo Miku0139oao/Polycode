@@ -893,6 +893,14 @@ pub struct RemoteSettings {
     /// `GROK_DOCK` (or the older `GROK_DOCK_V2`) overrides it locally.
     #[serde(default)]
     pub dock_enabled: Option<bool>,
+    /// Per-turn context-budget system reminder (model-agnostic long-task pacing).
+    /// `Some(true)` opts a cohort in; `GROK_CONTEXT_BUDGET` / `[features] context_budget` override locally.
+    #[serde(default)]
+    pub context_budget_enabled: Option<bool>,
+    /// First-party `computer` tool (desktop screenshot + mouse/keyboard actions).
+    /// `Some(true)` opts a cohort in; `GROK_COMPUTER_USE` / `[features] computer_use` override locally.
+    #[serde(default)]
+    pub computer_use_enabled: Option<bool>,
     /// Whether ZDR (Zero Data Retention) users are allowed to use the product.
     /// The default is `false` (blocked) during beta.
     #[serde(default)]

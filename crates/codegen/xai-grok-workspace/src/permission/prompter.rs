@@ -21,6 +21,10 @@ const REJECT_ONCE_LABEL: &str = "No, and tell Grok what to do differently";
 /// Exposed so the pager can recognise it and not record it as a sticky cursor target (see `permission_cursor`).
 pub const ALLOW_EDITS_SESSION_OPTION_ID: &str = "allow-edits-session";
 
+/// Stable option id for the `computer` prompt's "allow computer use for the rest of this session" choice.
+/// Maps to the generic [`PromptOutcome::AllowAlways`]; the manager keeps the grant in memory only (never persisted).
+pub const ALLOW_COMPUTER_SESSION_OPTION_ID: &str = "allow-computer-session";
+
 /// Stable option id for the "enable always-approve mode" option prepended to every permission prompt for TUI / Pager / Desktop clients.
 ///
 /// Shell-side, [`map_selected_outcome`] returns [`PromptOutcome::AllowOnce`]: the request is allowed exactly once and the shell persists nothing.
@@ -287,6 +291,8 @@ pub struct AcpPrompter {
     generic_bash_options: IndexMap<acp::PermissionOptionId, acp::PermissionOption>,
     fallback_options: IndexMap<acp::PermissionOptionId, acp::PermissionOption>,
     agent_message_options: IndexMap<acp::PermissionOptionId, acp::PermissionOption>,
+    /// `computer` tool: allow once, allow for the rest of this session (in-memory only), or reject.
+    computer_options: IndexMap<acp::PermissionOptionId, acp::PermissionOption>,
     /// Per-session `events.jsonl` writer.
     /// [`request`](Self::request) emits a `PermissionRequested` at prompt-start and a paired `PermissionResolved` at decision-time through it.
     /// `EventWriter::noop()` when events recording is disabled (the default for the permission scaffolding's own tests).
@@ -472,6 +478,33 @@ impl AcpPrompter {
             ),
         ]);
 
+        let computer_options = IndexMap::from([
+            (
+                acp::PermissionOptionId::new("allow-once"),
+                acp::PermissionOption::new(
+                    "allow-once",
+                    "Yes, allow once".to_owned(),
+                    acp::PermissionOptionKind::AllowOnce,
+                ),
+            ),
+            (
+                acp::PermissionOptionId::new(ALLOW_COMPUTER_SESSION_OPTION_ID),
+                acp::PermissionOption::new(
+                    ALLOW_COMPUTER_SESSION_OPTION_ID,
+                    "Yes, allow computer use for the rest of this session".to_owned(),
+                    acp::PermissionOptionKind::AllowAlways,
+                ),
+            ),
+            (
+                acp::PermissionOptionId::new("reject-once"),
+                acp::PermissionOption::new(
+                    "reject-once",
+                    REJECT_ONCE_LABEL.to_owned(),
+                    acp::PermissionOptionKind::RejectOnce,
+                ),
+            ),
+        ]);
+
         Self {
             session_id,
             gateway,
@@ -481,6 +514,7 @@ impl AcpPrompter {
             generic_bash_options,
             fallback_options,
             agent_message_options,
+            computer_options,
             // Defaults to noop: the live shell path's own `EventTracker` already emits Permission* events, so the prompter must not double-emit
             // A workspace-server-side caller that owns the per-session `events.jsonl` opts in via [`with_event_writer`]
             event_writer: EventWriter::noop(),
@@ -577,6 +611,7 @@ impl AcpPrompter {
         match access {
             AccessKind::Edit(_) => self.edit_options.clone(),
             AccessKind::AgentMessage { .. } => self.agent_message_options.clone(),
+            AccessKind::Computer(_) => self.computer_options.clone(),
             AccessKind::Bash(bash_command) => {
                 // For GrokTUI clients, use the fancy interactive options with term selection
                 // For generic clients (web, etc.), use simpler options that work without special UI handling
@@ -885,6 +920,9 @@ pub fn tool_name_for_access(access: &AccessKind) -> String {
         AccessKind::WebSearch(_) => "web_search".to_owned(),
         AccessKind::AgentMessage { .. } => {
             xai_grok_tools::implementations::grok_build::SEND_SUBAGENT_MESSAGE_TOOL_NAME.to_owned()
+        }
+        AccessKind::Computer(_) => {
+            xai_grok_tools::implementations::grok_build::COMPUTER_USE_TOOL_NAME.to_owned()
         }
     }
 }

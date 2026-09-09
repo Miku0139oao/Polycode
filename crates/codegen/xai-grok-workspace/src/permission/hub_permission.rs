@@ -102,7 +102,8 @@ fn scope_for_access(access: &AccessKind) -> &'static str {
         AccessKind::Bash(_)
         | AccessKind::Edit(_)
         | AccessKind::MCPTool { .. }
-        | AccessKind::AgentMessage { .. } => "write",
+        | AccessKind::AgentMessage { .. }
+        | AccessKind::Computer(_) => "write",
         AccessKind::Read(_)
         | AccessKind::Grep { .. }
         | AccessKind::WebFetch(_)
@@ -121,6 +122,7 @@ fn describe_access(access: &AccessKind) -> String {
         AccessKind::AgentMessage { subagent_id } => {
             format!("Send a message to subagent {subagent_id}")
         }
+        AccessKind::Computer(summary) => format!("Control the desktop: {summary}"),
     }
 }
 pub(crate) fn build_permission_payload(

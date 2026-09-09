@@ -125,6 +125,9 @@ pub enum AccessKind {
     AgentMessage {
         subagent_id: String,
     },
+    /// Desktop computer use (`computer` tool). The string is the one-line summary of the
+    /// action batch shown in the prompt (`"click left at (10, 20); type \"hi\""`).
+    Computer(String),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -280,10 +283,31 @@ impl From<&xai_grok_tools::types::ToolInput> for AccessKind {
                 input: u.tool_input.clone(),
             },
             ToolInput::WebFetch(wf) => AccessKind::WebFetch(wf.url.clone()),
+            ToolInput::ComputerUse(cu) => AccessKind::Computer(computer_access_summary(cu)),
             ToolInput::Dynamic(value) => access_kind_from_dynamic(value),
             #[allow(unreachable_patterns)]
             _ => AccessKind::Read(None),
         }
+    }
+}
+/// One-line summary of a `computer` call for the permission prompt and telemetry.
+pub fn computer_access_summary(
+    input: &xai_grok_tools::implementations::grok_build::computer_use::ComputerUseInput,
+) -> String {
+    const MAX_LISTED: usize = 6;
+    let mut parts: Vec<String> = input
+        .actions
+        .iter()
+        .take(MAX_LISTED)
+        .map(|a| a.describe())
+        .collect();
+    if input.actions.len() > MAX_LISTED {
+        parts.push(format!("… +{} more", input.actions.len() - MAX_LISTED));
+    }
+    if parts.is_empty() {
+        "(no actions)".to_owned()
+    } else {
+        parts.join("; ")
     }
 }
 fn dynamic_string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {

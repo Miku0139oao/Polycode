@@ -2445,6 +2445,15 @@ impl SessionActor {
                 vec![],
                 vec![],
             ),
+            ToolInput::ComputerUse(ref cu) => (
+                format!(
+                    "Computer: {}",
+                    xai_grok_workspace::permission::types::computer_access_summary(cu)
+                ),
+                acp::ToolKind::Execute,
+                vec![],
+                vec![],
+            ),
             #[allow(unreachable_patterns)]
             _ => (
                 "Tool call".to_string(),

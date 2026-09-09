@@ -141,6 +141,39 @@ impl WebFetchToolConfig {
     }
 }
 
+/// User configurable settings for the `computer` tool (`[toolset.computer_use]`).
+///
+/// The tool itself is gated by the `computer_use` feature flag; these keys only tune it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ComputerUseToolConfig {
+    /// X11 `DISPLAY` to drive on Linux. Resolution: TOML > `GROK_COMPUTER_USE_DISPLAY` env > process `DISPLAY`.
+    pub display: Option<String>,
+    /// Longest screenshot side in pixels; larger screens are downscaled (default: 1280).
+    pub max_screenshot_dimension: Option<u32>,
+    /// Maximum actions accepted per call (default: 20).
+    pub max_actions_per_call: Option<usize>,
+    /// Pause after the last input action before the screenshot, in milliseconds (default: 500).
+    pub settle_ms: Option<u64>,
+}
+
+impl ComputerUseToolConfig {
+    pub(crate) fn resolve_params(
+        &self,
+    ) -> xai_grok_tools::implementations::grok_build::computer_use::ComputerUseParams {
+        use crate::agent::config::env_string;
+        xai_grok_tools::implementations::grok_build::computer_use::ComputerUseParams {
+            display: self
+                .display
+                .clone()
+                .or_else(|| env_string("GROK_COMPUTER_USE_DISPLAY")),
+            max_screenshot_dimension: self.max_screenshot_dimension,
+            max_actions_per_call: self.max_actions_per_call,
+            settle_ms: self.settle_ms,
+        }
+    }
+}
+
 /// This is the *shell-side* config that holds sampling-level settings (e.g., web search API key from the sampling client).
 /// It is distinct from `xai_grok_tools::registry::types::ToolsetConfig` which holds tool-implementation-level config (bash limits, web search mode).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +183,8 @@ pub struct ShellToolsetConfig {
     pub web_search: SamplerConfig,
     #[serde(default)]
     pub web_fetch: WebFetchToolConfig,
+    #[serde(default)]
+    pub computer_use: ComputerUseToolConfig,
     #[serde(default)]
     pub ask_user_question: AskUserQuestionToolConfig,
     /// Which file-operation toolset to use: `"standard"` (default) or `"hashline"`.
@@ -224,6 +259,7 @@ impl ShellToolsetConfig {
             bash: BashToolConfig::default(),
             web_search: web_search_sampling_config(default_base),
             web_fetch: WebFetchToolConfig::default(),
+            computer_use: ComputerUseToolConfig::default(),
             ask_user_question: AskUserQuestionToolConfig::default(),
             file_toolset: FileToolset::default(),
             hashline: HashlineSchemeConfig::default(),
