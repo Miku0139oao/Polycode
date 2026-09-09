@@ -267,9 +267,14 @@ try {
     t.write('\x1b');await pause(500);
     const offset=t.output.length;
     await command('/provider '+provider);
-    await t.until(()=>plain(t.output.slice(offset)).includes('Choose a model for this native session'),30000);
+    // Model search (8ebaf138) replaced the old question-card title with the ArgPicker
+    // "Pick model" chrome. Wait for that plus the fixture id before selecting.
+    await t.until(()=>{
+      const view=plain(t.output.slice(offset));
+      return view.includes('Pick model') && view.includes('mock-'+provider);
+    },30000);
     if(provider==='cursor')assert.ok(plain(t.output.slice(offset)).includes('Context capacity not provided'));
-    t.write('g\r');await pause(1500);
+    t.write('mock-'+provider+'\r');await pause(1500);
     await command('Read the isolated fixture.');
     await text('WINDOWS_READ_'+provider.toUpperCase()+'_PASS');
     if(testGrep)await toolTurn('Search the isolated fixture.','WINDOWS_GREP_'+provider.toUpperCase()+'_PASS');
