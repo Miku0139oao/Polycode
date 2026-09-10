@@ -1,5 +1,9 @@
 name: Windows candidate
 on:
+  push:
+    branches: [main, fix/windows-terminal-ci]
+  pull_request:
+    branches: [main, fix/windows-terminal-ci]
   workflow_dispatch:
     inputs:
       action:
@@ -41,7 +45,7 @@ jobs:
           name: windows-terminal-probe
           path: windows-terminal-probe.json
   build:
-    if: inputs.action == 'build'
+    if: github.event_name != 'workflow_dispatch' || inputs.action == 'build'
     runs-on: windows-2022
     timeout-minutes: 180
     steps:
@@ -115,7 +119,7 @@ jobs:
       - name: Package Windows candidate
         shell: pwsh
         env:
-          CANDIDATE_VERSION: ${{ inputs.version }}
+          CANDIDATE_VERSION: ${{ inputs.version || 'v0.2.1' }}
         run: |
           ./integrations/package-release.ps1 -Binary "$PWD/target/x86_64-pc-windows-msvc/release/xai-grok-pager.exe" -Runtime (Get-Command bun.exe).Source -BuildReport "$PWD/native-build.json" -Output "$PWD/candidate-out" -Version $env:CANDIDATE_VERSION
       - name: Install and run candidate in a real Windows terminal
@@ -145,6 +149,7 @@ jobs:
             windows-smoke-report.json
             windows-tools-report.json
             windows-tools-node-report.json
+            windows-tools-terminal.txt
             windows-terminal-probe.json
             windows-smoke-terminal-*.json
   publish:

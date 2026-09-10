@@ -45,7 +45,7 @@ try {
   assert.ok((provider==='codex'?['auth.openai.com']:['cursor.com']).includes(parsed.hostname));
   console.log(JSON.stringify({stage:'browser-login-required',provider,url,root}));
   const deadline=Date.now()+10*60*1000;
-  while(!plain(terminal.output).includes('Choose a model for this native session')) {
+  while(!plain(terminal.output).includes('Pick model')) {
     if(terminal.exited)throw new Error('Native TUI exited during interactive login');
     if(Date.now()>deadline)throw new Error('Interactive login did not complete within ten minutes');
     const view=plain(terminal.output);
