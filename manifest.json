@@ -1,0 +1,203 @@
+{
+  "schemaVersion": 3,
+  "classification": "immutable-candidate",
+  "version": "v0.2.1",
+  "provenance": "build-report",
+  "architecture": "x86_64",
+  "platform": "windows",
+  "target": "x86_64-pc-windows-msvc",
+  "executableFormat": "PE32+",
+  "protocol": "native-model-bridge",
+  "binarySourceSha256": "d63e31400df725f9327f72b933f68a9ae35cb2d9c04430a1329ddb94aff054ec",
+  "native": {
+    "transformed": false,
+    "buildReportSha256": "e39c3f390d1debdcee07d8a8cbb03268fc9f311b22b4bab089487ae3d4c7a1ee",
+    "sha256": "d63e31400df725f9327f72b933f68a9ae35cb2d9c04430a1329ddb94aff054ec",
+    "revision": "e9cbf5c0b2d5503c64e9e01a2617dd7de48ed3df",
+    "profile": {
+      "opt_level": "3",
+      "debuginfo": 0,
+      "debug_assertions": false,
+      "overflow_checks": false,
+      "test": false
+    },
+    "bytes": 147999232,
+    "format": "PE32+"
+  },
+  "bun": {
+    "version": "1.3.14",
+    "format": "PE32+",
+    "revision": "1.3.14+0d9b296af",
+    "bytes": 98480216,
+    "sha256": "0187f68d843f825a72ada4a7eca60db896ed753759a7f8252edcd31ac1bf1b9c"
+  },
+  "packagingScriptSha256": "d7bf192cf6d4d347961a324c05e96bf3456ccb44dc9d1eb78960ce2205120777",
+  "acceptance": {
+    "oauthChatGPT": "NOT_ACCEPTED",
+    "installedIntegrated": "NOT_ACCEPTED",
+    "publicUrl": "DEFERRED_UNTIL_PUBLICATION",
+    "publicationAuthorized": false,
+    "oauthCursor": "NOT_ACCEPTED",
+    "pendingSourceChanges": "Live Cursor OAuth, paid billing observer, real Task/resume and official publication remain open",
+    "liveGates": "NOT_ACCEPTED"
+  },
+  "files": [
+    {
+      "path": "integrations/launch.ps1",
+      "bytes": 3792,
+      "sha256": "7ce4159a7d222c432937a809aa6ed72229e3561bc0c114ee4918896f259fa141"
+    },
+    {
+      "path": "integrations/native-provider/launch.mjs",
+      "bytes": 149302,
+      "sha256": "16be3eacb9ae757258caa9c486fcac9e4d265f91b817b57204b7c4c909352bb5"
+    },
+    {
+      "path": "integrations/RELEASE_READINESS.md",
+      "bytes": 14444,
+      "sha256": "7df33a5fee9f9561f0eceb2f0c53cfeed8ac1539dda91c7901ec3421962c1866"
+    },
+    {
+      "path": "integrations/windows-process.ps1",
+      "bytes": 2635,
+      "sha256": "9ab165c43803bd1a3abcab2d78bd82c7b98143f23872146c287de4685a9e38fd"
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 11592,
+      "sha256": "f481edaaea56bb9fadac0191287f3b243a4bf63114a707a2b2a267fbfea598d5"
+    },
+    {
+      "path": "polycode.ps1",
+      "bytes": 459,
+      "sha256": "171fde537d065833a40b4f70f1652b4bd93596122a6f246b740ebfec570e1a22"
+    },
+    {
+      "path": "provenance/build-report.json",
+      "bytes": 655,
+      "sha256": "e39c3f390d1debdcee07d8a8cbb03268fc9f311b22b4bab089487ae3d4c7a1ee"
+    },
+    {
+      "path": "release-manifest.json",
+      "bytes": 1577,
+      "sha256": "01eeec7cad0a934742e20276c41acce6f21da749a9dd21ba13cfe92935f60a8f"
+    },
+    {
+      "path": "THIRD-PARTY-NOTICES",
+      "bytes": 781418,
+      "sha256": "c0fe9bbc9b35e1c7f5062f61235c0c6cac17fa307556a5e928d0029320894849"
+    },
+    {
+      "path": "third-party/BUN-LICENSE.md",
+      "bytes": 5457,
+      "sha256": "9866d85a48a4305acbc9876c2ae129e845f5ffacc67c6298ba37232fad022a17"
+    },
+    {
+      "path": "third-party/cursor/LICENSE.reference",
+      "bytes": 1089,
+      "sha256": "4e49db52d1ce0a074d6b00dabfb8109dfde33c968f3620b2a20245a78c5f2a29"
+    },
+    {
+      "path": "third-party/cursor/package.json",
+      "bytes": 391,
+      "sha256": "4e089d8cc470522d9729a105413a201a3c600a94584a9243e5345b96d09b3881"
+    },
+    {
+      "path": "third-party/cursor/PROVENANCE.md",
+      "bytes": 11438,
+      "sha256": "11a6bcd9fad07fed2e86c0caebc3c8546b6d136db147e6eed3f764bebecbfc9f"
+    },
+    {
+      "path": "third-party/dependencies.json",
+      "bytes": 868,
+      "sha256": "88bea22f01e05f65abef945524a16bc37e37ebedae8d5b6e223e94fdc9a6cfb9"
+    },
+    {
+      "path": "third-party/npm/graceful-fs/LICENSE",
+      "bytes": 791,
+      "sha256": "f65c5d9f22a317b2a10803bd1868461ce6499c2ed7217bc80c0cc772a748789c"
+    },
+    {
+      "path": "third-party/npm/graceful-fs/package.json",
+      "bytes": 1031,
+      "sha256": "5747d4ba6b17165c6ecac30ab3a331715f41c7ad546e1f1574dab1bdcb116181"
+    },
+    {
+      "path": "third-party/npm/proper-lockfile/LICENSE",
+      "bytes": 1105,
+      "sha256": "aaa78451b6fecd1b9c4594c796c133c0e90cad100372ff8bc6de615e9ef9adf1"
+    },
+    {
+      "path": "third-party/npm/proper-lockfile/package.json",
+      "bytes": 1707,
+      "sha256": "23888ecc7abd83a8e98e132da556eda2172792cc04c4e6d157b590667802bd2a"
+    },
+    {
+      "path": "third-party/npm/retry/License",
+      "bytes": 1139,
+      "sha256": "01ad164273e8e095abc9dbd1c21e194594a671af7d528cb43ee7b4c903ba7da3"
+    },
+    {
+      "path": "third-party/npm/retry/package.json",
+      "bytes": 1022,
+      "sha256": "c0733eb226e2a6572c7c9c2bc8b4a0efabe233971b0dee1e6d62c6898257e1da"
+    },
+    {
+      "path": "third-party/npm/signal-exit/LICENSE.txt",
+      "bytes": 748,
+      "sha256": "e05b1eaf5b5f99b7ad75cd1f38858ff9a311780b97715ead67936d60bf96aa7e"
+    },
+    {
+      "path": "third-party/npm/signal-exit/package.json",
+      "bytes": 864,
+      "sha256": "cec1bba4c97e0cf653c13c8c79f745aac2232131ee718c93c4236c1b9577a201"
+    },
+    {
+      "path": "third-party/package-lock.json",
+      "bytes": 1669,
+      "sha256": "b3fdb03a7612e831dbc7f118b2025d2bc15ad84be8098c732b51e010fa142180"
+    },
+    {
+      "path": "third-party/ripgrep/COPYING",
+      "bytes": 129,
+      "sha256": "dfe7d0a6134a17d3de7409762e08dc02133303912875cab40a74ba07a390f85a"
+    },
+    {
+      "path": "third-party/ripgrep/LICENSE-MIT",
+      "bytes": 1102,
+      "sha256": "970813655a1bf777d2ead189cef71ab73ab92ce04dc864027d61a45de03e6728"
+    },
+    {
+      "path": "third-party/ripgrep/UNLICENSE",
+      "bytes": 1235,
+      "sha256": "640514163b17f977adc997cb16f51871122cfb0555ebad1a3f01e167b7ba8857"
+    },
+    {
+      "path": "vendor/rg.exe",
+      "bytes": 4265472,
+      "sha256": "a286ea6f4d0d8c1c6c2234728cf2d96afcf371c550086c11e1ea28730dcfb418"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "polycode-windows-x64.gz",
+      "bytes": 59539339,
+      "sha256": "536871a7aa419acd5116693f06b791e638ba1d50568cd14202a56c6437b18d3a"
+    },
+    {
+      "path": "polycode-bun-windows-x64.gz",
+      "bytes": 39647574,
+      "sha256": "7411c0ae90f6aa34c8181ca233fbf4016335b89cf4e4f50c1b062db53da13949"
+    },
+    {
+      "path": "polycode-runtime.zip",
+      "bytes": 1961750,
+      "sha256": "ee8b18ca7be25d40bbff4463d40a3486c3c443cb73c3685191fd569b38eca86b"
+    },
+    {
+      "path": "install.ps1",
+      "bytes": 34301,
+      "sha256": "06607648b697bbc783e2cc730a230cc51aacb3000287c25bdee9850b630c8476"
+    }
+  ]
+}
