@@ -55,34 +55,57 @@ const stableHashes = [
   bunHash,
   'ee8b18ca7be25d40bbff4463d40a3486c3c443cb73c3685191fd569b38eca86b',
 ];
+const candidateHashes = [
+  installerHash,
+  '1a139f51c4142d443989e20f8d86ca4b9a56dde2801227a12faafc46fd46995a',
+  '689b7488093f95934fb9f03fd36b8a696bb99ef030e580eec3ba8ce79f1795d2',
+  'a2f5ab22cc31076714708d8a5212e1883fe394b45ce65392c4f34eca4b3c73d0',
+  bunHash,
+  '45993ac5dc4008dfb779677963aeadfb1cf850b38d40ec7817d58a8e3b47ac9d',
+];
 
-test('Channel bootstrap pins Preview and Stable hashes and does not enable official stable installation', () => {
+test('Channel bootstrap pins Preview, Stable and Candidate hashes and does not enable official stable installation', () => {
   const text = readFileSync(source, 'utf8');
-  for (const hash of [...previewHashes, ...stableHashes]) assert.ok(text.includes(hash), hash);
+  for (const hash of [...previewHashes, ...stableHashes, ...candidateHashes]) assert.ok(text.includes(hash), hash);
   assert.match(text, /\$previewAssets = \[ordered\]@\{/);
   assert.match(text, /\$stableAssets = \[ordered\]@\{/);
+  assert.match(text, /\$candidateAssets = \[ordered\]@\{/);
   assert.match(text, /https:\/\/github\.com\/Miku0139oao\/Polycode\/releases\/download\/v0\.2\.1/);
   assert.match(text, /831e7375f88be4a346481c4b18d40cab8887f1d3/);
   assert.match(text, /34380813272/);
-  assert.match(text, /param\(\s*\[string\]\$InstallRoot,\s*\[string\]\$Action,\s*\[string\]\$Channel,\s*\[switch\]\$NoPath\s*\)/);
+  assert.match(text, /34492775130/);
+  assert.match(text, /8e44e8b91672d97e1d46372a238263d5df1a593b/);
+  assert.match(text, /polycode-windows-candidate/);
+  assert.match(text, /param\(\s*\[string\]\$InstallRoot,\s*\[string\]\$Action,\s*\[string\]\$Channel,\s*\[switch\]\$NoPath,\s*\[switch\]\$Force\s*\)/);
   assert.match(text, /\$IncludePath = -not \$NoPath/);
   assert.match(text, /function Assert-ChannelAsset/);
   assert.match(text, /function Read-MenuChoice/);
   assert.match(text, /function Resolve-InstallAction/);
   assert.match(text, /function Resolve-InstallChannel/);
   assert.match(text, /function Set-PolycodePathOverwrite/);
+  assert.match(text, /function Remove-PolycodePathEntry/);
+  assert.match(text, /function Get-PolycodeInventory/);
+  assert.match(text, /function Uninstall-PolycodeChannel/);
+  assert.match(text, /function Assert-CandidateTools/);
   assert.match(text, /你要做什麼？/);
-  assert.match(text, /安裝哪個頻道？/);
-  assert.match(text, /@\('Install', 'Update', 'Overwrite'\)/);
+  assert.match(text, /哪一個頻道？/);
+  assert.match(text, /@\('Install', 'Update', 'Overwrite', 'Switch', 'List', 'Uninstall'\)/);
+  assert.match(text, /@\('Candidate', 'Preview', 'Stable'\)/);
   assert.match(text, /覆蓋 — 安裝這個頻道，並讓 PATH 上的 polycode 指向它/);
+  assert.match(text, /切換 — 不重裝，只把 PATH 指到已安裝的頻道/);
+  assert.match(text, /卸載 — 刪除這個頻道的目錄，並從 PATH 拿掉/);
+  assert.match(text, /Candidate — ChatGPT\/Cursor 修補/);
   assert.match(text, /穩定版 — 目前 Windows 建議包/);
   assert.match(text, /Preview — v0\.2\.1（2026-09-08 已發布）/);
   assert.match(text, /官方穩定版尚未通過完整驗收/);
-  assert.match(text, /Specify -Action Install\|Update\|Overwrite and -Channel Stable\|Preview\./);
+  assert.match(text, /Specify -Action Install\|Update\|Overwrite\|Switch\|List\|Uninstall and -Channel Stable\|Preview\|Candidate/);
   assert.match(text, /Overwrite requires PATH changes; omit -NoPath\./);
+  assert.match(text, /Candidate channel requires authenticated GitHub CLI/);
   assert.match(text, /這個頻道還沒安裝，改為安裝。/);
   assert.match(text, /polycode-channel-download-/);
   assert.match(text, /Polycode \{0\} \{1\}\. No login or model request was started\./);
+  assert.match(text, /Polycode \{0\} uninstalled/);
+  assert.ok(!/\$publicCandidateEnabled = \$true/.test(text));
   assert.equal((text.match(/function Assert-ChannelAsset/g) || []).length, 1);
   assert.ok(!text.includes('Assert-MainlineAsset'));
   assert.ok(!text.includes('polycode-mainline-download-'));
@@ -112,25 +135,33 @@ test('Invoke-Expression of the bootstrap binds param instead of treating it as a
     if ($message -notmatch 'Windows x64|Specify -Action') { throw ('Unexpected iex error: ' + $message) }
     $sb = [scriptblock]::Create($text)
     $names = @($sb.Ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
-    foreach ($need in @('InstallRoot', 'Action', 'Channel', 'NoPath')) {
+    foreach ($need in @('InstallRoot', 'Action', 'Channel', 'NoPath', 'Force')) {
       if ($names -notcontains $need) { throw ('scriptblock lost parameter ' + $need) }
     }
     'IEX_PARAM_PASS'`;
   assert.match(ok(run(iexRuntime, script)), /IEX_PARAM_PASS/);
 });
 
-test('Channel bootstrap keeps Preview bytes on the v0.2.1 release and Stable bytes on the CI asset commit', () => {
+test('Channel bootstrap keeps Preview, Stable and Candidate bytes on their own pins', () => {
   const text = readFileSync(source, 'utf8');
   const previewBlock = text.slice(text.indexOf('$previewAssets'), text.indexOf('$stableAssets'));
-  const stableBlock = text.slice(text.indexOf('$stableAssets'), text.indexOf('function Assert-ChannelAsset'));
+  const stableBlock = text.slice(text.indexOf('$stableAssets'), text.indexOf('$candidateAssets'));
+  const candidateBlock = text.slice(text.indexOf('$candidateAssets'), text.indexOf('function Assert-ChannelAsset'));
   for (const hash of previewHashes) assert.ok(previewBlock.includes(hash), 'preview ' + hash);
   for (const hash of stableHashes) assert.ok(stableBlock.includes(hash), 'stable ' + hash);
+  for (const hash of candidateHashes) assert.ok(candidateBlock.includes(hash), 'candidate ' + hash);
   assert.ok(!previewBlock.includes('831e7375f88be4a346481c4b18d40cab8887f1d3'));
   assert.ok(!previewBlock.includes('536871a7aa419acd5116693f06b791e638ba1d50568cd14202a56c6437b18d3a'));
+  assert.ok(!previewBlock.includes('a2f5ab22cc31076714708d8a5212e1883fe394b45ce65392c4f34eca4b3c73d0'));
   assert.ok(!stableBlock.includes('adffd26e77e3d018ff138e345568fed8551e41b017d09e7832ee807adb6cdbd5'));
+  assert.ok(!stableBlock.includes('a2f5ab22cc31076714708d8a5212e1883fe394b45ce65392c4f34eca4b3c73d0'));
+  assert.ok(!candidateBlock.includes('adffd26e77e3d018ff138e345568fed8551e41b017d09e7832ee807adb6cdbd5'));
+  assert.ok(!candidateBlock.includes('536871a7aa419acd5116693f06b791e638ba1d50568cd14202a56c6437b18d3a'));
   assert.match(previewBlock, /\$releaseBase \+ '\/polycode-windows-x64\.gz'/);
   assert.match(stableBlock, /\$commitBase \+ '\/polycode-windows-x64\.gz'/);
   assert.ok(!previewBlock.includes('$commitBase'));
+  assert.ok(!candidateBlock.includes('uri ='));
+  assert.match(text, /gh run download \$candidateRunId -n \$candidateArtifact/);
 });
 
 for (const runtime of windowsRuntimes) {
@@ -156,8 +187,13 @@ for (const runtime of windowsRuntimes) {
       if((Resolve-InstallAction 'update') -cne 'Update'){throw 'Update label'};
       if((Resolve-InstallAction '覆蓋') -cne 'Overwrite'){throw 'Overwrite label'};
       if((Resolve-InstallAction 'overwrite') -cne 'Overwrite'){throw 'Overwrite english'};
+      if((Resolve-InstallAction '切換') -cne 'Switch'){throw 'Switch label'};
+      if((Resolve-InstallAction 'list') -cne 'List'){throw 'List label'};
+      if((Resolve-InstallAction '卸載') -cne 'Uninstall'){throw 'Uninstall label'};
       if((Resolve-InstallChannel '穩定版') -cne 'Stable'){throw 'Stable label'};
       if((Resolve-InstallChannel '預覽') -cne 'Preview'){throw 'Preview label'};
+      if((Resolve-InstallChannel '修補') -cne 'Candidate'){throw 'Candidate label'};
+      if((Resolve-InstallChannel 'candidate') -cne 'Candidate'){throw 'Candidate english'};
       if($null -ne (Resolve-InstallAction 'latest')){throw 'Unknown action'};
       if($null -ne (Resolve-InstallChannel 'nightly')){throw 'Unknown channel'};
       'RESOLVERS_PASS'`;
@@ -237,6 +273,59 @@ for (const runtime of windowsRuntimes) {
     assert.match(ok(run(runtime, script, directory)), /PATH_OVERWRITE_PASS/);
   });
 
+  test(runtime + ': inventory helper lists managed channels and reads channel-state', () => {
+    const directory = mkdtempSync(join(root, 'inventory-'));
+    const script = `${parse};
+      foreach($name in @('Get-DefaultChannelRoot','Read-ChannelVersion','Get-PolycodeInventory','Save-ChannelState')) {
+        $definition=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true);
+        Invoke-Expression $definition.Extent.Text;
+      }
+      $preview=Get-DefaultChannelRoot 'Preview'
+      New-Item -ItemType Directory -Path $preview | Out-Null
+      Save-ChannelState $preview 'Preview'
+      $rows=@(Get-PolycodeInventory)
+      $previewRow=$rows | Where-Object { $_.Channel -eq 'Preview' } | Select-Object -First 1
+      $stableRow=$rows | Where-Object { $_.Channel -eq 'Stable' } | Select-Object -First 1
+      $candidateRow=$rows | Where-Object { $_.Channel -eq 'Candidate' } | Select-Object -First 1
+      if(-not $previewRow.Installed -or $previewRow.Version -notlike '*39b25f39*'){throw 'Preview state not listed'}
+      if($stableRow.Installed){throw 'Stable should be absent'}
+      if($candidateRow.Installed){throw 'Candidate should be absent'}
+      'INVENTORY_PASS'`;
+    assert.match(ok(run(runtime, script, directory)), /INVENTORY_PASS/);
+  });
+
+  test(runtime + ': uninstall helper deletes the channel root and drops only that PATH entry', { skip: nativeWindows ? false : 'requires Windows_NT host checks' }, () => {
+    const directory = mkdtempSync(join(root, 'uninstall-'));
+    const script = `${parse};
+      foreach($name in @('Test-SamePath','Remove-PolycodePathEntry','Uninstall-PolycodeChannel')) {
+        $definition=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true);
+        Invoke-Expression $definition.Extent.Text;
+      }
+      $saved=[Environment]::GetEnvironmentVariable('Path','User');
+      $processSaved=$env:Path;
+      try {
+        $preview=Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1'
+        $candidate=Join-Path $env:LOCALAPPDATA 'Polycode-Candidate'
+        New-Item -ItemType Directory -Path (Join-Path $preview 'bin'),(Join-Path $candidate 'bin') | Out-Null
+        Set-Content -LiteralPath (Join-Path $preview 'bin\\polycode.cmd') -Value '@echo preview' -Encoding ASCII
+        Set-Content -LiteralPath (Join-Path $candidate 'bin\\polycode.cmd') -Value '@echo candidate' -Encoding ASCII
+        [Environment]::SetEnvironmentVariable('Path', ((Join-Path $preview 'bin') + ';' + (Join-Path $candidate 'bin')), 'User')
+        Uninstall-PolycodeChannel $preview 'Preview'
+        if(Test-Path -LiteralPath $preview){throw 'Preview root remained'}
+        if(-not (Test-Path -LiteralPath (Join-Path $candidate 'bin\\polycode.cmd'))){throw 'Candidate files were deleted'}
+        $user=[Environment]::GetEnvironmentVariable('Path','User')
+        if($user -like ('*' + (Join-Path $preview 'bin') + '*')){throw 'Preview PATH entry remained'}
+        if($user -notlike ('*' + (Join-Path $candidate 'bin') + '*')){throw 'Candidate PATH entry was removed'}
+        $failed=$false; try { Uninstall-PolycodeChannel (Join-Path $env:LOCALAPPDATA 'Polycode') 'Production' } catch { $failed=$true }
+        if(-not $failed){throw 'Production uninstall was allowed'}
+        'UNINSTALL_PASS'
+      } finally {
+        [Environment]::SetEnvironmentVariable('Path', $saved, 'User');
+        $env:Path=$processSaved;
+      }`;
+    assert.match(ok(run(runtime, script, directory)), /UNINSTALL_PASS/);
+  });
+
   test(runtime + ': overwrite rejects -NoPath before any download', { skip: nativeWindows ? false : 'requires Windows_NT host checks' }, () => {
     const script = `$global:downloads=0; function global:Invoke-WebRequest {$global:downloads++; throw 'Unexpected request'};
       $failed=$false; try { & ${quote(source)} -Action Overwrite -Channel Stable -NoPath } catch { $failed=$true };
@@ -253,6 +342,7 @@ for (const runtime of windowsRuntimes) {
 
   test(runtime + ': channel roots stay isolated and production is always rejected', { skip: nativeWindows ? false : 'requires Windows_NT host checks' }, () => {
     const script = `$global:downloads=0; function global:Invoke-WebRequest {$global:downloads++; throw 'Unexpected request'};
+      function global:gh { $global:downloads++; throw 'Unexpected gh' }
       $failed=$false; try { & ${quote(source)} -Action Install -Channel Stable -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode') } catch { $failed=$true };
       if(-not $failed -or $global:downloads -ne 0){throw 'Production directory was not rejected early'};
       $failed=$false; try { & ${quote(source)} -Action Install -Channel Preview -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode') } catch { $failed=$true };
@@ -261,9 +351,42 @@ for (const runtime of windowsRuntimes) {
       if(-not $failed -or $global:downloads -ne 0){throw 'Stable did not reject Preview directory'};
       $failed=$false; try { & ${quote(source)} -Action Install -Channel Preview -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode-Mainline') } catch { $failed=$true };
       if(-not $failed -or $global:downloads -ne 0){throw 'Preview did not reject mainline directory'};
+      $failed=$false; try { & ${quote(source)} -Action Install -Channel Candidate -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1') } catch { $failed=$true };
+      if(-not $failed -or $global:downloads -ne 0){throw 'Candidate did not reject Preview directory'};
+      $failed=$false; try { & ${quote(source)} -Action Install -Channel Preview -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode-Candidate') } catch { $failed=$true };
+      if(-not $failed -or $global:downloads -ne 0){throw 'Preview did not reject candidate directory'};
       $failed=$false; try { & ${quote(source)} -Action Update -Channel Preview -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1') } catch { $failed=$true };
       if(-not $failed -or $global:downloads -ne 1){throw 'Preview root should reach download'};
       'ROOTS_UNCHANGED'`;
     assert.match(ok(run(runtime, script)), /ROOTS_UNCHANGED/);
+  });
+
+  test(runtime + ': list switch and uninstall do not download', { skip: nativeWindows ? false : 'requires Windows_NT host checks' }, () => {
+    const directory = mkdtempSync(join(root, 'manage-'));
+    const script = `$global:downloads=0; function global:Invoke-WebRequest {$global:downloads++; throw 'Unexpected request'};
+      function global:gh { $global:downloads++; throw 'Unexpected gh' }
+      $preview=Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1'
+      New-Item -ItemType Directory -Path (Join-Path $preview 'bin') | Out-Null
+      Set-Content -LiteralPath (Join-Path $preview 'bin\\polycode.cmd') -Value '@echo preview' -Encoding ASCII
+      & ${quote(source)} -Action List
+      $failed=$false; try { & ${quote(source)} -Action Switch -Channel Candidate } catch { $failed=$true }
+      if(-not $failed){throw 'Switch allowed a missing channel'}
+      & ${quote(source)} -Action Switch -Channel Preview
+      & ${quote(source)} -Action Uninstall -Channel Preview -Force
+      if($global:downloads -ne 0){throw 'Version management started a download'}
+      if(Test-Path -LiteralPath $preview){throw 'Uninstall left the Preview directory'}
+      'MANAGE_NO_DOWNLOAD'`;
+    assert.match(ok(run(runtime, script, directory)), /MANAGE_NO_DOWNLOAD/);
+  });
+
+  test(runtime + ': candidate install fails closed when gh cannot download', { skip: nativeWindows ? false : 'requires Windows_NT host checks' }, () => {
+    const script = `$global:downloads=0; function global:Invoke-WebRequest {$global:downloads++; throw 'Unexpected request'};
+      function global:gh { $global:downloads++; throw 'fixture gh failure' }
+      $failed=$false; try { & ${quote(source)} -Action Install -Channel Candidate } catch { $failed=$true }
+      if(-not $failed -or $global:downloads -lt 1){throw 'Candidate did not use gh'}
+      if(Test-Path (Join-Path $env:LOCALAPPDATA 'Polycode-Candidate')){throw 'Candidate directory leaked'}
+      if(@(Get-ChildItem $env:TEMP -Filter 'polycode-channel-download-*').Count){throw 'Download directory leaked'}
+      'CANDIDATE_GH_FAILURE'`;
+    assert.match(ok(run(runtime, script)), /CANDIDATE_GH_FAILURE/);
   });
 }
