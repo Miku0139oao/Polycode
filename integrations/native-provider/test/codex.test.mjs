@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { createCodexProvider, toResponses, translateResponses } from '../codex.mjs';
+import { createCodexProvider, toResponses, translateResponses, chatgptUpstreamError } from '../codex.mjs';
 const schema = { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] };
 const body = { model: 'test-model', stream: false, messages: [{ role: 'system', content: 'Native Grok engine' }, { role: 'user', content: 'test' }], tools: [{ type: 'function', function: { name: 'native.shell/tool', parameters: schema } }] };
 const sse = events => new Response(events.map(e => 'data: ' + JSON.stringify(e) + '\n\n').join(''), { headers: { 'Content-Type': 'text/event-stream' } });
@@ -27,7 +27,24 @@ test('streamed tool intent is returned to native Grok with original name, never 
 test('provider failures and undeclared functions never become successful completions', async () => {
   await assert.rejects(() => translateResponses(sse([{ type: 'response.output_text.delta', delta: 'partial' }]), body, new Map()), /without completion/);
   await assert.rejects(() => translateResponses(sse([{ type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', name: 'unknown', call_id: 'x' } }]), body, new Map()), /undeclared/);
-  await assert.rejects(() => translateResponses(new Response('private upstream details', { status: 429 }), body, new Map()), /HTTP 429/);
+  await assert.rejects(() => translateResponses(new Response('private upstream details', { status: 429 }), body, new Map()), error => /HTTP 429/.test(error.message) && !error.message.includes('private upstream details'));
+});
+test('upstream ChatGPT errors expose only allowlisted codes, never raw bodies', () => {
+  assert.match(chatgptUpstreamError(400, 'private upstream details'), /HTTP 400/);
+  assert.equal(chatgptUpstreamError(400, 'private upstream details').includes('private upstream details'), false);
+  assert.match(chatgptUpstreamError(400, JSON.stringify({ error: { code: 'invalid_request_error', message: 'sk-secret-token Bearer eyJabc', param: 'model' } })), /invalid_request_error/);
+  assert.match(chatgptUpstreamError(400, JSON.stringify({ error: { code: 'invalid_request_error', param: 'model' } })), /rejected field: model/);
+  assert.equal(chatgptUpstreamError(400, JSON.stringify({ error: { code: 'invalid_request_error', message: 'sk-secret-token' } })).includes('sk-secret'), false);
+  assert.match(chatgptUpstreamError(400, JSON.stringify({ error: { message: 'Could not decrypt encrypted_content for item rs_secret' } })), /invalid_encrypted_content/);
+  assert.equal(chatgptUpstreamError(400, JSON.stringify({ error: { message: 'Could not decrypt encrypted_content for item rs_secret' } })).includes('rs_secret'), false);
+  assert.match(chatgptUpstreamError(400, JSON.stringify({ error: { code: 'not-a-real-code', message: 'leak me' } })), /check login/);
+  assert.equal(chatgptUpstreamError(400, JSON.stringify({ error: { code: 'not-a-real-code', message: 'leak me' } })).includes('leak me'), false);
+});
+test('Responses mapping always sends reasoning with encrypted_content include', () => {
+  const { request } = toResponses({ model: 'gpt-5.4', messages: [{ role: 'user', content: 'hi' }] });
+  assert.deepEqual(request.include, ['reasoning.encrypted_content']);
+  assert.deepEqual(request.reasoning, { summary: 'auto' });
+  assert.equal(request.store, false);
 });
 test('stream preserves text, reasoning and stop marker', async () => {
   const response = await translateResponses(sse([{ type: 'response.reasoning_summary_text.delta', delta: 'summary' }, { type: 'response.output_text.delta', delta: 'answer' }, { type: 'response.completed', response: { output: [] } }]), { ...body, stream: true }, new Map());

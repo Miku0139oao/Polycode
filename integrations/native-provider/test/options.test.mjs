@@ -17,6 +17,11 @@ test('unset controls stay absent; supported explicit reasoning is retained', () 
   assert.equal(Object.hasOwn(request, 'max_output_tokens'), false);
   assert.deepEqual(request.reasoning, { effort: 'low', summary: 'concise' });
 });
+test('encrypted_content include is never sent without a reasoning object', () => {
+  const { request } = toResponses(base);
+  assert.deepEqual(request.include, ['reasoning.encrypted_content']);
+  assert.deepEqual(request.reasoning, { summary: 'auto' });
+});
 test('conflicting reasoning and unknown nested controls fail clearly', () => {
   for (const fields of [{ reasoning: { unsupported: true } }, { stream_options: { unsupported: true } }, { reasoning_effort: 'high', reasoning: { effort: 'low' } }]) {
     assert.throws(() => toResponses({ ...base, ...fields }), error => error.status === 400);
