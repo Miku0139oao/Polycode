@@ -103,7 +103,20 @@ function Get-DefaultChannelRoot([string]$Name) {
 }
 
 function Test-SamePath([string]$Left, [string]$Right) {
-    return $Left.TrimEnd('\', '/') -ieq $Right.TrimEnd('\', '/')
+    $left = $Left.TrimEnd('\', '/')
+    $right = $Right.TrimEnd('\', '/')
+    if ($left -ieq $right) { return $true }
+    if (-not $left -or -not $right) { return $false }
+    # PATH entries may use 8.3 short names (RUNNER~1) or unnormalized spellings; compare the resolved paths too.
+    try { return ([IO.Path]::GetFullPath($left).TrimEnd('\', '/') -ieq [IO.Path]::GetFullPath($right).TrimEnd('\', '/')) } catch { return $false }
+}
+
+function Get-UserPathValue {
+    return [string][Environment]::GetEnvironmentVariable('Path', 'User')
+}
+
+function Set-UserPathValue([string]$Value) {
+    [Environment]::SetEnvironmentVariable('Path', $Value, 'User')
 }
 
 function Get-ChannelAssets([string]$Name) {
@@ -174,8 +187,7 @@ function Get-ActivePolycodeLauncher {
         $launcher = Join-Path $entry.TrimEnd('\', '/') 'polycode.cmd'
         if ([IO.File]::Exists($launcher)) { return [IO.Path]::GetFullPath($launcher) }
     }
-    $userPath = [string][Environment]::GetEnvironmentVariable('Path', 'User')
-    foreach ($part in @($userPath -split ';')) {
+    foreach ($part in @((Get-UserPathValue) -split ';')) {
         $entry = $part.Trim()
         if (-not $entry) { continue }
         $launcher = Join-Path $entry.TrimEnd('\', '/') 'polycode.cmd'
@@ -246,38 +258,37 @@ function Write-PolycodeInventory {
 
 function Set-PolycodePathOverwrite([string]$Bin) {
     $binFull = [IO.Path]::GetFullPath($Bin).TrimEnd('\', '/')
-    $userPath = [string][Environment]::GetEnvironmentVariable('Path', 'User')
     $kept = New-Object System.Collections.Generic.List[string]
-    foreach ($part in @($userPath -split ';')) {
+    foreach ($part in @((Get-UserPathValue) -split ';')) {
         $entry = $part.Trim()
         if (-not $entry) { continue }
-        $normalized = $entry.TrimEnd('\', '/')
-        if ($normalized -ieq $binFull) { continue }
-        $launcher = Join-Path $normalized 'polycode.cmd'
+        if (Test-SamePath $entry $binFull) { continue }
+        $launcher = Join-Path $entry.TrimEnd('\', '/') 'polycode.cmd'
         if ([IO.File]::Exists($launcher)) { continue }
         $kept.Add($entry) | Out-Null
     }
     $next = (@($binFull) + $kept)
-    [Environment]::SetEnvironmentVariable('Path', ($next -join ';'), 'User')
+    Set-UserPathValue ($next -join ';')
     $processKept = @($env:Path -split ';' | ForEach-Object { $_.Trim() } | Where-Object {
-        $_ -and $_.TrimEnd('\', '/') -ine $binFull -and -not [IO.File]::Exists((Join-Path $_.TrimEnd('\', '/') 'polycode.cmd'))
+        $_ -and -not (Test-SamePath $_ $binFull) -and -not [IO.File]::Exists((Join-Path $_.TrimEnd('\', '/') 'polycode.cmd'))
     })
     $env:Path = (@($binFull) + $processKept) -join ';'
 }
 
 function Remove-PolycodePathEntry([string]$Bin) {
     $binFull = [IO.Path]::GetFullPath($Bin).TrimEnd('\', '/')
-    $userPath = [string][Environment]::GetEnvironmentVariable('Path', 'User')
     $kept = New-Object System.Collections.Generic.List[string]
-    foreach ($part in @($userPath -split ';')) {
+    $removed = $false
+    foreach ($part in @((Get-UserPathValue) -split ';')) {
         $entry = $part.Trim()
         if (-not $entry) { continue }
-        if ($entry.TrimEnd('\', '/') -ieq $binFull) { continue }
+        if (Test-SamePath $entry $binFull) { $removed = $true; continue }
         $kept.Add($entry) | Out-Null
     }
-    [Environment]::SetEnvironmentVariable('Path', ($kept -join ';'), 'User')
+    # Leave the user's PATH bytes untouched when this launcher was never on it.
+    if ($removed) { Set-UserPathValue ($kept -join ';') }
     $env:Path = (@($env:Path -split ';' | ForEach-Object { $_.Trim() } | Where-Object {
-        $_ -and $_.TrimEnd('\', '/') -ine $binFull
+        $_ -and -not (Test-SamePath $_ $binFull)
     }) -join ';')
 }
 

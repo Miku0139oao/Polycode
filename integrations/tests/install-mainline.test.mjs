@@ -11,10 +11,22 @@ const source = fileURLToPath(new URL('../../install-mainline.ps1', import.meta.u
 const root = mkdtempSync(join(tmpdir(), 'polycode-mainline-bootstrap-test-'));
 after(() => rmSync(root, { recursive: true, force: true }));
 const quote = value => "'" + value.replaceAll("'", "''") + "'";
+// Mirrors the README: `irm ... | iex` without arguments, `& ([scriptblock]::Create((irm ...))) -Action ...` with them.
+// Reading the file as UTF-8 matches what irm hands to iex; `& file.ps1` would let powershell.exe decode the BOM-less
+// UTF-8 source as ANSI and mangle the Chinese menu text.
 const readUtf8 = `[IO.File]::ReadAllText(${quote(source)}, [Text.Encoding]::UTF8)`;
-function iexSource(argExpr) {
-  return argExpr ? `Invoke-Expression (${readUtf8} + ${argExpr})` : `Invoke-Expression ${readUtf8}`;
+function iexSource(args) {
+  return args ? `& ([scriptblock]::Create(${readUtf8})) ${args}` : `Invoke-Expression (${readUtf8})`;
 }
+const pathHelpers = `foreach($name in @('Test-SamePath','Get-UserPathValue','Set-UserPathValue','Set-PolycodePathOverwrite','Remove-PolycodePathEntry','Uninstall-PolycodeChannel')) {
+    $definition=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true);
+    if(-not $definition){throw ('Missing helper ' + $name)};
+    Invoke-Expression $definition.Extent.Text;
+  }
+  $script:fakeUserPath='';
+  function Get-UserPathValue { return [string]$script:fakeUserPath }
+  function Set-UserPathValue([string]$Value) { $script:fakeUserPath=$Value }
+  $realUserPath=[Environment]::GetEnvironmentVariable('Path','User');`;
 const windowsRuntimes = ['powershell.exe', 'pwsh.exe'].filter(runtime => {
   const probe = spawnSync(runtime, ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { encoding: 'utf8', timeout: 15000 });
   return !probe.error && probe.status === 0;
@@ -215,7 +227,7 @@ for (const runtime of windowsRuntimes) {
             if($Uri -cne 'https://github.com/Miku0139oao/Polycode/releases/download/v0.2.1/install.ps1'){throw 'Unexpected URL'};
             $global:downloads++; ${behavior}
           }
-          $failed=$false; try { ${iexSource(`' -Action Install -Channel ${channel}'`)} } catch { $failed=$true };
+          $failed=$false; try { ${iexSource(`-Action Install -Channel ${channel}`)} } catch { $failed=$true };
           if(-not $failed -or $global:downloads -ne 1){throw 'Failure did not stop before installer'};
           if($ErrorActionPreference -ne 'Continue' -or [Net.ServicePointManager]::SecurityProtocol -ne $protocol){throw 'Caller preferences changed'};
           if([Environment]::GetEnvironmentVariable('Path','User') -cne $userPath){throw 'User PATH changed'};
@@ -249,31 +261,27 @@ for (const runtime of windowsRuntimes) {
 
   test(runtime + ': overwrite PATH helper prefers the new bin and drops other polycode launchers', { skip: nativeWindows ? false : 'requires Windows_NT host checks' }, () => {
     const directory = mkdtempSync(join(root, 'path-'));
-    const script = `${parse};
-      $definition=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Set-PolycodePathOverwrite'},$true);
-      Invoke-Expression $definition.Extent.Text;
-      $saved=[Environment]::GetEnvironmentVariable('Path','User');
-      $processSaved=$env:Path;
-      try {
-        $preview=Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1\\bin';
-        $next=Join-Path $env:LOCALAPPDATA 'Polycode-Mainline\\bin';
-        $other=Join-Path $env:LOCALAPPDATA 'tools';
-        New-Item -ItemType Directory -Path $preview,$next,$other | Out-Null;
-        Set-Content -LiteralPath (Join-Path $preview 'polycode.cmd') -Value '@echo preview' -Encoding ASCII;
-        Set-Content -LiteralPath (Join-Path $next 'polycode.cmd') -Value '@echo mainline' -Encoding ASCII;
-        [Environment]::SetEnvironmentVariable('Path', ($preview + ';' + $other), 'User');
-        $env:Path = $preview + ';C:\\Windows\\System32';
-        Set-PolycodePathOverwrite $next;
-        $user=[Environment]::GetEnvironmentVariable('Path','User');
-        if($user -notlike ($next + ';*')){throw 'New bin is not first'};
-        if($user -like ('*' + $preview + '*')){throw 'Preview launcher stayed on PATH'};
-        if($user -notlike ('*' + $other + '*')){throw 'Unrelated PATH entry removed'};
-        if(-not (Test-Path -LiteralPath (Join-Path $preview 'polycode.cmd'))){throw 'Preview files were deleted'};
-        'PATH_OVERWRITE_PASS'
-      } finally {
-        [Environment]::SetEnvironmentVariable('Path', $saved, 'User');
-        $env:Path=$processSaved;
-      }`;
+    const script = `${parse}; ${pathHelpers}
+      $preview=Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1\\bin';
+      $next=Join-Path $env:LOCALAPPDATA 'Polycode-Mainline\\bin';
+      $other=Join-Path $env:LOCALAPPDATA 'tools';
+      New-Item -ItemType Directory -Path $preview,$next,$other | Out-Null;
+      Set-Content -LiteralPath (Join-Path $preview 'polycode.cmd') -Value '@echo preview' -Encoding ASCII;
+      Set-Content -LiteralPath (Join-Path $next 'polycode.cmd') -Value '@echo mainline' -Encoding ASCII;
+      Set-UserPathValue ($preview + ';' + $other);
+      $env:Path = $preview + ';C:\\Windows\\System32';
+      Set-PolycodePathOverwrite $next;
+      $entries=@((Get-UserPathValue) -split ';');
+      if(-not (Test-SamePath $entries[0] $next)){throw ('New bin is not first: ' + (Get-UserPathValue))};
+      if(@($entries | Where-Object { Test-SamePath $_ $preview }).Count){throw 'Preview launcher stayed on PATH'};
+      if(-not @($entries | Where-Object { Test-SamePath $_ $other }).Count){throw 'Unrelated PATH entry removed'};
+      $processEntries=@($env:Path -split ';');
+      if(-not (Test-SamePath $processEntries[0] $next)){throw 'New bin is not first in the process PATH'};
+      if(@($processEntries | Where-Object { Test-SamePath $_ $preview }).Count){throw 'Preview launcher stayed on the process PATH'};
+      if($processEntries -notcontains 'C:\\Windows\\System32'){throw 'Process PATH lost an unrelated entry'};
+      if(-not (Test-Path -LiteralPath (Join-Path $preview 'polycode.cmd'))){throw 'Preview files were deleted'};
+      if([Environment]::GetEnvironmentVariable('Path','User') -cne $realUserPath){throw 'Real user PATH was touched'};
+      'PATH_OVERWRITE_PASS'`;
     assert.match(ok(run(runtime, script, directory)), /PATH_OVERWRITE_PASS/);
   });
 
@@ -300,39 +308,33 @@ for (const runtime of windowsRuntimes) {
 
   test(runtime + ': uninstall helper deletes the channel root and drops only that PATH entry', { skip: nativeWindows ? false : 'requires Windows_NT host checks' }, () => {
     const directory = mkdtempSync(join(root, 'uninstall-'));
-    const script = `${parse};
-      foreach($name in @('Test-SamePath','Remove-PolycodePathEntry','Uninstall-PolycodeChannel')) {
-        $definition=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true);
-        Invoke-Expression $definition.Extent.Text;
-      }
-      $saved=[Environment]::GetEnvironmentVariable('Path','User');
-      $processSaved=$env:Path;
-      try {
-        $preview=Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1'
-        $candidate=Join-Path $env:LOCALAPPDATA 'Polycode-Candidate'
-        New-Item -ItemType Directory -Path (Join-Path $preview 'bin'),(Join-Path $candidate 'bin') | Out-Null
-        Set-Content -LiteralPath (Join-Path $preview 'bin\\polycode.cmd') -Value '@echo preview' -Encoding ASCII
-        Set-Content -LiteralPath (Join-Path $candidate 'bin\\polycode.cmd') -Value '@echo candidate' -Encoding ASCII
-        [Environment]::SetEnvironmentVariable('Path', ((Join-Path $preview 'bin') + ';' + (Join-Path $candidate 'bin')), 'User')
-        Uninstall-PolycodeChannel $preview 'Preview'
-        if(Test-Path -LiteralPath $preview){throw 'Preview root remained'}
-        if(-not (Test-Path -LiteralPath (Join-Path $candidate 'bin\\polycode.cmd'))){throw 'Candidate files were deleted'}
-        $user=[Environment]::GetEnvironmentVariable('Path','User')
-        if($user -like ('*' + (Join-Path $preview 'bin') + '*')){throw 'Preview PATH entry remained'}
-        if($user -notlike ('*' + (Join-Path $candidate 'bin') + '*')){throw 'Candidate PATH entry was removed'}
-        $failed=$false; try { Uninstall-PolycodeChannel (Join-Path $env:LOCALAPPDATA 'Polycode') 'Production' } catch { $failed=$true }
-        if(-not $failed){throw 'Production uninstall was allowed'}
-        'UNINSTALL_PASS'
-      } finally {
-        [Environment]::SetEnvironmentVariable('Path', $saved, 'User');
-        $env:Path=$processSaved;
-      }`;
+    const script = `${parse}; ${pathHelpers}
+      $preview=Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1'
+      $candidate=Join-Path $env:LOCALAPPDATA 'Polycode-Candidate'
+      New-Item -ItemType Directory -Path (Join-Path $preview 'bin'),(Join-Path $candidate 'bin') | Out-Null
+      Set-Content -LiteralPath (Join-Path $preview 'bin\\polycode.cmd') -Value '@echo preview' -Encoding ASCII
+      Set-Content -LiteralPath (Join-Path $candidate 'bin\\polycode.cmd') -Value '@echo candidate' -Encoding ASCII
+      $untouched=(Join-Path $candidate 'bin') + ';;' + (Join-Path $env:LOCALAPPDATA 'tools') + ';'
+      Set-UserPathValue $untouched
+      Remove-PolycodePathEntry (Join-Path $preview 'bin')
+      if((Get-UserPathValue) -cne $untouched){throw 'Removing an absent launcher rewrote the user PATH'}
+      Set-UserPathValue ((Join-Path $preview 'bin') + ';' + (Join-Path $candidate 'bin'))
+      Uninstall-PolycodeChannel $preview 'Preview'
+      if(Test-Path -LiteralPath $preview){throw 'Preview root remained'}
+      if(-not (Test-Path -LiteralPath (Join-Path $candidate 'bin\\polycode.cmd'))){throw 'Candidate files were deleted'}
+      $entries=@((Get-UserPathValue) -split ';')
+      if(@($entries | Where-Object { Test-SamePath $_ (Join-Path $preview 'bin') }).Count){throw ('Preview PATH entry remained: ' + (Get-UserPathValue))}
+      if(-not @($entries | Where-Object { Test-SamePath $_ (Join-Path $candidate 'bin') }).Count){throw 'Candidate PATH entry was removed'}
+      $failed=$false; try { Uninstall-PolycodeChannel (Join-Path $env:LOCALAPPDATA 'Polycode') 'Production' } catch { $failed=$true }
+      if(-not $failed){throw 'Production uninstall was allowed'}
+      if([Environment]::GetEnvironmentVariable('Path','User') -cne $realUserPath){throw 'Real user PATH was touched'}
+      'UNINSTALL_PASS'`;
     assert.match(ok(run(runtime, script, directory)), /UNINSTALL_PASS/);
   });
 
   test(runtime + ': overwrite rejects -NoPath before any download', { skip: nativeWindows ? false : 'requires Windows_NT host checks' }, () => {
     const script = `$global:downloads=0; function global:Invoke-WebRequest {$global:downloads++; throw 'Unexpected request'};
-      $failed=$false; try { ${iexSource("' -Action Overwrite -Channel Stable -NoPath'")} } catch { $failed=$true };
+      $failed=$false; try { ${iexSource("-Action Overwrite -Channel Stable -NoPath")} } catch { $failed=$true };
       if(-not $failed -or $global:downloads -ne 0){throw 'Overwrite -NoPath did not stop early'}; 'OVERWRITE_NOPATH'`;
     assert.match(ok(run(runtime, script)), /OVERWRITE_NOPATH/);
   });
@@ -347,19 +349,19 @@ for (const runtime of windowsRuntimes) {
   test(runtime + ': channel roots stay isolated and production is always rejected', { skip: nativeWindows ? false : 'requires Windows_NT host checks' }, () => {
     const script = `$global:downloads=0; function global:Invoke-WebRequest {$global:downloads++; throw 'Unexpected request'};
       function global:gh { $global:downloads++; throw 'Unexpected gh' }
-      $failed=$false; try { ${iexSource("' -Action Install -Channel Stable -InstallRoot ' + (Join-Path $env:LOCALAPPDATA 'Polycode')")} } catch { $failed=$true };
+      $failed=$false; try { ${iexSource("-Action Install -Channel Stable -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode')")} } catch { $failed=$true };
       if(-not $failed -or $global:downloads -ne 0){throw 'Production directory was not rejected early'};
-      $failed=$false; try { ${iexSource("' -Action Install -Channel Preview -InstallRoot ' + (Join-Path $env:LOCALAPPDATA 'Polycode')")} } catch { $failed=$true };
+      $failed=$false; try { ${iexSource("-Action Install -Channel Preview -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode')")} } catch { $failed=$true };
       if(-not $failed -or $global:downloads -ne 0){throw 'Preview did not reject production'};
-      $failed=$false; try { ${iexSource("' -Action Install -Channel Stable -InstallRoot ' + (Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1')")} } catch { $failed=$true };
+      $failed=$false; try { ${iexSource("-Action Install -Channel Stable -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1')")} } catch { $failed=$true };
       if(-not $failed -or $global:downloads -ne 0){throw 'Stable did not reject Preview directory'};
-      $failed=$false; try { ${iexSource("' -Action Install -Channel Preview -InstallRoot ' + (Join-Path $env:LOCALAPPDATA 'Polycode-Mainline')")} } catch { $failed=$true };
+      $failed=$false; try { ${iexSource("-Action Install -Channel Preview -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode-Mainline')")} } catch { $failed=$true };
       if(-not $failed -or $global:downloads -ne 0){throw 'Preview did not reject mainline directory'};
-      $failed=$false; try { ${iexSource("' -Action Install -Channel Candidate -InstallRoot ' + (Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1')")} } catch { $failed=$true };
+      $failed=$false; try { ${iexSource("-Action Install -Channel Candidate -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1')")} } catch { $failed=$true };
       if(-not $failed -or $global:downloads -ne 0){throw 'Candidate did not reject Preview directory'};
-      $failed=$false; try { ${iexSource("' -Action Install -Channel Preview -InstallRoot ' + (Join-Path $env:LOCALAPPDATA 'Polycode-Candidate')")} } catch { $failed=$true };
+      $failed=$false; try { ${iexSource("-Action Install -Channel Preview -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode-Candidate')")} } catch { $failed=$true };
       if(-not $failed -or $global:downloads -ne 0){throw 'Preview did not reject candidate directory'};
-      $failed=$false; try { ${iexSource("' -Action Update -Channel Preview -InstallRoot ' + (Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1')")} } catch { $failed=$true };
+      $failed=$false; try { ${iexSource("-Action Update -Channel Preview -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1')")} } catch { $failed=$true };
       if(-not $failed -or $global:downloads -ne 1){throw 'Preview root should reach download'};
       'ROOTS_UNCHANGED'`;
     assert.match(ok(run(runtime, script)), /ROOTS_UNCHANGED/);
@@ -367,26 +369,32 @@ for (const runtime of windowsRuntimes) {
 
   test(runtime + ': list switch and uninstall do not download', { skip: nativeWindows ? false : 'requires Windows_NT host checks' }, () => {
     const directory = mkdtempSync(join(root, 'manage-'));
+    // Switching to an installed channel rewrites the real user PATH, so that path is covered by the helper test above;
+    // this end-to-end run must leave the machine's user PATH byte-for-byte unchanged (other test files read it concurrently).
     const script = `$global:downloads=0; function global:Invoke-WebRequest {$global:downloads++; throw 'Unexpected request'};
       function global:gh { $global:downloads++; throw 'Unexpected gh' }
+      $realUserPath=[Environment]::GetEnvironmentVariable('Path','User')
       $preview=Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1'
       New-Item -ItemType Directory -Path (Join-Path $preview 'bin') | Out-Null
       Set-Content -LiteralPath (Join-Path $preview 'bin\\polycode.cmd') -Value '@echo preview' -Encoding ASCII
-      ${iexSource("' -Action List'")}
-      $failed=$false; try { ${iexSource("' -Action Switch -Channel Candidate'")} } catch { $failed=$true }
+      ${iexSource("-Action List")}
+      $failed=$false; try { ${iexSource("-Action Switch -Channel Candidate")} } catch { $failed=$true }
       if(-not $failed){throw 'Switch allowed a missing channel'}
-      ${iexSource("' -Action Switch -Channel Preview'")}
-      ${iexSource("' -Action Uninstall -Channel Preview -Force'")}
+      ${iexSource("-Action Uninstall -Channel Preview -Force")}
       if($global:downloads -ne 0){throw 'Version management started a download'}
       if(Test-Path -LiteralPath $preview){throw 'Uninstall left the Preview directory'}
+      if([Environment]::GetEnvironmentVariable('Path','User') -cne $realUserPath){throw 'Version management rewrote the user PATH'}
       'MANAGE_NO_DOWNLOAD'`;
-    assert.match(ok(run(runtime, script, directory)), /MANAGE_NO_DOWNLOAD/);
+    const output = ok(run(runtime, script, directory));
+    assert.match(output, /Preview\s+installed/);
+    assert.match(output, /Polycode preview uninstalled/);
+    assert.match(output, /MANAGE_NO_DOWNLOAD/);
   });
 
   test(runtime + ': candidate install fails closed when gh cannot download', { skip: nativeWindows ? false : 'requires Windows_NT host checks' }, () => {
     const script = `$global:downloads=0; function global:Invoke-WebRequest {$global:downloads++; throw 'Unexpected request'};
       function global:gh { $global:downloads++; throw 'fixture gh failure' }
-      $failed=$false; try { ${iexSource("' -Action Install -Channel Candidate'")} } catch { $failed=$true }
+      $failed=$false; try { ${iexSource("-Action Install -Channel Candidate")} } catch { $failed=$true }
       if(-not $failed -or $global:downloads -lt 1){throw 'Candidate did not use gh'}
       if(Test-Path (Join-Path $env:LOCALAPPDATA 'Polycode-Candidate')){throw 'Candidate directory leaked'}
       if(@(Get-ChildItem $env:TEMP -Filter 'polycode-channel-download-*').Count){throw 'Download directory leaked'}
