@@ -99,30 +99,43 @@ Bun or external provider CLI is required on the user's machine.
 
 ## Install (Windows native)
 
-Current mainline (CI-built `bcc4eaf5`, includes experimental `context_budget` /
-`computer_use`). Installs into `%LOCALAPPDATA%\Polycode-Mainline` and adds the
-launcher to user `PATH`. Existing installations are not replaced:
+One command opens an interactive menu: **install or update**, then **Stable or
+Preview**. Both channels add the launcher to user `PATH` by default (`-NoPath`
+skips that). Existing production `%LOCALAPPDATA%\Polycode` is never replaced,
+and the two channels cannot overwrite each other.
 
 ```powershell
 irm https://raw.githubusercontent.com/Miku0139oao/Polycode/cursor/one-click-install-b060/install-mainline.ps1 | iex
 ```
 
-The bootstrap pins the size and SHA-256 of all six package files, verifies
-them, then runs the original installer with `-AllowCandidate`. Inspect
-[`install-mainline.ps1`](install-mainline.ps1) before `iex` if you prefer.
-This is **not** the 2026-09-08 Preview attestation and not a stable release.
-The generic `install.ps1 | iex` installer stays disabled.
+| Menu choice | Package | Default directory |
+| --- | --- | --- |
+| Stable | Current Windows package from CI run [34380813272](https://github.com/Miku0139oao/Polycode/actions/runs/34380813272) (`bcc4eaf5`), including experimental `context_budget` / `computer_use`. **Not** a fully accepted stable release. | `%LOCALAPPDATA%\Polycode-Mainline` |
+| Preview | Published v0.2.1 Preview (2026-09-08). | `%LOCALAPPDATA%\Polycode-Preview-v0.2.1` |
 
-The 2026-09-08 attested Preview remains available separately:
+The bootstrap pins the size and SHA-256 of all six package files for the chosen
+channel, verifies them, then runs the original installer with `-AllowCandidate`.
+Inspect [`install-mainline.ps1`](install-mainline.ps1) before `iex` if you prefer.
+Official `install.ps1 | iex` stays disabled; choosing Stable does **not** open
+that installer.
+
+Scripted / non-interactive:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/cursor/one-click-install-b060/install-mainline.ps1))) -Action Install -Channel Stable
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/cursor/one-click-install-b060/install-mainline.ps1))) -Action Update -Channel Preview -NoPath
+```
+
+The dedicated 2026-09-08 Preview one-liner still works if you want that package
+only, without the menu:
 
 ```powershell
 irm https://raw.githubusercontent.com/Miku0139oao/Polycode/fix/windows-terminal-ci/install-preview.ps1 | iex
 ```
 
 Read the [Preview scope and limitations](integrations/acceptance/preview-v0.2.1/release-notes.md)
-first if you use that older package. Mainline accepts `-NoPath` or
-`-InstallRoot D:\Polycode-Mainline` if you download the script and run it
-directly. Preview options remain in
+first if you use that older package. The menu script also accepts
+`-InstallRoot D:\Polycode-Mainline`. Preview-only options remain in
 [Preview installation](integrations/PREVIEW_INSTALL.md).
 
 Targets: Windows 10 22H2 / Windows 11 x64, PowerShell 5.1 or 7. ARM64 is not a
@@ -253,7 +266,7 @@ sandboxing, permissions and more. Upstream's hosted docs are at
 | `integrations/native-provider/` | Provider service: OAuth, credential store, ChatGPT and Cursor transports, launcher (Node/Bun) |
 | `integrations/tests/`, `integrations/*.mjs` | Installer, candidate-readiness and Windows smoke/probe suites |
 | `integrations/*.md`, `integrations/acceptance/` | Fork documentation and per-release acceptance records |
-| `install.ps1`, `install-mainline.ps1`, `install-preview.ps1`, `polycode.ps1` | Windows installer, mainline/Preview bootstraps and source-checkout launcher |
+| `install.ps1`, `install-mainline.ps1`, `install-preview.ps1`, `polycode.ps1` | Windows installer, interactive Stable/Preview bootstrap, Preview-only bootstrap and source-checkout launcher |
 | `.github/workflows/candidate-release.yml` | `Windows candidate` CI: build, package, install and smoke-test the Windows artifact |
 | `third_party/` | Vendored upstream source (Mermaid diagram stack) |
 
