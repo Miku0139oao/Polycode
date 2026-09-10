@@ -15,6 +15,10 @@ const windowsRuntimes = ['powershell.exe', 'pwsh.exe'].filter(runtime => {
   const probe = spawnSync(runtime, ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { encoding: 'utf8', timeout: 15000 });
   return !probe.error && probe.status === 0;
 });
+const iexRuntime = ['pwsh.exe', 'pwsh', '/tmp/pwsh/pwsh'].find(runtime => {
+  const probe = spawnSync(runtime, ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { encoding: 'utf8', timeout: 15000 });
+  return !probe.error && probe.status === 0;
+});
 const nativeWindows = process.platform === 'win32';
 function run(runtime, script, directory = root) {
   const env = {};
@@ -84,9 +88,35 @@ test('Channel bootstrap pins Preview and Stable hashes and does not enable offic
   assert.ok(!text.includes('polycode-mainline-download-'));
   assert.ok(!/\bexit\b(?! code)/.test(text));
   assert.ok(!/SkipHash|SkipCheck|BaseUrl|publicCandidateEnabled/.test(text));
-  assert.equal(readFileSync(source).subarray(0, 3).toString('hex'), 'efbbbf', 'UTF-8 BOM required for Windows PowerShell 5.1 -File');
+  const raw = readFileSync(source);
+  assert.notEqual(raw.subarray(0, 3).toString('hex'), 'efbbbf', 'UTF-8 BOM makes irm | iex treat the first token as \\uFEFFparam');
+  assert.match(raw.subarray(0, 16).toString('utf8'), /^param\s*\(/);
   const installer = readFileSync(fileURLToPath(new URL('../../install.ps1', import.meta.url)), 'utf8');
   assert.match(installer, /\$publicCandidateEnabled = \$false/);
+});
+
+test('Invoke-Expression of the bootstrap binds param instead of treating it as a command', { skip: iexRuntime ? false : 'requires pwsh' }, () => {
+  const script = `$text = [IO.File]::ReadAllText(${quote(source)}, [Text.Encoding]::UTF8)
+    if ($text.Length -gt 0 -and [int][char]$text[0] -eq 0xFEFF) { throw 'ReadAllText still starts with BOM' }
+    $bomFailed = $false
+    try { Invoke-Expression ([string][char]0xFEFF + 'param()') } catch {
+      if ($_.Exception.Message -match [char]0xFEFF + 'param') { $bomFailed = $true }
+    }
+    if (-not $bomFailed) { throw 'BOM param fixture did not reproduce irm|iex failure' }
+    $failed = $false; $message = ''
+    try { Invoke-Expression $text } catch { $failed = $true; $message = $_.Exception.Message }
+    if (-not $failed) { throw 'Expected bootstrap to stop after param binding' }
+    if ($message -match ("term '" + [char]0xFEFF + "param'") -or $message -match "term 'param'") {
+      throw ('iex still rejected param: ' + $message)
+    }
+    if ($message -notmatch 'Windows x64|Specify -Action') { throw ('Unexpected iex error: ' + $message) }
+    $sb = [scriptblock]::Create($text)
+    $names = @($sb.Ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+    foreach ($need in @('InstallRoot', 'Action', 'Channel', 'NoPath')) {
+      if ($names -notcontains $need) { throw ('scriptblock lost parameter ' + $need) }
+    }
+    'IEX_PARAM_PASS'`;
+  assert.match(ok(run(iexRuntime, script)), /IEX_PARAM_PASS/);
 });
 
 test('Channel bootstrap keeps Preview bytes on the v0.2.1 release and Stable bytes on the CI asset commit', () => {

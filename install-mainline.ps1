@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$InstallRoot,
     [string]$Action,
     [string]$Channel,
