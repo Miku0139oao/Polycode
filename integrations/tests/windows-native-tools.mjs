@@ -258,37 +258,55 @@ async function toolTurn(prompt,marker) {
 }
 const report={passed:false,binarySha256:createHash('sha256').update(readFileSync(binary)).digest('hex'),scope:'Mock transport, actual Windows native TUI/tools, default leader and permissions',root};
 if(bunBridge)report.bridgeRuntime={runtime:bunBridge.runtime,version:bunBridge.version,nativeServer:bunBridge.nativeServer};
+function screen(){return plain(t.output);}
+function lastScreen(n=4000){const s=screen();return s.length<=n?s:s.slice(-n);}
+async function waitForModelPicker(provider,offset){
+  const needle='mock-'+provider;
+  await t.until(()=>{
+    const view=plain(t.output.slice(offset));
+    return view.includes('Pick model') || view.includes(needle) || view.includes('Mock '+provider);
+  },90000);
+  if(provider==='cursor')assert.ok(plain(t.output.slice(offset)).includes('Context capacity not provided')||plain(t.output.slice(offset)).includes('Mock cursor'));
+  t.write(needle+'\r');await pause(1500);
+}
+async function runProviderTurns(provider){
+  await command('Read the isolated fixture.');
+  await text('WINDOWS_READ_'+provider.toUpperCase()+'_PASS');
+  if(testGrep)await toolTurn('Search the isolated fixture.','WINDOWS_GREP_'+provider.toUpperCase()+'_PASS');
+  await pause(700);
+  await toolTurn('Write the isolated output.','WINDOWS_WRITE_'+provider.toUpperCase()+'_PASS');
+  assert.equal(readFileSync(join(workspace,provider+'-written.txt'),'utf8'),nonce+'-'+provider);
+  await pause(700);
+  await toolTurn('Run the isolated Windows command.','WINDOWS_SHELL_'+provider.toUpperCase()+'_PASS');
+  if(testMcp) {
+    writeFileSync(mcpFile,mcpNonces[provider]);
+    await pause(700);
+    await toolTurn('Discover and call the local MCP probe.','WINDOWS_MCP_'+provider.toUpperCase()+'_PASS');
+  }
+  if(testTask) {
+    await pause(700);
+    await toolTurn('Run the native Task probe.','WINDOWS_TASK_'+provider.toUpperCase()+'_PASS');
+    assert.ok(taskState[provider].verified);
+  }
+}
 try {
   await text('Choose a provider');
   // The first menu renders before its asynchronous catalog arrives. Dismissing
   // it early cancels that refresh and can incorrectly exercise OAuth instead.
   await text('choose a model (use /login to sign in again)');
-  for(const provider of ['codex','cursor']) {
-    t.write('\x1b');await pause(500);
-    const offset=t.output.length;
-    await command('/provider '+provider);
-    await t.until(()=>plain(t.output.slice(offset)).includes('Choose a model for this native session'),30000);
-    if(provider==='cursor')assert.ok(plain(t.output.slice(offset)).includes('Context capacity not provided'));
-    t.write('g\r');await pause(1500);
-    await command('Read the isolated fixture.');
-    await text('WINDOWS_READ_'+provider.toUpperCase()+'_PASS');
-    if(testGrep)await toolTurn('Search the isolated fixture.','WINDOWS_GREP_'+provider.toUpperCase()+'_PASS');
-    await pause(700);
-    await toolTurn('Write the isolated output.','WINDOWS_WRITE_'+provider.toUpperCase()+'_PASS');
-    assert.equal(readFileSync(join(workspace,provider+'-written.txt'),'utf8'),nonce+'-'+provider);
-    await pause(700);
-    await toolTurn('Run the isolated Windows command.','WINDOWS_SHELL_'+provider.toUpperCase()+'_PASS');
-    if(testMcp) {
-      writeFileSync(mcpFile,mcpNonces[provider]);
-      await pause(700);
-      await toolTurn('Discover and call the local MCP probe.','WINDOWS_MCP_'+provider.toUpperCase()+'_PASS');
-    }
-    if(testTask) {
-      await pause(700);
-      await toolTurn('Run the native Task probe.','WINDOWS_TASK_'+provider.toUpperCase()+'_PASS');
-      assert.ok(taskState[provider].verified);
-    }
-  }
+  // Stay on the startup card (1 Grok, 2 ChatGPT, 3 Cursor). Esc+/provider was
+  // racing the catalog→models.available merge and never opened "Pick model".
+  let offset=t.output.length;
+  t.write('2');
+  await waitForModelPicker('codex',offset);
+  await runProviderTurns('codex');
+  t.write('\x1b');await pause(500);
+  offset=t.output.length;
+  await command('/provider');
+  await t.until(()=>plain(t.output.slice(offset)).includes('Choose a provider'),30000);
+  t.write('3');
+  await waitForModelPicker('cursor',offset);
+  await runProviderTurns('cursor');
   if(testMcp) {
     const events=readFileSync(mcpLog,'utf8').trim().split(/\r?\n/).map(JSON.parse);
     assert.equal(events.filter(e=>e.method==='tools/call').length,2,'MCP calls missing or replayed');
@@ -326,7 +344,7 @@ try {
   report.resumedSession=session;
   assert.deepEqual(failures,[]);
   report.passed=true;
-} catch(error){report.failure=error.message;process.exitCode=1;}
+} catch(error){report.failure=error.message;report.screen=lastScreen();process.exitCode=1;}
 finally {
   await t.close();if(bunBridge)await bunBridge.close();await service.close();
   report.forcedExit=!!t.forcedExit;
@@ -335,6 +353,7 @@ finally {
   report.shellResults=JSON.parse(JSON.stringify(shellResults).replaceAll(bridge.token,'[REDACTED]'));
   report.shellCalls=shellCalls;report.slowShell=slowShell;
   writeFileSync(join(root,'terminal.txt'),plain(t.output).replaceAll(bridge.token,'[REDACTED]'));
+  writeFileSync('windows-tools-terminal.txt',plain(t.output).replaceAll(bridge.token,'[REDACTED]'));
   writeFileSync('windows-tools-report.json',JSON.stringify(report,null,2)+'\n');
   writeFileSync(join(root,'report.json'),JSON.stringify(report,null,2)+'\n');
   console.log(JSON.stringify({passed:report.passed,failure:report.failure,root}));
