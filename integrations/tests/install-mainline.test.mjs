@@ -46,6 +46,7 @@ test('Mainline bootstrap pins CI candidate hashes and does not enable stable ins
   assert.match(text, /https:\/\/github\.com\/Miku0139oao\/Polycode\/releases\/download\/v0\.2\.1/);
   assert.match(text, /831e7375f88be4a346481c4b18d40cab8887f1d3/);
   assert.match(text, /34380813272/);
+  assert.match(text, /IncludePath:\(-not \$NoPath\)/);
   assert.ok(!/\bexit\b(?! code)/.test(text));
   assert.ok(!/SkipHash|SkipCheck|BaseUrl|publicCandidateEnabled/.test(text));
   const installer = readFileSync(fileURLToPath(new URL('../../install.ps1', import.meta.url)), 'utf8');
@@ -90,7 +91,7 @@ for (const runtime of windowsRuntimes) {
     });
   }
 
-  test(runtime + ': installer arguments preserve custom paths and require explicit PATH opt-in', () => {
+  test(runtime + ': installer arguments preserve custom paths and add PATH unless -NoPath', () => {
     const script = `${parse}; $nodes=$ast.FindAll({param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$installerArguments'},$true);
       if($nodes.Count -ne 2){throw 'Unexpected argument construction'};
       $downloadRoot='C:\\download space [test]'; $version='v0.2.1'; $Root='C:\\mainline space [test]';

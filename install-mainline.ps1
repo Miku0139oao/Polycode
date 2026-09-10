@@ -1,6 +1,6 @@
 param(
     [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'Polycode-Mainline'),
-    [switch]$AddToPath
+    [switch]$NoPath
 )
 
 & {
@@ -49,7 +49,7 @@ param(
     try {
         [Net.ServicePointManager]::SecurityProtocol = $previousProtocol -bor [Net.SecurityProtocolType]::Tls12
         Write-Warning 'Installing Polycode mainline from Windows CI run 34380813272 (bcc4eaf5). This is not the 2026-09-08 Preview attestation and not a stable release. Grok generation and clean-OS acceptance remain unverified.'
-        if ($IncludePath) { Write-Warning 'AddToPath explicitly enables the mainline launcher in user PATH; it may take precedence over another polycode command.' }
+        if ($IncludePath) { Write-Warning 'User PATH will include the mainline launcher; it may take precedence over another polycode command. Pass -NoPath to skip.' }
         New-Item -ItemType Directory -Path $downloadRoot | Out-Null
         $created = $true
         foreach ($name in $assets.Keys) {
@@ -75,4 +75,4 @@ param(
         [Net.ServicePointManager]::SecurityProtocol = $previousProtocol
         if ($created -and [IO.Directory]::Exists($downloadRoot)) { Remove-Item -LiteralPath $downloadRoot -Recurse -Force }
     }
-} -Root $InstallRoot -IncludePath:$AddToPath
+} -Root $InstallRoot -IncludePath:(-not $NoPath)

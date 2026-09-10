@@ -100,8 +100,8 @@ Bun or external provider CLI is required on the user's machine.
 ## Install (Windows native)
 
 Current mainline (CI-built `bcc4eaf5`, includes experimental `context_budget` /
-`computer_use`). Installs into `%LOCALAPPDATA%\Polycode-Mainline` and leaves
-`PATH` and any existing installation unchanged:
+`computer_use`). Installs into `%LOCALAPPDATA%\Polycode-Mainline` and adds the
+launcher to user `PATH`. Existing installations are not replaced:
 
 ```powershell
 irm https://raw.githubusercontent.com/Miku0139oao/Polycode/cursor/one-click-install-b060/install-mainline.ps1 | iex
@@ -120,7 +120,9 @@ irm https://raw.githubusercontent.com/Miku0139oao/Polycode/fix/windows-terminal-
 ```
 
 Read the [Preview scope and limitations](integrations/acceptance/preview-v0.2.1/release-notes.md)
-first if you use that older package. For `-AddToPath` and custom directories see
+first if you use that older package. Mainline accepts `-NoPath` or
+`-InstallRoot D:\Polycode-Mainline` if you download the script and run it
+directly. Preview options remain in
 [Preview installation](integrations/PREVIEW_INSTALL.md).
 
 Targets: Windows 10 22H2 / Windows 11 x64, PowerShell 5.1 or 7. ARM64 is not a
