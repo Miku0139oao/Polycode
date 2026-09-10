@@ -1057,6 +1057,51 @@ pub fn build_compacted_history(input: CompactedHistoryInput<'_>) -> Vec<Conversa
     }
     compacted
 }
+/// Reminder placed right before the restated request when it trails the summary.
+pub const USER_QUERY_AFTER_SUMMARY_REMINDER: &str = "<system-reminder>\n\
+The summary above replaces the earlier part of this conversation. The next message restates the \
+user's most recent request, which is still in progress. Continue it from the state described in \
+the summary: do not start over, do not treat the summary as the request, and do not ask the user \
+to repeat themselves.\n\
+</system-reminder>";
+/// Move the restated `<user_query>` (with any adjacent agent-message anchor) after the summary and
+/// reminders, so the request is the last user message of the compacted history.
+///
+/// [`build_compacted_history`] ends with the summary. Grok is trained on that shape, but generic
+/// chat-completions models answer the last user message, and there it is the summary carrier: the
+/// user's request gets acknowledged as "no concrete request" instead of continued. Returns the
+/// items unchanged when no restated query is present.
+pub fn restate_user_query_after_summary(mut items: Vec<ConversationItem>) -> Vec<ConversationItem> {
+    let is_anchor = |item: &ConversationItem| {
+        matches!(
+            item,
+            ConversationItem::User(user)
+                if user.synthetic_reason == Some(SyntheticReason::AgentMessage)
+        )
+    };
+    let is_restated_query = |item: &ConversationItem| {
+        is_real_user_turn(item) && item.text_content().trim_start().starts_with("<user_query>")
+    };
+    let Some(query) = items.iter().position(is_restated_query) else {
+        return items;
+    };
+    let start = if query > 0 && is_anchor(&items[query - 1]) {
+        query - 1
+    } else {
+        query
+    };
+    let end = if items.get(query + 1).is_some_and(is_anchor) {
+        query + 2
+    } else {
+        query + 1
+    };
+    let moved: Vec<ConversationItem> = items.drain(start..end).collect();
+    items.push(ConversationItem::system_reminder(
+        USER_QUERY_AFTER_SUMMARY_REMINDER,
+    ));
+    items.extend(moved);
+    items
+}
 /// Result of sanitizing a compacted conversation history.
 pub struct SanitizeResult {
     /// The sanitized conversation items.

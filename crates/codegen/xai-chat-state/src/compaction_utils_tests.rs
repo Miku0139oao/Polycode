@@ -3003,3 +3003,128 @@ fn fit_counts_encrypted_reasoning_against_budget() {
         "recent turn must survive"
     );
 }
+/// Subscription models answer the last user message. The restated request, not the summary carrier,
+/// must be that message, with the continuity reminder right before it and the summary intact ahead.
+#[tokio::test]
+async fn restated_query_after_summary_ends_with_the_user_request() {
+    let conversation = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("<user_query>finish the migration</user_query>"),
+        ConversationItem::assistant("working"),
+        ConversationItem::tool_result("tc1", "tool output"),
+    ];
+    let state_context = CompactionStateContext::build(&conversation, CompactionInputs::default())
+        .await
+        .for_compaction();
+    let grok_shape = build_compacted_history(CompactedHistoryInput {
+        system_message: ConversationItem::system("sys"),
+        user_message_prefix: "prefix".into(),
+        agents_md_reminder: None,
+        state_context: &state_context,
+        compaction_summary: "summary".into(),
+        system_reminder: Some("<system-reminder>state</system-reminder>".into()),
+        summary_before_recent: false,
+        transcript_hint: None,
+        summary_count: 1,
+    });
+    let query_index = grok_shape
+        .iter()
+        .position(|item| item.text_content().starts_with("<user_query>"))
+        .expect("restated query present");
+    assert!(
+        query_index < grok_shape.len() - 1,
+        "grok shape keeps the summary after the query"
+    );
+    let shaped = restate_user_query_after_summary(grok_shape.clone());
+    assert_eq!(shaped.len(), grok_shape.len() + 1, "one reminder added");
+    let last = shaped.last().unwrap();
+    assert!(is_real_user_turn(last));
+    assert_eq!(
+        last.text_content(),
+        "<user_query>\nfinish the migration\n</user_query>"
+    );
+    assert!(matches!(
+        &shaped[shaped.len() - 2],
+        ConversationItem::User(user)
+            if user.synthetic_reason == Some(SyntheticReason::SystemReminder)
+                && shaped[shaped.len() - 2].text_content() == USER_QUERY_AFTER_SUMMARY_REMINDER
+    ));
+    let summary_index = shaped
+        .iter()
+        .position(|item| {
+            matches!(
+                item,
+                ConversationItem::User(user)
+                    if user.synthetic_reason == Some(SyntheticReason::CompactionMeta)
+            ) && item.text_content().contains("summary")
+        })
+        .expect("summary carrier present");
+    assert!(
+        summary_index < shaped.len() - 2,
+        "summary precedes the reminder and query"
+    );
+    assert_eq!(
+        shaped
+            .iter()
+            .filter(|item| item.text_content().starts_with("<user_query>"))
+            .count(),
+        1,
+        "the query is moved, not duplicated"
+    );
+    assert!(
+        shaped
+            .iter()
+            .any(|item| { item.text_content() == "<system-reminder>state</system-reminder>" })
+    );
+}
+/// The agent-message anchor travels with the query so their relative order is unchanged.
+#[tokio::test]
+async fn restated_query_after_summary_keeps_agent_message_anchor_adjacent() {
+    let conversation = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("<user_query>human task</user_query>"),
+        ConversationItem::assistant("before"),
+        ConversationItem::agent_message("assignment from another agent"),
+        ConversationItem::assistant("tail"),
+    ];
+    let state_context = CompactionStateContext::build(&conversation, CompactionInputs::default())
+        .await
+        .for_compaction();
+    let shaped = restate_user_query_after_summary(build_compacted_history(CompactedHistoryInput {
+        system_message: ConversationItem::system("sys"),
+        user_message_prefix: "prefix".into(),
+        agents_md_reminder: None,
+        state_context: &state_context,
+        compaction_summary: "summary".into(),
+        system_reminder: None,
+        summary_before_recent: false,
+        transcript_hint: None,
+        summary_count: 1,
+    }));
+    let n = shaped.len();
+    assert!(matches!(
+        &shaped[n - 1],
+        ConversationItem::User(user)
+            if user.synthetic_reason == Some(SyntheticReason::AgentMessage)
+    ));
+    assert_eq!(
+        shaped[n - 2].text_content(),
+        "<user_query>\nhuman task\n</user_query>"
+    );
+    assert_eq!(
+        shaped[n - 3].text_content(),
+        USER_QUERY_AFTER_SUMMARY_REMINDER
+    );
+}
+/// No restated query (agent-only history): the history is returned untouched.
+#[test]
+fn restated_query_after_summary_is_identity_without_a_query() {
+    let items = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user_meta("prefix"),
+        ConversationItem::user_meta(format_compact_summary_content("summary")),
+    ];
+    let before = serde_json::to_vec(&items).unwrap();
+    let shaped = restate_user_query_after_summary(items);
+    assert_eq!(serde_json::to_vec(&shaped).unwrap(), before);
+}
