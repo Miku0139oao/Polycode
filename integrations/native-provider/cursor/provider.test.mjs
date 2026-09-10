@@ -964,6 +964,11 @@ test('auth polling cancels via signal and close; no further poll', async t => {
   }
 });
 
+test('refresh does not rotate an opaque token that has no known expiry', async t => {
+  const instance = provider(t, { fetchImpl: async () => assert.fail('must not refresh when expiry is unknown') });
+  const original = { accessToken: 'OFFLINE_OPAQUE_ACCESS', refreshToken: 'OFFLINE_REFRESH_A' };
+  assert.deepEqual(await instance.refresh(original), original);
+});
 test('refresh uses official bearer refresh endpoint; rotation is plain caller-owned data', async t => {
   const original = { ...A, expiresAt: 1 };
   const instance = provider(t, { fetchImpl: async (url, options) => {
@@ -985,9 +990,9 @@ test('models are dynamic canonical IDs only, deduplicated; unknown context stays
     assert.equal(url, 'https://api2.cursor.sh/aiserver.v1.AiService/GetUsableModels');
     assert.equal(options.headers.authorization, `Bearer ${A.accessToken}`);
     assert.equal(options.headers['connect-protocol-version'], '1');
-    return Response.json({ models: [{ modelId: 'canonical', displayModelId: 'alias', aliases: ['other'], displayName: 'Exact name' }, { modelId: 'canonical', displayName: 'Exact name' }, { modelId: 'another', contextWindow: 12345 }] });
+    return Response.json({ models: [{ modelId: 'canonical', displayModelId: 'alias', aliases: ['other'], displayName: 'Exact name' }, { modelId: 'canonical', displayName: 'Exact name' }, { modelId: 'another', contextWindow: 12345 }, { modelId: 'limited', displayName: 'Limited', contextTokenLimit: 272000 }] });
   } });
-  assert.deepEqual(await instance.models(A), [{ id: 'canonical', name: 'Exact name', contextWindow: null }, { id: 'another', name: 'another', contextWindow: 12345 }]);
+  assert.deepEqual(await instance.models(A), [{ id: 'canonical', name: 'Exact name', contextWindow: null }, { id: 'another', name: 'another', contextWindow: 12345 }, { id: 'limited', name: 'Limited', contextWindow: 272000 }]);
 });
 
 test('model failures are not hidden as a catalog/default/fallback', async t => {

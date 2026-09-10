@@ -17,6 +17,12 @@ function json(value, depth = 0) {
   throw invalid();
 }
 const hash = value => createHash('sha256').update(value).digest('hex');
+function firstPositiveInt(...values) {
+  for (const value of values) {
+    if (Number.isSafeInteger(value) && value > 0) return value;
+  }
+  return null;
+}
 function token(value) {
   if (typeof value !== 'string' || !value.length || value.length > 65536 || /\s|[\x00-\x1f\x7f]/.test(value)) {
     throw fail('invalid_credential', 'Cursor credential is missing or malformed.', 401);
@@ -199,8 +205,9 @@ export function createCursorProvider({
     live(signal);
     const old = credential(input, now(), true);
     // A still-valid access token needs no refresh, including poll responses
-    // without a refresh token. Preserve unknown expiry as unknown.
-    if (old.expiresAt !== undefined && old.expiresAt > now() + 60000) return old;
+    // without a refresh token. Unknown expiry must not rotate: a new
+    // accessToken hash cannot resume a parked tool call (409).
+    if (old.expiresAt === undefined || old.expiresAt > now() + 60000) return old;
     if (!old.refreshToken) throw fail('refresh_unavailable', 'No Cursor refresh token; sign in again.', 401);
     const op = operation(signal, requestTimeoutMs);
     try {
@@ -225,7 +232,9 @@ export function createCursorProvider({
       for (const item of result.models) {
         if (typeof item?.modelId !== 'string' || !item.modelId) throw fail('invalid_models', 'Cursor model catalog is missing a canonical model ID.');
         const name = item.displayName ?? item.modelId;
-        const contextWindow = item.contextWindow ?? null; // Unknown means unknown: no guessed context sizes.
+        const contextWindow = firstPositiveInt(
+          item.contextWindow, item.context_window, item.contextTokenLimit, item.context_token_limit,
+        ); // Unknown means unknown: no guessed 200k/1M sizes.
         if (typeof name !== 'string' || !name || (contextWindow !== null && (!Number.isSafeInteger(contextWindow) || contextWindow <= 0))) throw fail('invalid_models', 'Cursor returned invalid model metadata.');
         const model = { id: item.modelId, name, contextWindow };
         if (catalog.has(model.id) && json(catalog.get(model.id)) !== json(model)) throw fail('invalid_models', 'Cursor returned conflicting model IDs.');
