@@ -62,6 +62,7 @@ function Resolve-InstallAction([string]$Value) {
     switch -Regex ($Value.Trim()) {
         '^(install|安裝)$' { return 'Install' }
         '^(update|更新)$' { return 'Update' }
+        '^(overwrite|replace|覆蓋|覆蓋安裝)$' { return 'Overwrite' }
         default { return $null }
     }
 }
@@ -74,17 +75,42 @@ function Resolve-InstallChannel([string]$Value) {
     }
 }
 
+function Set-PolycodePathOverwrite([string]$Bin) {
+    $binFull = [IO.Path]::GetFullPath($Bin).TrimEnd('\', '/')
+    $userPath = [string][Environment]::GetEnvironmentVariable('Path', 'User')
+    $kept = New-Object System.Collections.Generic.List[string]
+    foreach ($part in @($userPath -split ';')) {
+        $entry = $part.Trim()
+        if (-not $entry) { continue }
+        $normalized = $entry.TrimEnd('\', '/')
+        if ($normalized -ieq $binFull) { continue }
+        $launcher = Join-Path $normalized 'polycode.cmd'
+        if ([IO.File]::Exists($launcher)) { continue }
+        $kept.Add($entry) | Out-Null
+    }
+    $next = (@($binFull) + $kept)
+    [Environment]::SetEnvironmentVariable('Path', ($next -join ';'), 'User')
+    $processKept = @($env:Path -split ';' | ForEach-Object { $_.Trim() } | Where-Object {
+        $_ -and $_.TrimEnd('\', '/') -ine $binFull -and -not [IO.File]::Exists((Join-Path $_.TrimEnd('\', '/') 'polycode.cmd'))
+    })
+    $env:Path = (@($binFull) + $processKept) -join ';'
+}
+
 $selectedAction = Resolve-InstallAction $(if ($Action) { $Action } else { '' })
 $selectedChannel = Resolve-InstallChannel $(if ($Channel) { $Channel } else { '' })
 if (-not $selectedAction -or -not $selectedChannel) {
     $canPrompt = $false
     try { $canPrompt = [Environment]::UserInteractive -and $Host.Name -eq 'ConsoleHost' -and -not [Console]::IsInputRedirected } catch { $canPrompt = $false }
-    if (-not $canPrompt) { throw 'Specify -Action Install|Update and -Channel Stable|Preview.' }
+    if (-not $canPrompt) { throw 'Specify -Action Install|Update|Overwrite and -Channel Stable|Preview.' }
     Write-Host 'Polycode Windows 安裝'
     Write-Host '官方穩定版尚未通過完整驗收；選「穩定版」會安裝目前建議的 Windows 包（CI mainline）。'
     if (-not $selectedAction) {
-        $pick = Read-MenuChoice '你要做什麼？' @('安裝', '更新')
-        $selectedAction = @('Install', 'Update')[$pick - 1]
+        $pick = Read-MenuChoice '你要做什麼？' @(
+            '安裝 — 寫入這個頻道自己的目錄',
+            '更新 — 同一個頻道原地更新',
+            '覆蓋 — 安裝這個頻道，並讓 PATH 上的 polycode 指向它'
+        )
+        $selectedAction = @('Install', 'Update', 'Overwrite')[$pick - 1]
     }
     if (-not $selectedChannel) {
         $pick = Read-MenuChoice '安裝哪個頻道？' @(
@@ -120,6 +146,9 @@ if ($selectedAction -eq 'Update' -and -not [IO.File]::Exists($launcher)) {
 }
 
 $IncludePath = -not $NoPath
+if ($selectedAction -eq 'Overwrite' -and -not $IncludePath) {
+    throw 'Overwrite requires PATH changes; omit -NoPath.'
+}
 $downloadRoot = Join-Path ([IO.Path]::GetTempPath()) ('polycode-channel-download-' + [Guid]::NewGuid().ToString('N'))
 $previousProtocol = [Net.ServicePointManager]::SecurityProtocol
 $created = $false
@@ -130,7 +159,9 @@ try {
     } else {
         Write-Warning 'Installing Polycode current Windows package from CI run 34380813272 (bcc4eaf5). Official stable publication is not open. This is not the 2026-09-08 Preview attestation.'
     }
-    if ($IncludePath) { Write-Warning 'User PATH will include this launcher; it may take precedence over another polycode command. Pass -NoPath to skip.' }
+    if ($selectedAction -eq 'Overwrite') {
+        Write-Warning 'Overwrite will install this channel and make its launcher the first polycode on user PATH. Other polycode directories stay on disk but leave PATH.'
+    } elseif ($IncludePath) { Write-Warning 'User PATH will include this launcher; it may take precedence over another polycode command. Pass -NoPath to skip.' }
     New-Item -ItemType Directory -Path $downloadRoot | Out-Null
     $created = $true
     foreach ($name in $assets.Keys) {
@@ -142,16 +173,18 @@ try {
     $installerRuntime = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $installerArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $downloadRoot 'install.ps1'),
         '-Version', $version, '-ArtifactDirectory', $downloadRoot, '-AllowCandidate', '-InstallRoot', $Root)
-    if (-not $IncludePath) { $installerArguments += '-NoPath' }
+    if ((-not $IncludePath) -or ($selectedAction -eq 'Overwrite')) { $installerArguments += '-NoPath' }
     & $installerRuntime @installerArguments
     if ($LASTEXITCODE -ne 0) { throw ('Installer failed with exit code ' + $LASTEXITCODE) }
     if (-not [IO.File]::Exists($launcher)) { throw 'Installer returned success without a launcher.' }
-    $done = if ($selectedAction -eq 'Update') { 'updated' } else { 'installed' }
+    if ($selectedAction -eq 'Overwrite') { Set-PolycodePathOverwrite (Join-Path $Root 'bin') }
+    $done = if ($selectedAction -eq 'Overwrite') { 'installed and PATH overwritten' } elseif ($selectedAction -eq 'Update') { 'updated' } else { 'installed' }
     Write-Host ("Polycode {0} {1}. No login or model request was started." -f $selectedChannel.ToLowerInvariant(), $done)
     if ($selectedChannel -eq 'Stable') {
         Write-Host 'context_budget and computer_use stay off until you set GROK_CONTEXT_BUDGET=1 / GROK_COMPUTER_USE=1 or [features] in config.toml.'
     }
-    if ($IncludePath) { Write-Host 'User PATH updated. Open a new terminal to use polycode, or use the explicit command below.' }
+    if ($selectedAction -eq 'Overwrite') { Write-Host 'User PATH now prefers this launcher. Open a new terminal; other polycode installs remain on disk.' }
+    elseif ($IncludePath) { Write-Host 'User PATH updated. Open a new terminal to use polycode, or use the explicit command below.' }
     else { Write-Host 'PATH unchanged. Start with:' }
     Write-Host ("& '" + $launcher.Replace("'", "''") + "' -Project (Get-Location).Path -AuthDirectory '" + (Join-Path $Root 'auth').Replace("'", "''") + "'")
 } finally {

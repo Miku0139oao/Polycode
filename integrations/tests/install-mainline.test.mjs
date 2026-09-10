@@ -66,13 +66,16 @@ test('Channel bootstrap pins Preview and Stable hashes and does not enable offic
   assert.match(text, /function Read-MenuChoice/);
   assert.match(text, /function Resolve-InstallAction/);
   assert.match(text, /function Resolve-InstallChannel/);
+  assert.match(text, /function Set-PolycodePathOverwrite/);
   assert.match(text, /你要做什麼？/);
   assert.match(text, /安裝哪個頻道？/);
-  assert.match(text, /@\('安裝', '更新'\)/);
+  assert.match(text, /@\('Install', 'Update', 'Overwrite'\)/);
+  assert.match(text, /覆蓋 — 安裝這個頻道，並讓 PATH 上的 polycode 指向它/);
   assert.match(text, /穩定版 — 目前 Windows 建議包/);
   assert.match(text, /Preview — v0\.2\.1（2026-09-08 已發布）/);
   assert.match(text, /官方穩定版尚未通過完整驗收/);
-  assert.match(text, /Specify -Action Install\|Update and -Channel Stable\|Preview\./);
+  assert.match(text, /Specify -Action Install\|Update\|Overwrite and -Channel Stable\|Preview\./);
+  assert.match(text, /Overwrite requires PATH changes; omit -NoPath\./);
   assert.match(text, /這個頻道還沒安裝，改為安裝。/);
   assert.match(text, /polycode-channel-download-/);
   assert.match(text, /Polycode \{0\} \{1\}\. No login or model request was started\./);
@@ -121,6 +124,8 @@ for (const runtime of windowsRuntimes) {
       }
       if((Resolve-InstallAction '安裝') -cne 'Install'){throw 'Install label'};
       if((Resolve-InstallAction 'update') -cne 'Update'){throw 'Update label'};
+      if((Resolve-InstallAction '覆蓋') -cne 'Overwrite'){throw 'Overwrite label'};
+      if((Resolve-InstallAction 'overwrite') -cne 'Overwrite'){throw 'Overwrite english'};
       if((Resolve-InstallChannel '穩定版') -cne 'Stable'){throw 'Stable label'};
       if((Resolve-InstallChannel '預覽') -cne 'Preview'){throw 'Preview label'};
       if($null -ne (Resolve-InstallAction 'latest')){throw 'Unknown action'};
@@ -170,6 +175,43 @@ for (const runtime of windowsRuntimes) {
         if($installerArguments -notcontains '-AllowCandidate' -or $installerArguments -contains '-GitHubCandidate'){throw 'Wrong installation scope'};
       }; 'ARGUMENTS_PASS'`;
     assert.match(ok(run(runtime, script)), /ARGUMENTS_PASS/);
+  });
+
+  test(runtime + ': overwrite PATH helper prefers the new bin and drops other polycode launchers', { skip: nativeWindows ? false : 'requires Windows_NT host checks' }, () => {
+    const directory = mkdtempSync(join(root, 'path-'));
+    const script = `${parse};
+      $definition=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Set-PolycodePathOverwrite'},$true);
+      Invoke-Expression $definition.Extent.Text;
+      $saved=[Environment]::GetEnvironmentVariable('Path','User');
+      $processSaved=$env:Path;
+      try {
+        $preview=Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1\\bin';
+        $next=Join-Path $env:LOCALAPPDATA 'Polycode-Mainline\\bin';
+        $other=Join-Path $env:LOCALAPPDATA 'tools';
+        New-Item -ItemType Directory -Path $preview,$next,$other | Out-Null;
+        Set-Content -LiteralPath (Join-Path $preview 'polycode.cmd') -Value '@echo preview' -Encoding ASCII;
+        Set-Content -LiteralPath (Join-Path $next 'polycode.cmd') -Value '@echo mainline' -Encoding ASCII;
+        [Environment]::SetEnvironmentVariable('Path', ($preview + ';' + $other), 'User');
+        $env:Path = $preview + ';C:\\Windows\\System32';
+        Set-PolycodePathOverwrite $next;
+        $user=[Environment]::GetEnvironmentVariable('Path','User');
+        if($user -notlike ($next + ';*')){throw 'New bin is not first'};
+        if($user -like ('*' + $preview + '*')){throw 'Preview launcher stayed on PATH'};
+        if($user -notlike ('*' + $other + '*')){throw 'Unrelated PATH entry removed'};
+        if(-not (Test-Path -LiteralPath (Join-Path $preview 'polycode.cmd'))){throw 'Preview files were deleted'};
+        'PATH_OVERWRITE_PASS'
+      } finally {
+        [Environment]::SetEnvironmentVariable('Path', $saved, 'User');
+        $env:Path=$processSaved;
+      }`;
+    assert.match(ok(run(runtime, script, directory)), /PATH_OVERWRITE_PASS/);
+  });
+
+  test(runtime + ': overwrite rejects -NoPath before any download', { skip: nativeWindows ? false : 'requires Windows_NT host checks' }, () => {
+    const script = `$global:downloads=0; function global:Invoke-WebRequest {$global:downloads++; throw 'Unexpected request'};
+      $failed=$false; try { & ${quote(source)} -Action Overwrite -Channel Stable -NoPath } catch { $failed=$true };
+      if(-not $failed -or $global:downloads -ne 0){throw 'Overwrite -NoPath did not stop early'}; 'OVERWRITE_NOPATH'`;
+    assert.match(ok(run(runtime, script)), /OVERWRITE_NOPATH/);
   });
 
   test(runtime + ': non-interactive use requires Action and Channel before any download', { skip: nativeWindows ? false : 'requires Windows_NT host checks' }, () => {
