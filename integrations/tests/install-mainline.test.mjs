@@ -11,6 +11,10 @@ const source = fileURLToPath(new URL('../../install-mainline.ps1', import.meta.u
 const root = mkdtempSync(join(tmpdir(), 'polycode-mainline-bootstrap-test-'));
 after(() => rmSync(root, { recursive: true, force: true }));
 const quote = value => "'" + value.replaceAll("'", "''") + "'";
+const readUtf8 = `[IO.File]::ReadAllText(${quote(source)}, [Text.Encoding]::UTF8)`;
+function iexSource(argExpr) {
+  return argExpr ? `Invoke-Expression (${readUtf8} + ${argExpr})` : `Invoke-Expression ${readUtf8}`;
+}
 const windowsRuntimes = ['powershell.exe', 'pwsh.exe'].filter(runtime => {
   const probe = spawnSync(runtime, ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { encoding: 'utf8', timeout: 15000 });
   return !probe.error && probe.status === 0;
@@ -211,7 +215,7 @@ for (const runtime of windowsRuntimes) {
             if($Uri -cne 'https://github.com/Miku0139oao/Polycode/releases/download/v0.2.1/install.ps1'){throw 'Unexpected URL'};
             $global:downloads++; ${behavior}
           }
-          $failed=$false; try { & ${quote(source)} -Action Install -Channel ${channel} } catch { $failed=$true };
+          $failed=$false; try { ${iexSource(`' -Action Install -Channel ${channel}'`)} } catch { $failed=$true };
           if(-not $failed -or $global:downloads -ne 1){throw 'Failure did not stop before installer'};
           if($ErrorActionPreference -ne 'Continue' -or [Net.ServicePointManager]::SecurityProtocol -ne $protocol){throw 'Caller preferences changed'};
           if([Environment]::GetEnvironmentVariable('Path','User') -cne $userPath){throw 'User PATH changed'};
@@ -328,14 +332,14 @@ for (const runtime of windowsRuntimes) {
 
   test(runtime + ': overwrite rejects -NoPath before any download', { skip: nativeWindows ? false : 'requires Windows_NT host checks' }, () => {
     const script = `$global:downloads=0; function global:Invoke-WebRequest {$global:downloads++; throw 'Unexpected request'};
-      $failed=$false; try { & ${quote(source)} -Action Overwrite -Channel Stable -NoPath } catch { $failed=$true };
+      $failed=$false; try { ${iexSource("' -Action Overwrite -Channel Stable -NoPath'")} } catch { $failed=$true };
       if(-not $failed -or $global:downloads -ne 0){throw 'Overwrite -NoPath did not stop early'}; 'OVERWRITE_NOPATH'`;
     assert.match(ok(run(runtime, script)), /OVERWRITE_NOPATH/);
   });
 
   test(runtime + ': non-interactive use requires Action and Channel before any download', { skip: nativeWindows ? false : 'requires Windows_NT host checks' }, () => {
     const script = `$global:downloads=0; function global:Invoke-WebRequest {$global:downloads++; throw 'Unexpected request'};
-      $failed=$false; try { & ${quote(source)} } catch { $failed=$true };
+      $failed=$false; try { ${iexSource()} } catch { $failed=$true };
       if(-not $failed -or $global:downloads -ne 0){throw 'Menu-less invocation did not stop early'}; 'MENU_REQUIRED'`;
     assert.match(ok(run(runtime, script)), /MENU_REQUIRED/);
   });
@@ -343,19 +347,19 @@ for (const runtime of windowsRuntimes) {
   test(runtime + ': channel roots stay isolated and production is always rejected', { skip: nativeWindows ? false : 'requires Windows_NT host checks' }, () => {
     const script = `$global:downloads=0; function global:Invoke-WebRequest {$global:downloads++; throw 'Unexpected request'};
       function global:gh { $global:downloads++; throw 'Unexpected gh' }
-      $failed=$false; try { & ${quote(source)} -Action Install -Channel Stable -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode') } catch { $failed=$true };
+      $failed=$false; try { ${iexSource("' -Action Install -Channel Stable -InstallRoot ' + (Join-Path $env:LOCALAPPDATA 'Polycode')")} } catch { $failed=$true };
       if(-not $failed -or $global:downloads -ne 0){throw 'Production directory was not rejected early'};
-      $failed=$false; try { & ${quote(source)} -Action Install -Channel Preview -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode') } catch { $failed=$true };
+      $failed=$false; try { ${iexSource("' -Action Install -Channel Preview -InstallRoot ' + (Join-Path $env:LOCALAPPDATA 'Polycode')")} } catch { $failed=$true };
       if(-not $failed -or $global:downloads -ne 0){throw 'Preview did not reject production'};
-      $failed=$false; try { & ${quote(source)} -Action Install -Channel Stable -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1') } catch { $failed=$true };
+      $failed=$false; try { ${iexSource("' -Action Install -Channel Stable -InstallRoot ' + (Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1')")} } catch { $failed=$true };
       if(-not $failed -or $global:downloads -ne 0){throw 'Stable did not reject Preview directory'};
-      $failed=$false; try { & ${quote(source)} -Action Install -Channel Preview -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode-Mainline') } catch { $failed=$true };
+      $failed=$false; try { ${iexSource("' -Action Install -Channel Preview -InstallRoot ' + (Join-Path $env:LOCALAPPDATA 'Polycode-Mainline')")} } catch { $failed=$true };
       if(-not $failed -or $global:downloads -ne 0){throw 'Preview did not reject mainline directory'};
-      $failed=$false; try { & ${quote(source)} -Action Install -Channel Candidate -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1') } catch { $failed=$true };
+      $failed=$false; try { ${iexSource("' -Action Install -Channel Candidate -InstallRoot ' + (Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1')")} } catch { $failed=$true };
       if(-not $failed -or $global:downloads -ne 0){throw 'Candidate did not reject Preview directory'};
-      $failed=$false; try { & ${quote(source)} -Action Install -Channel Preview -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode-Candidate') } catch { $failed=$true };
+      $failed=$false; try { ${iexSource("' -Action Install -Channel Preview -InstallRoot ' + (Join-Path $env:LOCALAPPDATA 'Polycode-Candidate')")} } catch { $failed=$true };
       if(-not $failed -or $global:downloads -ne 0){throw 'Preview did not reject candidate directory'};
-      $failed=$false; try { & ${quote(source)} -Action Update -Channel Preview -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1') } catch { $failed=$true };
+      $failed=$false; try { ${iexSource("' -Action Update -Channel Preview -InstallRoot ' + (Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1')")} } catch { $failed=$true };
       if(-not $failed -or $global:downloads -ne 1){throw 'Preview root should reach download'};
       'ROOTS_UNCHANGED'`;
     assert.match(ok(run(runtime, script)), /ROOTS_UNCHANGED/);
@@ -368,11 +372,11 @@ for (const runtime of windowsRuntimes) {
       $preview=Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1'
       New-Item -ItemType Directory -Path (Join-Path $preview 'bin') | Out-Null
       Set-Content -LiteralPath (Join-Path $preview 'bin\\polycode.cmd') -Value '@echo preview' -Encoding ASCII
-      & ${quote(source)} -Action List
-      $failed=$false; try { & ${quote(source)} -Action Switch -Channel Candidate } catch { $failed=$true }
+      ${iexSource("' -Action List'")}
+      $failed=$false; try { ${iexSource("' -Action Switch -Channel Candidate'")} } catch { $failed=$true }
       if(-not $failed){throw 'Switch allowed a missing channel'}
-      & ${quote(source)} -Action Switch -Channel Preview
-      & ${quote(source)} -Action Uninstall -Channel Preview -Force
+      ${iexSource("' -Action Switch -Channel Preview'")}
+      ${iexSource("' -Action Uninstall -Channel Preview -Force'")}
       if($global:downloads -ne 0){throw 'Version management started a download'}
       if(Test-Path -LiteralPath $preview){throw 'Uninstall left the Preview directory'}
       'MANAGE_NO_DOWNLOAD'`;
@@ -382,7 +386,7 @@ for (const runtime of windowsRuntimes) {
   test(runtime + ': candidate install fails closed when gh cannot download', { skip: nativeWindows ? false : 'requires Windows_NT host checks' }, () => {
     const script = `$global:downloads=0; function global:Invoke-WebRequest {$global:downloads++; throw 'Unexpected request'};
       function global:gh { $global:downloads++; throw 'fixture gh failure' }
-      $failed=$false; try { & ${quote(source)} -Action Install -Channel Candidate } catch { $failed=$true }
+      $failed=$false; try { ${iexSource("' -Action Install -Channel Candidate'")} } catch { $failed=$true }
       if(-not $failed -or $global:downloads -lt 1){throw 'Candidate did not use gh'}
       if(Test-Path (Join-Path $env:LOCALAPPDATA 'Polycode-Candidate')){throw 'Candidate directory leaked'}
       if(@(Get-ChildItem $env:TEMP -Filter 'polycode-channel-download-*').Count){throw 'Download directory leaked'}
