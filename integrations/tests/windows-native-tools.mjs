@@ -325,6 +325,7 @@ try {
   report.cancelledStreams=cancelledStreams;
   await pause(1500);
   await t.close();
+  report.firstTerminalCloseMs=t.closeMs;
   assert.ok(!t.forcedExit && t.exitCode===0,'First terminal did not exit normally');
   const session=plain(t.output).match(/--resume\s+([a-f0-9-]{36})/)?.[1];
   assert.ok(session,'Native TUI did not expose a resumable session');
@@ -348,7 +349,16 @@ try {
 finally {
   await t.close();if(bunBridge)await bunBridge.close();await service.close();
   report.forcedExit=!!t.forcedExit;
+  report.lastTerminalCloseMs=t.closeMs;
   if(t.forcedExit){report.passed=false;process.exitCode=1;}
+  // The pager flushes "pager quit" before tearing down the terminal, so the unified log
+  // separates a Ctrl+Q that never became Quit from a Quit whose teardown outlived the harness.
+  const unifiedLog=join(home,'grok','logs','unified.jsonl');
+  if(existsSync(unifiedLog)){
+    const entries=readFileSync(unifiedLog,'utf8').replaceAll(bridge.token,'[REDACTED]');
+    writeFileSync('windows-tools-unified.jsonl',entries);
+    report.pagerQuitLogged=entries.includes('"pager quit"');
+  } else report.pagerQuitLogged=null;
   report.requests=requests;report.permissions=permissions;report.controlRequests=controlRequests;report.catalogs=catalogs;report.fixtureErrors=failures;
   report.shellResults=JSON.parse(JSON.stringify(shellResults).replaceAll(bridge.token,'[REDACTED]'));
   report.shellCalls=shellCalls;report.slowShell=slowShell;
