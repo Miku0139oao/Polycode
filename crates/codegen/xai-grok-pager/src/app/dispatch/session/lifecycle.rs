@@ -1545,6 +1545,7 @@ fn handle_switch_model_complete_inner(
                 let prev_model = agent.session.models.current.clone();
                 let prev_effort = agent.session.models.reasoning_effort;
                 agent.session.models.set_current(model_id.clone(), effort);
+                agent.sync_context_total_to_model();
                 if authoritative_effort {
                     agent.session.models.reasoning_effort = effort;
                 }

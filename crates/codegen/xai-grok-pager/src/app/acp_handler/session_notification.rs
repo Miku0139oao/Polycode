@@ -1189,6 +1189,7 @@ pub(super) fn handle_session_notification_with_origin(
                 .session
                 .models
                 .set_current(new_model_id.clone(), effort);
+            agent.sync_context_total_to_model();
             agent.session.user_model_preference = Some(new_model_id.clone());
             let resolved_effort = agent.session.models.reasoning_effort;
             let actually_changed =
