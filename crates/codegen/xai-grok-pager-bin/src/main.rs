@@ -1870,7 +1870,7 @@ fn install_heap_profile_hooks() {
 }
 fn version_text(channel_label: &str) -> String {
     format!(
-        "grok {}\n",
+        "polycode {}\n",
         xai_grok_version::display_version_with_commit(
             xai_grok_version::full_version(),
             channel_label,
@@ -2188,6 +2188,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             Command::Version { json } => {
                 if json {
                     let payload = serde_json::json!({
+                        "name": "polycode",
                         "currentVersion": env!("VERSION_WITH_COMMIT"),
                         "channel": xai_grok_update::channel_name().unwrap_or("unknown"),
                     });
@@ -2916,7 +2917,7 @@ mod tests {
             let mut output = Vec::new();
             write_version(&mut output, label).unwrap();
             let output = String::from_utf8(output).unwrap();
-            assert!(output.starts_with("grok "));
+            assert!(output.starts_with("polycode "));
             assert!(output.contains(env!("VERSION_WITH_COMMIT")));
             assert!(output.ends_with(expected_suffix), "{output:?}");
         }
