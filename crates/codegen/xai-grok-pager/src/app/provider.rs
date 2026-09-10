@@ -104,9 +104,11 @@ pub async fn execute(operation: Operation, tx: xai_acp_lib::AcpAgentTx) -> Reply
         Ok(match operation {
             Operation::Catalog { refresh, provider } => {
                 let catalog = bridge.refresh(refresh).await?;
+                // `refresh` also refetches the native Grok catalog; otherwise the agent waits for its
+                // first remote fetch so the reply is never the bundled two-model fallback by accident.
                 let req = acp::ExtRequest::new(
                     "x.ai/auth/polycode/reload",
-                    serde_json::value::to_raw_value(&serde_json::json!({}))
+                    serde_json::value::to_raw_value(&serde_json::json!({ "refresh": refresh }))
                         .unwrap()
                         .into(),
                 );

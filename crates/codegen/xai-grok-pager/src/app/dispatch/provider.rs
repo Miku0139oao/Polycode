@@ -120,7 +120,7 @@ fn menu(app: &mut AppView) {
     }
     options.push(option(
         "Refresh models",
-        "Refresh the subscription model catalog",
+        "Refetch the Grok (native) and subscription model catalogs",
         "refresh",
     ));
     card(
