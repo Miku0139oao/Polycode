@@ -32,7 +32,7 @@ function ok(result) {
   assert.equal(result.status, 0, `signal=${result.signal ?? 'none'}\n${result.stdout}${result.stderr}`);
   return result.stdout;
 }
-const parse = `$tokens=$null; $errors=$null; $ast=[Management.Automation.Language.Parser]::ParseFile(${quote(source)},[ref]$tokens,[ref]$errors); if($errors.Count){throw ($errors.Message -join '; ')}`;
+const parse = `$tokens=$null; $errors=$null; $text=[IO.File]::ReadAllText(${quote(source)},[Text.Encoding]::UTF8); $ast=[Management.Automation.Language.Parser]::ParseInput($text,[ref]$tokens,[ref]$errors); if($errors.Count){throw ($errors.Message -join '; ')}`;
 const installerHash = '06607648b697bbc783e2cc730a230cc51aacb3000287c25bdee9850b630c8476';
 const bunHash = '7411c0ae90f6aa34c8181ca233fbf4016335b89cf4e4f50c1b062db53da13949';
 const previewHashes = [
@@ -81,6 +81,7 @@ test('Channel bootstrap pins Preview and Stable hashes and does not enable offic
   assert.ok(!text.includes('polycode-mainline-download-'));
   assert.ok(!/\bexit\b(?! code)/.test(text));
   assert.ok(!/SkipHash|SkipCheck|BaseUrl|publicCandidateEnabled/.test(text));
+  assert.equal(readFileSync(source).subarray(0, 3).toString('hex'), 'efbbbf', 'UTF-8 BOM required for Windows PowerShell 5.1 -File');
   const installer = readFileSync(fileURLToPath(new URL('../../install.ps1', import.meta.url)), 'utf8');
   assert.match(installer, /\$publicCandidateEnabled = \$false/);
 });
@@ -134,13 +135,13 @@ for (const runtime of windowsRuntimes) {
         const directory = mkdtempSync(join(root, 'failure-')), marker = join(directory, 'keep.txt'); writeFileSync(marker, 'keep');
         const behavior = mode === 'download-error' ? "throw 'fixture download failure'" : mode === 'missing' ? 'return' :
           mode === 'wrong-size' ? "[IO.File]::WriteAllText($OutFile,'bad')" : '[IO.File]::WriteAllBytes($OutFile,(New-Object byte[] 34301))';
-        const script = `$ErrorActionPreference='Continue'; $protocol=[Net.ServicePointManager]::SecurityProtocol; $userPath=[Environment]::GetEnvironmentVariable('Path','User'); $script:downloads=0;
-          function Invoke-WebRequest { param($Uri,[switch]$UseBasicParsing,$OutFile,$TimeoutSec,$MaximumRedirection)
+        const script = `$ErrorActionPreference='Continue'; $protocol=[Net.ServicePointManager]::SecurityProtocol; $userPath=[Environment]::GetEnvironmentVariable('Path','User'); $global:downloads=0;
+          function global:Invoke-WebRequest { param($Uri,[switch]$UseBasicParsing,$OutFile,$TimeoutSec,$MaximumRedirection)
             if($Uri -cne 'https://github.com/Miku0139oao/Polycode/releases/download/v0.2.1/install.ps1'){throw 'Unexpected URL'};
-            $script:downloads++; ${behavior}
+            $global:downloads++; ${behavior}
           }
           $failed=$false; try { & ${quote(source)} -Action Install -Channel ${channel} } catch { $failed=$true };
-          if(-not $failed -or $script:downloads -ne 1){throw 'Failure did not stop before installer'};
+          if(-not $failed -or $global:downloads -ne 1){throw 'Failure did not stop before installer'};
           if($ErrorActionPreference -ne 'Continue' -or [Net.ServicePointManager]::SecurityProtocol -ne $protocol){throw 'Caller preferences changed'};
           if([Environment]::GetEnvironmentVariable('Path','User') -cne $userPath){throw 'User PATH changed'};
           if(Test-Path (Join-Path $env:LOCALAPPDATA 'Polycode-Mainline')){throw 'Unexpected stable installation'};
@@ -172,24 +173,24 @@ for (const runtime of windowsRuntimes) {
   });
 
   test(runtime + ': non-interactive use requires Action and Channel before any download', { skip: nativeWindows ? false : 'requires Windows_NT host checks' }, () => {
-    const script = `$script:downloads=0; function Invoke-WebRequest {$script:downloads++; throw 'Unexpected request'};
+    const script = `$global:downloads=0; function global:Invoke-WebRequest {$global:downloads++; throw 'Unexpected request'};
       $failed=$false; try { & ${quote(source)} } catch { $failed=$true };
-      if(-not $failed -or $script:downloads -ne 0){throw 'Menu-less invocation did not stop early'}; 'MENU_REQUIRED'`;
+      if(-not $failed -or $global:downloads -ne 0){throw 'Menu-less invocation did not stop early'}; 'MENU_REQUIRED'`;
     assert.match(ok(run(runtime, script)), /MENU_REQUIRED/);
   });
 
   test(runtime + ': channel roots stay isolated and production is always rejected', { skip: nativeWindows ? false : 'requires Windows_NT host checks' }, () => {
-    const script = `$script:downloads=0; function Invoke-WebRequest {$script:downloads++; throw 'Unexpected request'};
+    const script = `$global:downloads=0; function global:Invoke-WebRequest {$global:downloads++; throw 'Unexpected request'};
       $failed=$false; try { & ${quote(source)} -Action Install -Channel Stable -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode') } catch { $failed=$true };
-      if(-not $failed -or $script:downloads -ne 0){throw 'Production directory was not rejected early'};
+      if(-not $failed -or $global:downloads -ne 0){throw 'Production directory was not rejected early'};
       $failed=$false; try { & ${quote(source)} -Action Install -Channel Preview -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode') } catch { $failed=$true };
-      if(-not $failed -or $script:downloads -ne 0){throw 'Preview did not reject production'};
+      if(-not $failed -or $global:downloads -ne 0){throw 'Preview did not reject production'};
       $failed=$false; try { & ${quote(source)} -Action Install -Channel Stable -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1') } catch { $failed=$true };
-      if(-not $failed -or $script:downloads -ne 0){throw 'Stable did not reject Preview directory'};
+      if(-not $failed -or $global:downloads -ne 0){throw 'Stable did not reject Preview directory'};
       $failed=$false; try { & ${quote(source)} -Action Install -Channel Preview -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode-Mainline') } catch { $failed=$true };
-      if(-not $failed -or $script:downloads -ne 0){throw 'Preview did not reject mainline directory'};
+      if(-not $failed -or $global:downloads -ne 0){throw 'Preview did not reject mainline directory'};
       $failed=$false; try { & ${quote(source)} -Action Update -Channel Preview -InstallRoot (Join-Path $env:LOCALAPPDATA 'Polycode-Preview-v0.2.1') } catch { $failed=$true };
-      if(-not $failed -or $script:downloads -ne 1){throw 'Preview root should reach download'};
+      if(-not $failed -or $global:downloads -ne 1){throw 'Preview root should reach download'};
       'ROOTS_UNCHANGED'`;
     assert.match(ok(run(runtime, script)), /ROOTS_UNCHANGED/);
   });
