@@ -16,7 +16,7 @@ const error = (message, status = 400) => Object.assign(new Error(message), { sta
 const json = (res, status, data) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data)); };
 const reply = data => Response.json(data, { headers: { 'Cache-Control': 'no-store' } });
 const failure = cause => ({ error: { message: cause.status ? cause.message : 'Subscription provider operation failed. Check login, quota and provider availability.', type: 'polycode_provider_error' } });
-const names = { codex: 'OpenAI / ChatGPT subscription', cursor: 'Cursor subscription (experimental)' };
+const names = { codex: 'ChatGPT', cursor: 'Cursor' };
 const ALLOWED = new Set(['auth.openai.com', 'cursor.com']);
 // Only fixed diagnostic codes cross the control boundary, never provider payloads or disk paths.
 const LOGIN_FAILURE_CODES = new Set(['authentication_error', 'invalid_credential', 'expired_credential',

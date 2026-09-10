@@ -25,6 +25,14 @@ impl ProviderId {
             Self::Cursor => "cursor",
         }
     }
+    /// Short picker label. Catalog `provider.name` can be a long marketing string
+    /// (`Cursor subscription (experimental)`); that must not become every model row.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Codex => "ChatGPT",
+            Self::Cursor => "Cursor",
+        }
+    }
 }
 /// Positive process-local registration identity. Unknown is never native by default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -509,7 +517,8 @@ impl Bridge {
                 let key = format!("{}/{}", provider.id.as_str(), model.id);
                 let mut entry = ConfigModelOverride {
                     model: Some(model.id),
-                    name: Some(format!("{} / {}", provider.name, model.name)),
+                    name: Some(format!("{} / {}", provider.id.display_name(), model.name)),
+                    description: model.context_window.map(format_context_window),
                     context_window: model.context_window,
                     supports_reasoning_effort: Some(!model.reasoning_efforts.is_empty()),
                     reasoning_efforts: model.reasoning_efforts.clone(),
@@ -522,10 +531,6 @@ impl Bridge {
                 entry.info.id = Some(key.clone());
                 // Do not manufacture a default from the first option when upstream did not expose one.
                 entry.info.reasoning_effort = model.default_reasoning_effort;
-                if model.reasoning_efforts.is_empty() {
-                    entry.info.description =
-                        Some("Provider does not expose reasoning effort control".into());
-                }
                 entry.auth_provider = Some(crate::auth::AuthProviderRef::fail_closed(
                     "polycode process transport".into(),
                 ));
@@ -534,6 +539,14 @@ impl Bridge {
         }
     }
 }
+fn format_context_window(tokens: u64) -> String {
+    if tokens >= 1_000 && tokens % 1_000 == 0 {
+        format!("{}k context", tokens / 1_000)
+    } else {
+        format!("{tokens} context")
+    }
+}
+
 fn valid_reasoning_metadata(model: &Model) -> bool {
     let mut values = std::collections::HashSet::new();
     model.reasoning_efforts.len() <= 7
@@ -761,6 +774,48 @@ mod tests {
         assert!(loopback_origin("http://127.0.0.1:1234").is_ok());
         assert!(loopback_origin("http://[::1]:1234").is_ok());
     }
+    #[test]
+    fn subscription_model_rows_use_short_names_and_omit_effort_warnings() {
+        let bridge = Bridge::new("http://127.0.0.1:1234", "picker-fixture-token".into()).unwrap();
+        let catalog: Catalog = serde_json::from_value(serde_json::json!({"providers":[{
+            "id":"cursor","name":"Cursor subscription (experimental)","loggedIn":true,
+            "models":[
+                {"id":"composer","name":"Composer","contextWindow":null},
+                {"id":"fast","name":"Fast","contextWindow":128000}
+            ]
+        }]}))
+        .unwrap();
+        bridge.validate_catalog(&catalog).unwrap();
+        *bridge.catalog.write().unwrap() = catalog;
+        let mut models = IndexMap::new();
+        bridge.inject(
+            &mut models,
+            &crate::agent::config::Config::default().endpoints,
+        );
+        assert_eq!(
+            models["cursor/composer"].info.name.as_deref(),
+            Some("Cursor / Composer")
+        );
+        assert_eq!(models["cursor/composer"].info.description, None);
+        assert_eq!(
+            models["cursor/fast"].info.name.as_deref(),
+            Some("Cursor / Fast")
+        );
+        assert_eq!(
+            models["cursor/fast"].info.description.as_deref(),
+            Some("128k context")
+        );
+        for entry in models.values() {
+            let name = entry.info.name.as_deref().unwrap_or_default();
+            assert!(!name.contains("experimental"), "{name}");
+            assert!(!name.contains("subscription"), "{name}");
+            assert_ne!(
+                entry.info.description.as_deref(),
+                Some("Provider does not expose reasoning effort control")
+            );
+        }
+    }
+
     #[test]
     fn unknown_context_window_does_not_reject_subscription_catalog() {
         let bridge = Bridge::new("http://127.0.0.1:1234", "context-fixture-token".into()).unwrap();
