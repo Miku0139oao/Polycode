@@ -5375,12 +5375,18 @@ pub(crate) fn to_acp_model_info(
             let info = model.info();
             let model_id = acp::ModelId::new(Arc::from(key.clone()));
             let total_context_tokens = info.context_window.get();
+            // Subscription inject keeps the engine fallback budget when upstream
+            // omitted a window. Do not advertise that fallback as a measured size.
+            let advertise_context_window = info.description.is_some()
+                || !(key.starts_with("codex/") || key.starts_with("cursor/"));
             let meta = {
                 let mut map = serde_json::Map::new();
-                map.insert(
-                    "totalContextTokens".to_string(),
-                    serde_json::Value::Number(total_context_tokens.into()),
-                );
+                if advertise_context_window {
+                    map.insert(
+                        "totalContextTokens".to_string(),
+                        serde_json::Value::Number(total_context_tokens.into()),
+                    );
+                }
                 map.insert(
                     "agentType".to_string(),
                     serde_json::Value::String(info.agent_type.clone()),

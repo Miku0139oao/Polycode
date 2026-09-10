@@ -833,8 +833,18 @@ mod tests {
             &crate::agent::config::Config::default().endpoints,
         );
         // The catalog does not fabricate upstream capacity. The native engine
-        // still applies its own existing default budget when no override exists.
+        // still applies its own existing default budget when no override exists,
+        // but ACP must not advertise that fallback as a measured window.
         assert!(bridge.ready_model("cursor/unknown-context", &models["cursor/unknown-context"]));
+        let acp = crate::agent::config::to_acp_model_info(&models);
+        let unknown = acp.values().next().expect("injected cursor model");
+        assert!(
+            unknown
+                .meta
+                .as_ref()
+                .is_none_or(|meta| !meta.contains_key("totalContextTokens")),
+            "unknown Cursor context must not be advertised as 200k"
+        );
         catalog.providers[0].models[0].context_window = Some(0);
         assert!(bridge.validate_catalog(&catalog).is_err());
     }
@@ -858,6 +868,14 @@ mod tests {
             );
         }
         let entry = &models["codex/actual-id"];
+        let chatgpt = crate::agent::config::to_acp_model_info(&models)
+            .into_values()
+            .find(|model| model.name == "ChatGPT / Model")
+            .expect("injected ChatGPT model");
+        assert_eq!(
+            chatgpt.meta.as_ref().and_then(|meta| meta.get("totalContextTokens")),
+            Some(&serde_json::json!(128000))
+        );
         assert!(bridge.ready_model("codex/actual-id", entry));
         assert!(!bridge.ready_model("cursor/actual-id", entry));
         assert!(!bridge.ready_model("codex/missing", entry));
