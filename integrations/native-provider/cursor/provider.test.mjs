@@ -982,7 +982,7 @@ test('refresh uses official bearer refresh endpoint; rotation is plain caller-ow
   assert.equal(result.accessToken, 'OFFLINE_NEW_ACCESS');
   assert.equal(result.refreshToken, 'OFFLINE_NEW_REFRESH');
   assert.equal(original.accessToken, A.accessToken);
-  await assert.rejects(instance.refresh(B), e => e.code === 'refresh_unavailable');
+  await assert.rejects(instance.refresh({ ...B, expiresAt: 1 }), e => e.code === 'refresh_unavailable');
 });
 
 test('models are dynamic canonical IDs only, deduplicated; unknown context stays null', async t => {
@@ -1055,7 +1055,7 @@ test('refresh/models cancellation interrupts noncooperative injected fetch witho
   const instance = provider(t, { fetchImpl: () => new Promise(() => {}) });
   for (const method of ['models', 'refresh']) {
     const abort = new AbortController();
-    const pending = instance[method](A, { signal: abort.signal });
+    const pending = instance[method](method === 'refresh' ? { ...A, expiresAt: 1 } : A, { signal: abort.signal });
     abort.abort('OFFLINE_SECRET_REASON');
     await assert.rejects(pending, e => e.code === 'cancelled' && !e.message.includes('OFFLINE_SECRET'));
   }
