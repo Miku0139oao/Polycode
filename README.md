@@ -89,29 +89,39 @@ see the [configuration reference](crates/codegen/xai-grok-pager/docs/user-guide/
 
 ### Windows native packaging
 
-[`install.ps1`](install.ps1), [`install-preview.ps1`](install-preview.ps1),
+[`install.ps1`](install.ps1), [`install-mainline.ps1`](install-mainline.ps1),
+[`install-preview.ps1`](install-preview.ps1),
 [`polycode.ps1`](polycode.ps1) and the
 [`Windows candidate`](.github/workflows/candidate-release.yml) workflow build,
 hash-verify and install a self-contained Windows x64 package (MSVC native TUI,
 Windows Bun runtime and the provider service). No WSL, Rust, Node, separate
 Bun or external provider CLI is required on the user's machine.
 
-## Install (Windows native Preview)
+## Install (Windows native)
 
-Read the [Preview scope and limitations](integrations/acceptance/preview-v0.2.1/release-notes.md)
-first. The Preview installs into its own directory and leaves `PATH` and any
-existing installation unchanged:
+Current mainline (CI-built `bcc4eaf5`, includes experimental `context_budget` /
+`computer_use`). Installs into `%LOCALAPPDATA%\Polycode-Mainline` and leaves
+`PATH` and any existing installation unchanged:
+
+```powershell
+irm https://raw.githubusercontent.com/Miku0139oao/Polycode/cursor/one-click-install-b060/install-mainline.ps1 | iex
+```
+
+The bootstrap pins the size and SHA-256 of all six package files, verifies
+them, then runs the original installer with `-AllowCandidate`. Inspect
+[`install-mainline.ps1`](install-mainline.ps1) before `iex` if you prefer.
+This is **not** the 2026-09-08 Preview attestation and not a stable release.
+The generic `install.ps1 | iex` installer stays disabled.
+
+The 2026-09-08 attested Preview remains available separately:
 
 ```powershell
 irm https://raw.githubusercontent.com/Miku0139oao/Polycode/fix/windows-terminal-ci/install-preview.ps1 | iex
 ```
 
-The bootstrap pins the size and SHA-256 of all six release assets, verifies
-them, runs the original installer and prints the launch command. You can
-download and inspect `install-preview.ps1` before running it. For `-AddToPath`,
-custom directories and the verification record see
-[Preview installation](integrations/PREVIEW_INSTALL.md); for the manual
-six-asset install see the [release notes](integrations/acceptance/preview-v0.2.1/release-notes.md).
+Read the [Preview scope and limitations](integrations/acceptance/preview-v0.2.1/release-notes.md)
+first if you use that older package. For `-AddToPath` and custom directories see
+[Preview installation](integrations/PREVIEW_INSTALL.md).
 
 Targets: Windows 10 22H2 / Windows 11 x64, PowerShell 5.1 or 7. ARM64 is not a
 native target. Provider credentials live in `%LOCALAPPDATA%\Polycode\auth`
@@ -241,7 +251,7 @@ sandboxing, permissions and more. Upstream's hosted docs are at
 | `integrations/native-provider/` | Provider service: OAuth, credential store, ChatGPT and Cursor transports, launcher (Node/Bun) |
 | `integrations/tests/`, `integrations/*.mjs` | Installer, candidate-readiness and Windows smoke/probe suites |
 | `integrations/*.md`, `integrations/acceptance/` | Fork documentation and per-release acceptance records |
-| `install.ps1`, `install-preview.ps1`, `polycode.ps1` | Windows installer, Preview bootstrap and source-checkout launcher |
+| `install.ps1`, `install-mainline.ps1`, `install-preview.ps1`, `polycode.ps1` | Windows installer, mainline/Preview bootstraps and source-checkout launcher |
 | `.github/workflows/candidate-release.yml` | `Windows candidate` CI: build, package, install and smoke-test the Windows artifact |
 | `third_party/` | Vendored upstream source (Mermaid diagram stack) |
 
