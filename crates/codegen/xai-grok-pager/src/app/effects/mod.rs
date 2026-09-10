@@ -3639,6 +3639,29 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::FetchSubscriptionUsage { agent_id, nonce } => {
+            tasks.spawn(async move {
+                match xai_grok_shell::polycode::bridge() {
+                    Some(bridge) => match bridge.usage().await {
+                        Ok(report) => TaskResult::SubscriptionUsageComplete {
+                            agent_id,
+                            report: Box::new(report),
+                            nonce,
+                        },
+                        Err(error) => TaskResult::SubscriptionUsageFailed {
+                            agent_id,
+                            error,
+                            nonce,
+                        },
+                    },
+                    None => TaskResult::SubscriptionUsageComplete {
+                        agent_id,
+                        report: Box::new(xai_grok_shell::polycode::UsageReport::default()),
+                        nonce,
+                    },
+                }
+            });
+        }
         Effect::FetchSessionUsage { agent_id, session_id, nonce } => {
             let tx = acp_tx.clone();
             tasks

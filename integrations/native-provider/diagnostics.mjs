@@ -1,6 +1,6 @@
 // Only allowlisted stages/codes cross the diagnostic boundary. Never stringify
 // upstream errors: they can include tokens, callback URLs and response bodies.
-const stages = new Set(['bridge startup', 'native process', 'model discovery', 'credential storage', 'provider authorization']);
+const stages = new Set(['bridge startup', 'native process', 'model discovery', 'credential storage', 'provider authorization', 'usage lookup']);
 const codes = new Set(['ENOENT', 'EACCES', 'EPERM', 'EADDRINUSE', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND',
   'authentication_error', 'invalid_credential', 'expired_credential', 'invalid_response', 'size_limit',
   'transport_error', 'login_timeout', 'cancelled', 'quota_exceeded', 'upstream_http_error', 'refresh_unavailable', 'invalid_models']);

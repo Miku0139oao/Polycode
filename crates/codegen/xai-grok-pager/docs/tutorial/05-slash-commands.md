@@ -9,7 +9,7 @@ A few worth knowing on day one:
 | `/provider` | Choose ChatGPT, Cursor, or native Grok in the same native workspace |
 | `/login` | Sign in to a provider |
 | `/model` | Switch models or reasoning effort |
-| `/usage` | View the active provider and reported session usage |
+| `/usage` | View every signed-in account's usage limit and this session's tokens |
 | `/resume` | Pick up a previous session where you left off |
 | `/new` | Start a fresh session |
 | `/compact` | Compress a long conversation to free up context |
@@ -18,10 +18,10 @@ A few worth knowing on day one:
 | `/docs` | Full How-to Guides, in the TUI or on the web |
 | `/feedback` | Send feedback to the team |
 
-`/usage` keeps native xAI billing separate from ChatGPT/Cursor subscriptions.
-Subscription quota and remaining balance are **unavailable** when not provided
-by a supported provider API; session token counts are not remaining quota.
-Subscription usage pages do not query native xAI billing.
+`/usage` lists every signed-in account: native xAI, ChatGPT, and Cursor.
+Each account keeps its own quota. Session token counts are not remaining
+quota. If a signed-in provider API does not return a usage limit, that
+account says so instead of inventing a percent.
 
 Two of those deserve a second look:
 

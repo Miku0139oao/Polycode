@@ -44,6 +44,33 @@ const UPSTREAM_HINTS = {
   account_deactivated: 'the ChatGPT account is not active',
   billing_not_active: 'ChatGPT billing is not active',
 };
+function finitePercent(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1000 ? value : undefined;
+}
+function positiveInt(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+function usageWindow(raw, id) {
+  if (!raw || typeof raw !== 'object') return;
+  const usedPercent = finitePercent(raw.used_percent);
+  if (usedPercent === undefined) return;
+  const window = { id, usedPercent };
+  const windowSeconds = positiveInt(raw.limit_window_seconds);
+  if (windowSeconds !== undefined && windowSeconds <= 366 * 24 * 3600) window.windowSeconds = windowSeconds;
+  const resetAt = positiveInt(raw.reset_at);
+  if (resetAt !== undefined) window.resetAt = resetAt;
+  return window;
+}
+/** Allowlisted ChatGPT quota fields only. Never copies email, account ids, or raw upstream text. */
+export function chatgptAccountUsage(data) {
+  if (!data || typeof data !== 'object') return null;
+  const rate = data.rate_limit && typeof data.rate_limit === 'object' ? data.rate_limit : {};
+  const windows = [usageWindow(rate.primary_window, 'primary'), usageWindow(rate.secondary_window, 'secondary')].filter(Boolean);
+  if (!windows.length) return null;
+  const usage = { windows };
+  if (typeof data.plan_type === 'string' && data.plan_type.length <= 64 && !/[\x00-\x1f\x7f]/.test(data.plan_type)) usage.plan = data.plan_type;
+  return usage;
+}
 export function chatgptUpstreamError(status, bodyText) {
   let code, param, encrypted = false;
   if (typeof bodyText === 'string' && bodyText && bodyText.length <= 4096) {
@@ -282,6 +309,23 @@ export function createCodexProvider({ fetchImpl = fetch, httpFactory = createSer
       const data = await r.json(), models = data.models ?? data.data;
       if (!Array.isArray(models)) throw new Error('Invalid ChatGPT model catalog');
       return models.filter(m => m.visibility !== 'hide').map(m => ({ id: m.slug ?? m.id ?? m.model, name: m.display_name ?? m.displayName ?? m.slug ?? m.id, contextWindow: m.context_window ?? m.contextWindow ?? 128000, ...codexReasoningMetadata(m), ...codexFastMetadata(m) }));
+    },
+    async usage(c, { signal } = {}) {
+      const r = await fetchImpl('https://chatgpt.com/backend-api/wham/usage', {
+        redirect: 'error',
+        headers: { Authorization: `Bearer ${c.accessToken}`, 'ChatGPT-Account-Id': c.accountId, originator: 'polycode', Accept: 'application/json' },
+        signal,
+      });
+      if (!r.ok) {
+        void r.body?.cancel?.().catch(() => {});
+        throw Object.assign(new Error(`ChatGPT usage lookup failed (HTTP ${r.status})`), { code: 'upstream_http_error', status: r.status });
+      }
+      let text = '';
+      try { text = await r.text(); } catch { throw Object.assign(new Error('ChatGPT usage lookup failed'), { code: 'invalid_response' }); }
+      if (text.length > 1024 * 1024) throw Object.assign(new Error('ChatGPT usage response is too large'), { code: 'size_limit' });
+      let data;
+      try { data = JSON.parse(text); } catch { throw Object.assign(new Error('ChatGPT returned invalid usage JSON'), { code: 'invalid_response' }); }
+      return chatgptAccountUsage(data);
     },
     async complete(body, c, { signal } = {}) {
       const { request, originals } = toResponses(body);

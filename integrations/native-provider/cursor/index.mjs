@@ -3,6 +3,34 @@ import { CursorProviderError, fail, safeError, checkSignal, onAbort, delay, erro
 import { API, WEBSITE, Connection, headers, request, httpError, readJson } from './transport.mjs';
 import { validateMessages } from './content.mjs';
 
+function finitePercent(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1000 ? value : undefined;
+}
+function nonNegativeInt(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+function cycleEnd(value) {
+  if (typeof value === 'string' && /^\d{10,16}$/.test(value)) return value;
+  if (Number.isSafeInteger(value) && value > 0) return String(value);
+}
+/** Allowlisted Cursor dashboard quota fields only. Does not derive a percent from spend/limit. */
+export function cursorAccountUsage(data) {
+  if (!data || typeof data !== 'object') return null;
+  const plan = data.planUsage && typeof data.planUsage === 'object' ? data.planUsage : {};
+  const usage = {};
+  const usedPercent = finitePercent(plan.totalPercentUsed);
+  if (usedPercent !== undefined) usage.usedPercent = usedPercent;
+  const limitCents = nonNegativeInt(plan.limit);
+  if (limitCents !== undefined) usage.limitCents = limitCents;
+  const remainingCents = nonNegativeInt(plan.remaining);
+  if (remainingCents !== undefined) usage.remainingCents = remainingCents;
+  if (typeof data.displayMessage === 'string' && data.displayMessage.length <= 240 && !/[\x00-\x1f\x7f]/.test(data.displayMessage)) {
+    usage.displayMessage = data.displayMessage;
+  }
+  const billingCycleEnd = cycleEnd(data.billingCycleEnd);
+  if (billingCycleEnd) usage.billingCycleEnd = billingCycleEnd;
+  return Object.keys(usage).length ? usage : null;
+}
 export { CursorProviderError };
 const invalid = () => fail('invalid_request', 'Invalid or unsupported Chat Completions request.', 400);
 const object = x => x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -243,6 +271,21 @@ export function createCursorProvider({
       return [...catalog.values()];
     } catch (e) { throw safeError(e); } finally { op.finish(); }
   }
+  async function usage(input, { signal } = {}) {
+    live(signal);
+    const c = credential(input, now());
+    const op = operation(signal, requestTimeoutMs);
+    try {
+      const response = await request(fetchImpl, `${API}/aiserver.v1.DashboardService/GetCurrentPeriodUsage`, {
+        method: 'POST',
+        headers: { ...headers(c.accessToken, uuid(), now()), 'content-type': 'application/json', accept: 'application/json', 'connect-protocol-version': '1' },
+        body: '{}',
+        signal: op.signal,
+      });
+      if (!response.ok) { void response.body?.cancel().catch(() => {}); throw httpError(response.status); }
+      return cursorAccountUsage(await readJson(response, op.signal));
+    } catch (e) { throw safeError(e); } finally { op.finish(); }
+  }
 
   async function prepare(body, c, signal) {
     const account = hash(c.accessToken), config = configKey(body), base = json(body.messages);
@@ -419,6 +462,6 @@ export function createCursorProvider({
     operations.clear();
     for (const session of [...sessions]) drop(session);
   }
-  return { startLogin, refresh, models, complete, close };
+  return { startLogin, refresh, models, usage, complete, close };
 }
 export default createCursorProvider;

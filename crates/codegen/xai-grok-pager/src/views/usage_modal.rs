@@ -97,6 +97,10 @@ pub struct UsageInfoModalState {
     pub session_usage_text: Option<String>,
     pub billing_loading: bool,
     pub billing_error: Option<String>,
+    /// Allowlisted ChatGPT/Cursor quota rows from `/control/usage`.
+    pub subscription_accounts: Option<Vec<xai_grok_shell::polycode::ProviderUsage>>,
+    pub subscription_error: Option<String>,
+    pub subscription_loading: bool,
     /// Fetch generation stamped at open; results from an earlier open (same session, modal reopened) are dropped instead of overwriting.
     pub fetch_nonce: u64,
     /// Hit rects for copyable value rows, refreshed every render.
@@ -179,6 +183,9 @@ impl UsageInfoModalState {
             session_usage_text: None,
             billing_loading: false,
             billing_error: None,
+            subscription_accounts: None,
+            subscription_error: None,
+            subscription_loading: false,
             fetch_nonce: Default::default(),
             session_fields: None,
             copy_hits: Vec::new(),
@@ -814,41 +821,18 @@ fn usage_limit_lines(
         .collect();
     lines.push(Line::default());
 
-    if !state.ctx.provider.permits_native_billing() {
-        // Never render cached xAI credits, native plan tiers, redirects, loading,
-        // or billing errors as a subscription provider's allowance.
-        lines.extend(
-            state
-                .ctx
-                .provider
-                .unavailable_lines()
-                .into_iter()
-                .map(|row| muted_line(theme, row)),
-        );
-    } else if state.ctx.chat_kind {
-        // Gateway chat sessions have no Build coding credits to show.
-    } else if !state.ctx.usage_visible {
-        lines.push(muted_line(
-            theme,
-            "Native xAI limits are managed by your team.",
-        ));
-    } else if let Some(url) = &state.ctx.billing_redirect_url {
-        lines.push(plain(theme, format!("Native xAI usage: {url}")));
-    } else if let Some(bal) = balance {
-        lines.extend(allowance_lines(state, bal, theme));
-    } else if let Some(error) = &state.billing_error {
-        lines.push(muted_line(
-            theme,
-            format!("Couldn't load native xAI usage: {error}"),
-        ));
-    } else if state.billing_loading {
-        lines.push(muted_line(theme, "Loading native xAI usage\u{2026}"));
-    } else {
-        lines.push(muted_line(theme, "Native xAI billing data: unavailable."));
+    let show_native = !state.ctx.chat_kind
+        && (state.ctx.usage_visible || state.ctx.provider.permits_native_billing());
+    if show_native {
+        lines.push(Line::styled("Grok (native xAI)", header_style(theme)));
+        lines.extend(native_account_lines(state, balance, theme));
+        lines.push(Line::default());
     }
 
+    lines.extend(subscription_account_lines(state, theme));
+
     if let Some(usage_text) = &state.session_usage_text {
-        if !lines.is_empty() {
+        if !lines.is_empty() && !lines.last().is_some_and(|line| line.spans.is_empty()) {
             lines.push(Line::default());
         }
         for (i, row) in usage_text.lines().enumerate() {
@@ -859,7 +843,7 @@ fn usage_limit_lines(
             }
         }
     } else if state.ctx.session_id.is_some() {
-        if !lines.is_empty() {
+        if !lines.is_empty() && !lines.last().is_some_and(|line| line.spans.is_empty()) {
             lines.push(Line::default());
         }
         lines.push(muted_line(theme, "Loading session usage\u{2026}"));
@@ -870,6 +854,167 @@ fn usage_limit_lines(
         ));
     }
     lines
+}
+
+fn native_account_lines(
+    state: &UsageInfoModalState,
+    balance: Option<&CreditBalance>,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    if !state.ctx.usage_visible {
+        return vec![muted_line(
+            theme,
+            "Native xAI limits are managed by your team.",
+        )];
+    }
+    if let Some(url) = &state.ctx.billing_redirect_url {
+        return vec![plain(theme, format!("Native xAI usage: {url}"))];
+    }
+    if let Some(bal) = balance {
+        return allowance_lines(state, bal, theme);
+    }
+    if let Some(error) = &state.billing_error {
+        return vec![muted_line(
+            theme,
+            format!("Couldn't load native xAI usage: {error}"),
+        )];
+    }
+    if state.billing_loading {
+        return vec![muted_line(theme, "Loading native xAI usage\u{2026}")];
+    }
+    vec![muted_line(theme, "Native xAI billing data: unavailable.")]
+}
+
+fn subscription_account_lines(state: &UsageInfoModalState, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if state.subscription_loading {
+        lines.push(muted_line(
+            theme,
+            "Loading signed-in ChatGPT and Cursor usage\u{2026}",
+        ));
+        lines.push(Line::default());
+        return lines;
+    }
+    if let Some(error) = &state.subscription_error {
+        lines.push(muted_line(
+            theme,
+            format!("Couldn't load signed-in account usage: {error}"),
+        ));
+        lines.push(Line::default());
+        return lines;
+    }
+    let Some(accounts) = &state.subscription_accounts else {
+        return lines;
+    };
+    for account in accounts.iter().filter(|account| account.logged_in) {
+        lines.push(Line::styled(account.name.clone(), header_style(theme)));
+        if let Some(usage) = &account.usage {
+            lines.extend(account_usage_lines(usage, theme));
+        } else if let Some(message) = &account.message {
+            lines.push(muted_line(theme, message.clone()));
+        } else {
+            lines.push(muted_line(
+                theme,
+                "This account API did not return a usage quota.",
+            ));
+        }
+        lines.push(Line::default());
+    }
+    lines
+}
+
+fn account_usage_lines(
+    usage: &xai_grok_shell::polycode::AccountUsage,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if let Some(plan) = &usage.plan {
+        lines.push(plain(theme, format!("Plan: {plan}")));
+    }
+    if let Some(message) = &usage.display_message {
+        lines.push(plain(theme, message.clone()));
+    }
+    if let Some(percent) = usage.used_percent {
+        lines.push(percent_bar(theme, percent));
+    }
+    match (usage.remaining_cents, usage.limit_cents) {
+        (Some(remaining), Some(limit)) => lines.push(muted_line(
+            theme,
+            format!(
+                "Remaining: ${:.2} / ${:.2}",
+                remaining as f64 / 100.0,
+                limit as f64 / 100.0
+            ),
+        )),
+        (Some(remaining), None) => lines.push(muted_line(
+            theme,
+            format!("Remaining: ${:.2}", remaining as f64 / 100.0),
+        )),
+        (None, Some(limit)) => lines.push(muted_line(
+            theme,
+            format!("Limit: ${:.2}", limit as f64 / 100.0),
+        )),
+        (None, None) => {}
+    }
+    if let Some(reset) = usage
+        .billing_cycle_end
+        .as_deref()
+        .and_then(format_cycle_end)
+    {
+        lines.push(muted_line(theme, format!("Resets: {reset}")));
+    }
+    for window in &usage.windows {
+        lines.push(plain(theme, window_label(window.window_seconds)));
+        lines.push(percent_bar(theme, window.used_percent));
+        if let Some(reset) = window.reset_at.and_then(format_unix) {
+            lines.push(muted_line(theme, format!("Resets: {reset}")));
+        }
+    }
+    lines
+}
+
+fn percent_bar(theme: &Theme, pct: f64) -> Line<'static> {
+    const BAR_WIDTH: usize = 30;
+    let clamped = pct.clamp(0.0, 100.0);
+    let filled = (((clamped / 100.0) * BAR_WIDTH as f64).round() as usize).min(BAR_WIDTH);
+    Line::from(vec![
+        Span::styled(
+            "\u{2588}".repeat(filled),
+            Style::default().fg(theme.gray_bright),
+        ),
+        Span::styled(
+            "\u{2591}".repeat(BAR_WIDTH - filled),
+            Style::default().fg(theme.gray_dim),
+        ),
+        Span::styled(
+            format!("  {}%", pct.floor() as i64),
+            Style::default().fg(theme.text_primary),
+        ),
+    ])
+}
+
+fn window_label(seconds: Option<u64>) -> String {
+    match seconds {
+        Some(10_800) => "3-hour window".into(),
+        Some(18_000) => "5-hour window".into(),
+        Some(86_400) => "Daily window".into(),
+        Some(604_800) => "Weekly window".into(),
+        Some(n) if n % 86_400 == 0 => format!("{}-day window", n / 86_400),
+        Some(n) if n % 3_600 == 0 => format!("{}-hour window", n / 3_600),
+        Some(n) => format!("{n}s window"),
+        None => "Usage window".into(),
+    }
+}
+
+fn format_unix(ts: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp(ts, 0)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+}
+
+fn format_cycle_end(raw: &str) -> Option<String> {
+    let n: i64 = raw.parse().ok()?;
+    let secs = if n > 1_000_000_000_000 { n / 1000 } else { n };
+    format_unix(secs)
 }
 
 fn allowance_lines(
@@ -1116,10 +1261,14 @@ mod tests {
         let theme = Theme::current();
         let lines = usage_limit_lines(&state, Some(&bal), &theme);
         let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-        assert_eq!(text[0], "Active provider: Grok (native xAI)");
-        assert_eq!(text[1], "Active model: grok-4.5");
-        assert_eq!(text[3], "Native xAI · Weekly limit (SuperGrok)");
-        assert!(text[5].ends_with("50%"), "bar row: {:?}", text[5]);
+        assert_eq!(text[0], "Active model: grok-4.5");
+        assert_eq!(text[1], "Active provider: Grok (native xAI)");
+        assert!(text.iter().any(|l| l == "Grok (native xAI)"));
+        assert!(text.iter().any(|l| l == "Native xAI · Weekly limit (SuperGrok)"));
+        assert!(
+            text.iter().any(|l| l.ends_with("50%")),
+            "bar row missing: {text:?}"
+        );
         assert!(text.iter().any(|l| l.contains("Resets: May 29, 00:00")));
         assert!(text.iter().any(|l| l == "Pay as you go: Enabled"));
         assert!(
@@ -1138,15 +1287,16 @@ mod tests {
         let mut state = state_with_session();
         state.billing_loading = true;
         let lines = usage_limit_lines(&state, None, &theme);
-        assert!(lines[3].to_string().contains("Loading native xAI usage"));
+        assert_eq!(lines[3].to_string(), "Grok (native xAI)");
+        assert!(lines[4].to_string().contains("Loading native xAI usage"));
 
         state.ctx.billing_redirect_url = Some("https://x.example/usage".to_string());
         let lines = usage_limit_lines(&state, None, &theme);
-        assert!(lines[3].to_string().contains("https://x.example/usage"));
+        assert!(lines[4].to_string().contains("https://x.example/usage"));
 
         state.ctx.usage_visible = false;
         let lines = usage_limit_lines(&state, None, &theme);
-        assert!(lines[3].to_string().contains("managed by your team"));
+        assert!(lines[4].to_string().contains("managed by your team"));
 
         // Gateway chat sessions show no billing at all
         state.ctx.chat_kind = true;
@@ -1165,7 +1315,7 @@ mod tests {
 
     #[test]
     fn subscription_render_never_relabels_cached_native_billing() {
-        use xai_grok_shell::polycode::ProviderId;
+        use xai_grok_shell::polycode::{AccountUsage, ProviderId, ProviderUsage};
         let theme = Theme::current();
         let balance = CreditBalance {
             usage_pct: 88.0,
@@ -1182,80 +1332,140 @@ mod tests {
             (ProviderId::Codex, "ChatGPT", "codex/reported-model"),
             (ProviderId::Cursor, "Cursor", "cursor/reported-model"),
         ] {
-            for (width, height) in [(80, 24), (120, 40)] {
-                let area = Rect::new(0, 0, width, height);
-                let mut buf = Buffer::empty(area);
-                let mut state = state_with_session();
-                state.ctx.provider = UsageProvider::Subscription(provider);
-                state.ctx.active_model = Some(model.into());
-                // Deliberately contaminate all native mirrors; none may leak into this page.
-                state.ctx.billing_redirect_url = Some("https://native.example/billing".into());
-                state.billing_error = Some("NATIVE ERROR".into());
-                state.billing_loading = true;
-                state.session_usage_text = Some("Session usage: no model calls yet.".into());
-                render_usage_modal(&mut buf, area, &mut state, Some(&balance), false, &theme);
-                let text: String = (0..area.height)
-                    .map(|y| {
-                        (0..area.width)
-                            .map(|x| buf[(x, y)].symbol())
-                            .collect::<String>()
-                            + "\n"
-                    })
-                    .collect();
-                for needle in [
-                    format!("Active provider: {label}"),
-                    format!("Active model: {model}"),
-                    "Subscription quota: unavailable".into(),
-                    "Remaining balance: unavailable".into(),
-                    "Not provided by a supported provider API.".into(),
-                ] {
-                    assert!(text.contains(&needle), "missing {needle:?}:\n{text}");
-                }
-                for forbidden in [
-                    "SuperGrok",
-                    "88%",
-                    "$123.45",
-                    "Weekly limit",
-                    "NATIVE RESET",
-                    "NATIVE ERROR",
-                    "native.example",
-                    "Pay as you go",
-                    "$0",
-                ] {
-                    assert!(
-                        !text.contains(forbidden),
-                        "native billing leaked {forbidden:?}:\n{text}"
-                    );
-                }
-                assert_eq!(
-                    state.window.tab_rects.len(),
-                    3,
-                    "native modal navigation remains"
-                );
-                assert!(state.window.close_button_rect.is_some());
+            let mut state = state_with_session();
+            state.ctx.provider = UsageProvider::Subscription(provider);
+            state.ctx.active_model = Some(model.into());
+            state.ctx.billing_redirect_url = None;
+            state.session_usage_text = Some("Session usage: no model calls yet.".into());
+            state.subscription_accounts = Some(vec![
+                ProviderUsage {
+                    id: ProviderId::Codex,
+                    name: "ChatGPT".into(),
+                    logged_in: true,
+                    usage: Some(AccountUsage {
+                        plan: Some("plus".into()),
+                        windows: vec![xai_grok_shell::polycode::UsageWindow {
+                            id: "primary".into(),
+                            used_percent: 22.0,
+                            window_seconds: Some(18_000),
+                            reset_at: None,
+                        }],
+                        ..AccountUsage::default()
+                    }),
+                    message: None,
+                },
+                ProviderUsage {
+                    id: ProviderId::Cursor,
+                    name: "Cursor".into(),
+                    logged_in: true,
+                    usage: Some(AccountUsage {
+                        used_percent: Some(15.0),
+                        remaining_cents: Some(16_778),
+                        limit_cents: Some(40_000),
+                        display_message: Some("You've used 46% of your usage limit".into()),
+                        ..AccountUsage::default()
+                    }),
+                    message: None,
+                },
+            ]);
+            let text = usage_limit_lines(&state, Some(&balance), &theme)
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            for needle in [
+                format!("Active provider: {label}"),
+                format!("Active model: {model}"),
+                "Grok (native xAI)".into(),
+                "ChatGPT".into(),
+                "Cursor".into(),
+                "Plan: plus".into(),
+                "5-hour window".into(),
+                "You've used 46% of your usage limit".into(),
+                "Remaining: $167.78 / $400.00".into(),
+                "88%".into(),
+            ] {
+                assert!(text.contains(&needle), "missing {needle:?}:\n{text}");
             }
+            assert!(
+                !text.contains("Subscription quota: unavailable"),
+                "logged-in quota must not fall back to unavailable:\n{text}"
+            );
+            let area = Rect::new(0, 0, 80, 24);
+            let mut buf = Buffer::empty(area);
+            render_usage_modal(&mut buf, area, &mut state, Some(&balance), false, &theme);
+            assert_eq!(state.window.tab_rects.len(), 3);
+            assert!(state.window.close_button_rect.is_some());
         }
     }
 
     #[test]
-    fn unknown_provider_fails_closed_without_fake_allowance() {
+    fn unknown_provider_still_lists_signed_in_accounts_without_fake_allowance() {
+        use xai_grok_shell::polycode::{ProviderId, ProviderUsage};
         let mut state = state_with_session();
         state.ctx.provider = UsageProvider::Unavailable;
+        state.ctx.active_model = Some("cursor/claude-fable-5-1-max".into());
         state.billing_loading = true;
+        state.subscription_accounts = Some(vec![ProviderUsage {
+            id: ProviderId::Cursor,
+            name: "Cursor".into(),
+            logged_in: true,
+            usage: None,
+            message: Some("This account API did not return a usage quota.".into()),
+        }]);
         let text = usage_limit_lines(&state, None, &Theme::current())
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n");
+        assert!(text.contains("Active model: cursor/claude-fable-5-1-max"), "{text}");
+        assert!(text.contains("Loading native xAI usage"), "{text}");
+        assert!(text.contains("Cursor"), "{text}");
         assert!(
-            text.contains("Provider quota and balance: unavailable"),
+            text.contains("This account API did not return a usage quota."),
             "{text}"
         );
+        assert!(!text.contains("0%"), "{text}");
         assert!(
-            text.contains("Native xAI billing was not queried."),
+            !text.contains("Provider quota and balance: unavailable"),
             "{text}"
         );
-        assert!(!text.contains("Loading native"), "{text}");
+    }
+
+    #[test]
+    fn signed_out_subscription_accounts_are_omitted() {
+        use xai_grok_shell::polycode::{ProviderId, ProviderUsage};
+        let mut state = state_with_session();
+        state.ctx.usage_visible = false;
+        state.ctx.provider = UsageProvider::Subscription(ProviderId::Codex);
+        state.subscription_accounts = Some(vec![
+            ProviderUsage {
+                id: ProviderId::Codex,
+                name: "ChatGPT".into(),
+                logged_in: false,
+                usage: None,
+                message: None,
+            },
+            ProviderUsage {
+                id: ProviderId::Cursor,
+                name: "Cursor".into(),
+                logged_in: true,
+                usage: None,
+                message: Some("This account API did not return a usage quota.".into()),
+            },
+        ]);
+        let text = usage_limit_lines(&state, None, &Theme::current())
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            text.matches("ChatGPT").count(),
+            1,
+            "signed-out ChatGPT must not get an account section:\n{text}"
+        );
+        assert!(text.contains("Active provider: ChatGPT"), "{text}");
+        assert!(text.contains("Cursor"), "{text}");
         assert!(!text.contains("0%"), "{text}");
     }
 

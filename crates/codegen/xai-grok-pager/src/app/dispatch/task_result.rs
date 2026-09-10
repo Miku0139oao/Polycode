@@ -1370,6 +1370,35 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             crate::app::status_blocks::session_usage_block_text(&usage),
             nonce,
         ),
+        TaskResult::SubscriptionUsageComplete {
+            agent_id,
+            report,
+            nonce,
+        } => {
+            if let Some(agent) = app.agents.get_mut(&agent_id)
+                && let Some(state) = usage_modal_state_mut(agent)
+                && state.fetch_nonce == nonce
+            {
+                state.subscription_loading = false;
+                state.subscription_error = None;
+                state.subscription_accounts = Some(report.providers);
+            }
+            vec![]
+        }
+        TaskResult::SubscriptionUsageFailed {
+            agent_id,
+            error,
+            nonce,
+        } => {
+            if let Some(agent) = app.agents.get_mut(&agent_id)
+                && let Some(state) = usage_modal_state_mut(agent)
+                && state.fetch_nonce == nonce
+            {
+                state.subscription_loading = false;
+                state.subscription_error = Some(error);
+            }
+            vec![]
+        }
         TaskResult::SessionUsageFailed {
             agent_id,
             session_id,

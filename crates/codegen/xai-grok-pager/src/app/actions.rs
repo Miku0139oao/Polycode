@@ -2046,6 +2046,11 @@ pub enum Effect {
         /// Usage-modal fetch generation; echoed back on the task result.
         nonce: u64,
     },
+    /// Fetch ChatGPT/Cursor quota for every signed-in Polycode account.
+    FetchSubscriptionUsage {
+        agent_id: AgentId,
+        nonce: u64,
+    },
     /// Re-fetch remote settings to check subscription gate.
     RefreshGate,
     /// Spawn a debounce sleep task for shell suggestions.
@@ -2714,6 +2719,17 @@ pub enum TaskResult {
     SessionUsageFailed {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        error: String,
+        nonce: u64,
+    },
+    /// Signed-in ChatGPT/Cursor quota snapshot. Drop if the usage-modal nonce no longer matches.
+    SubscriptionUsageComplete {
+        agent_id: AgentId,
+        report: Box<xai_grok_shell::polycode::UsageReport>,
+        nonce: u64,
+    },
+    SubscriptionUsageFailed {
+        agent_id: AgentId,
         error: String,
         nonce: u64,
     },

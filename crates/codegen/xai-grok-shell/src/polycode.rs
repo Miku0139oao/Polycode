@@ -43,6 +43,11 @@ pub enum RegisteredModelProvider {
 pub fn registered_model_provider(id: &str) -> Option<RegisteredModelProvider> {
     bridge().and_then(|b| b.registered_model_provider(id))
 }
+/// Account-level identity for `/usage`: a `codex/` or `cursor/` id on a signed-in
+/// catalog provider is enough. Exact catalog model rows are not required.
+pub fn logged_in_subscription(id: &str) -> Option<ProviderId> {
+    bridge().and_then(|b| b.logged_in_subscription(id))
+}
 /// Recover the catalog identity from an exact registered subscription route.
 /// Upstream model slugs alone are not identities: two providers can share one.
 pub(crate) fn canonical_model_id(base: &str, model: &str) -> Option<String> {
@@ -100,6 +105,55 @@ pub enum LoginState {
 pub struct LoginStatus {
     pub state: LoginState,
     pub message: Option<String>,
+}
+
+/// Allowlisted `/control/usage` snapshot. Unknown upstream fields are dropped before this type.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageReport {
+    pub providers: Vec<ProviderUsage>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderUsage {
+    pub id: ProviderId,
+    pub name: String,
+    pub logged_in: bool,
+    #[serde(default)]
+    pub usage: Option<AccountUsage>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountUsage {
+    #[serde(default)]
+    pub plan: Option<String>,
+    #[serde(default)]
+    pub windows: Vec<UsageWindow>,
+    #[serde(default)]
+    pub used_percent: Option<f64>,
+    #[serde(default)]
+    pub remaining_cents: Option<i64>,
+    #[serde(default)]
+    pub limit_cents: Option<i64>,
+    #[serde(default)]
+    pub display_message: Option<String>,
+    #[serde(default)]
+    pub billing_cycle_end: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageWindow {
+    pub id: String,
+    pub used_percent: f64,
+    #[serde(default)]
+    pub window_seconds: Option<u64>,
+    #[serde(default)]
+    pub reset_at: Option<i64>,
 }
 
 pub struct Bridge {
@@ -339,6 +393,87 @@ impl Bridge {
             }
         }
         Ok(())
+    }
+    fn logged_in_subscription(&self, id: &str) -> Option<ProviderId> {
+        let (prefix, rest) = id.split_once('/')?;
+        if rest.is_empty() {
+            return None;
+        }
+        let provider = match prefix {
+            "codex" => ProviderId::Codex,
+            "cursor" => ProviderId::Cursor,
+            _ => return None,
+        };
+        self.catalog()
+            .providers
+            .iter()
+            .any(|p| p.id == provider && p.logged_in)
+            .then_some(provider)
+    }
+    fn finite_percent(value: f64) -> bool {
+        value.is_finite() && (0.0..=1000.0).contains(&value)
+    }
+    fn validate_usage(&self, report: &UsageReport) -> Result<(), String> {
+        let mut providers = std::collections::HashSet::new();
+        if report.providers.len() > 8 {
+            return Err("Invalid bridge usage report".into());
+        }
+        for provider in &report.providers {
+            if !providers.insert(provider.id.as_str())
+                || !self.safe_text(&provider.name)
+                || provider
+                    .message
+                    .as_deref()
+                    .is_some_and(|s| !self.safe_text(s) || s.len() > 240)
+            {
+                return Err("Invalid bridge usage report".into());
+            }
+            let Some(usage) = &provider.usage else {
+                continue;
+            };
+            if usage
+                .plan
+                .as_deref()
+                .is_some_and(|s| s.len() > 64 || !self.safe_text(s))
+                || usage
+                    .display_message
+                    .as_deref()
+                    .is_some_and(|s| s.len() > 240 || !self.safe_text(s))
+                || usage.billing_cycle_end.as_deref().is_some_and(|s| {
+                    s.len() < 10 || s.len() > 16 || !s.bytes().all(|b| b.is_ascii_digit())
+                })
+                || usage.windows.len() > 2
+                || usage
+                    .used_percent
+                    .is_some_and(|p| !Self::finite_percent(p))
+                || usage.remaining_cents.is_some_and(|c| c < 0)
+                || usage.limit_cents.is_some_and(|c| c < 0)
+            {
+                return Err("Invalid bridge usage report".into());
+            }
+            let mut windows = std::collections::HashSet::new();
+            for window in &usage.windows {
+                if !matches!(window.id.as_str(), "primary" | "secondary")
+                    || !windows.insert(window.id.as_str())
+                    || !Self::finite_percent(window.used_percent)
+                    || window
+                        .window_seconds
+                        .is_some_and(|s| s == 0 || s > 366 * 24 * 3600)
+                    || window.reset_at.is_some_and(|s| s <= 0)
+                {
+                    return Err("Invalid bridge usage report".into());
+                }
+            }
+            if provider.id == ProviderId::Codex && usage.windows.is_empty() {
+                return Err("Invalid bridge usage report".into());
+            }
+        }
+        Ok(())
+    }
+    pub async fn usage(&self) -> Result<UsageReport, String> {
+        let report: UsageReport = self.request(Method::GET, "control/usage", None).await?;
+        self.validate_usage(&report)?;
+        Ok(report)
     }
     pub async fn start(&self, provider: ProviderId) -> Result<LoginAttempt, String> {
         let attempt: LoginAttempt = self
@@ -1032,6 +1167,66 @@ mod tests {
             "https://unregistered.invalid/v1".into();
         restored.register_models(&rerouted, Some(&sources));
         assert_eq!(restored.registered_model_provider("native-original"), None);
+        assert_eq!(
+            restored.logged_in_subscription("cursor/claude-fable-5-1-max"),
+            Some(ProviderId::Cursor)
+        );
+        assert_eq!(
+            restored.logged_in_subscription("codex/gpt-5"),
+            None,
+            "signed-out ChatGPT is not a usage account"
+        );
+        assert_eq!(restored.logged_in_subscription("cursor/"), None);
+        assert_eq!(restored.logged_in_subscription("native-original"), None);
+    }
+    #[tokio::test]
+    async fn usage_report_is_allowlisted_and_rejects_secrets() {
+        let (origin, server) = server(vec![(
+            "200 OK",
+            serde_json::json!({
+                "providers":[
+                    {"id":"codex","name":"ChatGPT","loggedIn":true,"usage":{
+                        "plan":"plus",
+                        "windows":[{"id":"primary","usedPercent":12.5,"windowSeconds":18000,"resetAt":1778670307}]
+                    }},
+                    {"id":"cursor","name":"Cursor","loggedIn":true,"usage":{
+                        "usedPercent":15.48,"limitCents":40000,"remainingCents":16778,
+                        "displayMessage":"You've used 46% of your usage limit",
+                        "billingCycleEnd":"1771077734000"
+                    }}
+                ]
+            })
+            .to_string(),
+        )]);
+        let bridge = Bridge::new(&origin, "usage-fixture-token".into()).unwrap();
+        let report = bridge.usage().await.unwrap();
+        assert_eq!(report.providers[0].usage.as_ref().unwrap().plan.as_deref(), Some("plus"));
+        assert_eq!(
+            report.providers[1].usage.as_ref().unwrap().remaining_cents,
+            Some(16778)
+        );
+        let requests = server.join().unwrap();
+        assert!(requests[0].starts_with("GET /control/usage "));
+        assert!(
+            requests[0]
+                .to_ascii_lowercase()
+                .contains("authorization: bearer usage-fixture-token\r\n")
+        );
+        let leaked = UsageReport {
+            providers: vec![ProviderUsage {
+                id: ProviderId::Codex,
+                name: "ChatGPT".into(),
+                logged_in: true,
+                usage: None,
+                message: Some("usage-fixture-token".into()),
+            }],
+        };
+        assert!(bridge.validate_usage(&leaked).is_err());
+        let invented = serde_json::from_value::<UsageReport>(serde_json::json!({
+            "providers":[{"id":"codex","name":"ChatGPT","loggedIn":true,"usage":{"windows":[]}}]
+        }))
+        .unwrap();
+        assert!(bridge.validate_usage(&invented).is_err());
     }
     #[test]
     fn model_settings_invalid_default_is_not_silently_dropped() {
