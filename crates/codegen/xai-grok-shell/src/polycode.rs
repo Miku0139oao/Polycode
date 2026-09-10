@@ -162,6 +162,10 @@ pub struct Bridge {
     client: Client,
     catalog: RwLock<Catalog>,
     registered_models: RwLock<IndexMap<String, RegisteredModelProvider>>,
+    /// Upper bounds on `provider/model` windows learned from context-length rejections.
+    /// Subscription routes never report `x-grok-context-window`, so this is the only measurement
+    /// available for a model whose catalog entry omits the window.
+    learned_windows: RwLock<IndexMap<String, u64>>,
     initial_provider: Option<String>,
 }
 pub fn bridge() -> Option<&'static Bridge> {
@@ -247,6 +251,7 @@ impl Bridge {
             client,
             catalog: RwLock::new(Catalog::default()),
             registered_models: RwLock::new(IndexMap::new()),
+            learned_windows: RwLock::new(IndexMap::new()),
             initial_provider: None,
         })
     }
@@ -566,6 +571,45 @@ impl Bridge {
                 == Some(RegisteredModelProvider::Subscription(provider.id))).then_some(id)
         })
     }
+    /// Measured window for a bridge model: the smaller of the catalog value and any learned bound.
+    /// `None` while the catalog omits the window and no request has been rejected for length yet.
+    fn known_context_window(&self, base: &str, model: &str) -> Option<u64> {
+        let catalog = self.catalog();
+        let provider = catalog
+            .providers
+            .iter()
+            .find(|provider| base == self.model_base(provider.id))?;
+        let entry = provider.models.iter().find(|entry| entry.id == model)?;
+        let learned = self
+            .learned_windows
+            .read()
+            .expect("learned windows")
+            .get(&format!("{}/{}", provider.id.as_str(), model))
+            .copied();
+        match (entry.context_window, learned) {
+            (Some(catalog), Some(learned)) => Some(catalog.min(learned)),
+            (catalog, learned) => catalog.or(learned),
+        }
+    }
+    /// A request estimated at `tokens` was rejected for length: the window is at most that.
+    /// Only ever tightens; a catalog entry outside the bridge is ignored.
+    fn learn_context_window(&self, base: &str, model: &str, tokens: u64) {
+        if tokens == 0 {
+            return;
+        }
+        let Some(provider) = self
+            .catalog()
+            .providers
+            .into_iter()
+            .find(|provider| base == self.model_base(provider.id))
+        else {
+            return;
+        };
+        let key = format!("{}/{}", provider.id.as_str(), model);
+        let mut learned = self.learned_windows.write().expect("learned windows");
+        let bound = learned.entry(key).or_insert(tokens);
+        *bound = (*bound).min(tokens);
+    }
     fn registered_model_provider(&self, id: &str) -> Option<RegisteredModelProvider> {
         let registered = self
             .registered_models
@@ -721,6 +765,28 @@ pub(crate) fn is_ready_model_entry(entry: &ModelEntry) -> bool {
 }
 pub fn is_bridge_endpoint(base: &str) -> bool {
     bridge().is_some_and(|b| b.owns_endpoint(base))
+}
+/// Measured window for a bridge model (catalog or learned); `None` for an unmeasured bridge model
+/// and for every non-bridge route, whose window lives in the native catalog.
+pub fn known_context_window(base: &str, model: &str) -> Option<u64> {
+    bridge()
+        .filter(|b| b.owns_endpoint(base))
+        .and_then(|b| b.known_context_window(base, model))
+}
+/// Whether `(base, model)` has a measured window. Native routes always do; a bridge model does
+/// only once its catalog or a length rejection supplied one, so callers stop budgeting against the
+/// 200k placeholder in the meantime.
+pub fn context_window_known(base: &str, model: &str) -> bool {
+    match bridge() {
+        Some(b) if b.owns_endpoint(base) => b.known_context_window(base, model).is_some(),
+        _ => true,
+    }
+}
+/// Record a length rejection for a bridge model; no-op for native routes.
+pub fn learn_context_window(base: &str, model: &str, tokens: u64) {
+    if let Some(b) = bridge().filter(|b| b.owns_endpoint(base)) {
+        b.learn_context_window(base, model, tokens);
+    }
 }
 
 #[cfg(test)]
@@ -982,6 +1048,67 @@ mod tests {
         );
         catalog.providers[0].models[0].context_window = Some(0);
         assert!(bridge.validate_catalog(&catalog).is_err());
+    }
+    /// The 200k placeholder is never treated as a measured window; a length rejection supplies the
+    /// only measurement for a model whose catalog omits one, and it only ever tightens.
+    #[test]
+    fn unknown_context_window_is_unmeasured_until_a_rejection_bounds_it() {
+        let bridge = Bridge::new("http://127.0.0.1:1234", "context-fixture-token".into()).unwrap();
+        let catalog: Catalog = serde_json::from_value(serde_json::json!({"providers":[{
+            "id":"cursor","name":"Cursor","loggedIn":true,
+            "models":[
+                {"id":"unknown-context","name":"Unknown","contextWindow":null},
+                {"id":"known-context","name":"Known","contextWindow":400000}
+            ]
+        }]}))
+        .unwrap();
+        *bridge.catalog.write().unwrap() = catalog;
+        let base = bridge.model_base(ProviderId::Cursor);
+        assert_eq!(bridge.known_context_window(&base, "unknown-context"), None);
+        assert_eq!(
+            bridge.known_context_window(&base, "known-context"),
+            Some(400_000)
+        );
+        assert_eq!(bridge.known_context_window(&base, "not-in-catalog"), None);
+        assert_eq!(
+            bridge.known_context_window("https://api.x.ai/v1", "unknown-context"),
+            None
+        );
+
+        bridge.learn_context_window(&base, "unknown-context", 0);
+        assert_eq!(bridge.known_context_window(&base, "unknown-context"), None);
+        bridge.learn_context_window(&base, "unknown-context", 150_000);
+        assert_eq!(
+            bridge.known_context_window(&base, "unknown-context"),
+            Some(150_000)
+        );
+        bridge.learn_context_window(&base, "unknown-context", 180_000);
+        assert_eq!(
+            bridge.known_context_window(&base, "unknown-context"),
+            Some(150_000),
+            "a looser bound never widens a learned window"
+        );
+        bridge.learn_context_window(&base, "unknown-context", 120_000);
+        assert_eq!(
+            bridge.known_context_window(&base, "unknown-context"),
+            Some(120_000)
+        );
+
+        bridge.learn_context_window(&base, "known-context", 300_000);
+        assert_eq!(
+            bridge.known_context_window(&base, "known-context"),
+            Some(300_000),
+            "a rejection below the catalog window tightens it"
+        );
+        bridge.learn_context_window("https://api.x.ai/v1", "grok-4.6", 1);
+        assert!(
+            bridge
+                .learned_windows
+                .read()
+                .unwrap()
+                .get("cursor/grok-4.6")
+                .is_none()
+        );
     }
     #[test]
     fn overlay_keeps_native_models_and_native_config() {

@@ -2030,16 +2030,13 @@ impl SessionActor {
         {
             return None;
         }
-        let sampling_cfg = self.chat_state_handle.get_sampling_config().await;
-        let context_window = sampling_cfg.as_ref().map(|c| c.context_window)?;
-        let cw = context_window.get();
-        let model = sampling_cfg
-            .as_ref()
-            .map(|c| c.model.clone())
-            .unwrap_or_default();
+        let sampling_cfg = self.chat_state_handle.get_sampling_config().await?;
+        let measured = self.measured_context_window(&sampling_cfg);
+        let model = sampling_cfg.model.clone();
         let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
+        // An unmeasured window reports 0 so consumers show "unknown" instead of a percentage of the placeholder.
         self.signals_handle()
-            .update_context_usage(estimated_total, cw);
+            .update_context_usage(estimated_total, measured.map_or(0, |cw| cw.get()));
         if self.compaction.is_suppressed() {
             return None;
         }
@@ -2054,6 +2051,8 @@ impl SessionActor {
             )
             .is_ok()
         {
+            // Debug trigger: budget the compaction against whatever the config holds.
+            let cw = sampling_cfg.context_window.get();
             let percentage = xai_token_estimation::usage_percentage_u8(estimated_total, cw);
             tracing::info!(
                 "Forced auto-compact trigger (debug): model={model}, \
@@ -2065,6 +2064,8 @@ impl SessionActor {
                 percentage,
             });
         }
+        // No threshold against an unmeasured window: the server's own rejection compacts instead.
+        let context_window = measured?;
         if let Some(trigger_info) = self.should_auto_compact(estimated_total, context_window) {
             tracing::info!(
                 "Pre-sampling auto-compact trigger: model={model}, \
@@ -2084,7 +2085,7 @@ impl SessionActor {
         }
         let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
         let cfg = self.chat_state_handle.get_sampling_config().await?;
-        let cw = cfg.context_window.get();
+        let cw = self.measured_context_window(&cfg)?.get();
         if estimated_total <= cw {
             return None;
         }
@@ -2124,11 +2125,15 @@ impl SessionActor {
         self.compaction
             .auto_compact_suppressed
             .store(SUPPRESS_NONE, std::sync::atomic::Ordering::Relaxed);
-        if prev.context_window <= cfg.context_window.get() {
+        let Some(context_window) = self.measured_context_window(&cfg) else {
+            return Ok(());
+        };
+        // `prev.context_window == 0` means the previous window was unmeasured: no shrink shortcut, let the threshold decide.
+        if prev.context_window != 0 && prev.context_window <= context_window.get() {
             return Ok(());
         }
         let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
-        let Some(trigger_info) = self.should_auto_compact(total_tokens, cfg.context_window) else {
+        let Some(trigger_info) = self.should_auto_compact(total_tokens, context_window) else {
             return Ok(());
         };
         tracing::info!(
@@ -2136,7 +2141,7 @@ impl SessionActor {
             prev.model_slug,
             prev.context_window,
             cfg.model,
-            cfg.context_window.get(),
+            context_window.get(),
             trigger_info.percentage,
         );
         if let Err(e) = self.run_compact_only(trigger_info, false).await {
@@ -2153,10 +2158,24 @@ impl SessionActor {
             self.compaction.previous_model.set(Some(
                 crate::session::compaction_config::PreviousModelInfo {
                     model_slug: cfg.model.clone(),
-                    context_window: cfg.context_window.get(),
+                    // 0 marks an unmeasured window so the switch path cannot compare against the placeholder.
+                    context_window: self.measured_context_window(&cfg).map_or(0, |cw| cw.get()),
                 },
             ));
         }
+    }
+    /// The window to budget `cfg` against, or `None` while it is unmeasured.
+    ///
+    /// Native models always carry a catalog window. A subscription (bridge) model whose catalog omits
+    /// one holds the 200k placeholder in `cfg.context_window`; treating that as real would compact a
+    /// larger model early and report a made-up percentage. `GROK_DEBUG_CONTEXT_WINDOW` is authoritative.
+    pub(crate) fn measured_context_window(
+        &self,
+        cfg: &xai_grok_sampling_types::SamplingConfig,
+    ) -> Option<std::num::NonZeroU64> {
+        (self.compaction.context_window_override.is_some()
+            || crate::polycode::context_window_known(&cfg.base_url, &cfg.model))
+        .then_some(cfg.context_window)
     }
     /// Compact without auto-continue. The outer turn loop rebuilds and retries.
     /// Emits telemetry (`auto_compact_fired`) and UI notifications automatically.
