@@ -82,7 +82,7 @@ jobs:
       - name: Windows bridge and installer regression
         shell: pwsh
         run: |
-          node --test integrations/native-provider/test/*.test.mjs integrations/native-provider/cursor/provider.test.mjs integrations/tests/install-native.test.mjs integrations/tests/install-authorization.test.mjs integrations/tests/release-readiness.test.mjs integrations/tests/candidate-readiness.test.mjs integrations/tests/windows-native-prompts.test.mjs integrations/tests/preview-readiness.test.mjs integrations/tests/install-preview.test.mjs
+          node --test integrations/native-provider/test/*.test.mjs integrations/native-provider/cursor/provider.test.mjs integrations/tests/install-native.test.mjs integrations/tests/install-authorization.test.mjs integrations/tests/release-readiness.test.mjs integrations/tests/candidate-readiness.test.mjs integrations/tests/windows-native-prompts.test.mjs integrations/tests/preview-readiness.test.mjs integrations/tests/install-preview.test.mjs integrations/tests/install-mainline.test.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           bun test integrations/native-provider/test integrations/native-provider/cursor/provider.test.mjs
           if ($LASTEXITCODE) { exit $LASTEXITCODE }

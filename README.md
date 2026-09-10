@@ -89,29 +89,54 @@ see the [configuration reference](crates/codegen/xai-grok-pager/docs/user-guide/
 
 ### Windows native packaging
 
-[`install.ps1`](install.ps1), [`install-preview.ps1`](install-preview.ps1),
+[`install.ps1`](install.ps1), [`install-mainline.ps1`](install-mainline.ps1),
+[`install-preview.ps1`](install-preview.ps1),
 [`polycode.ps1`](polycode.ps1) and the
 [`Windows candidate`](.github/workflows/candidate-release.yml) workflow build,
 hash-verify and install a self-contained Windows x64 package (MSVC native TUI,
 Windows Bun runtime and the provider service). No WSL, Rust, Node, separate
 Bun or external provider CLI is required on the user's machine.
 
-## Install (Windows native Preview)
+## Install (Windows native)
 
-Read the [Preview scope and limitations](integrations/acceptance/preview-v0.2.1/release-notes.md)
-first. The Preview installs into its own directory and leaves `PATH` and any
-existing installation unchanged:
+One command opens an interactive menu: **install or update**, then **Stable or
+Preview**. Both channels add the launcher to user `PATH` by default (`-NoPath`
+skips that). Existing production `%LOCALAPPDATA%\Polycode` is never replaced,
+and the two channels cannot overwrite each other.
+
+```powershell
+irm https://raw.githubusercontent.com/Miku0139oao/Polycode/cursor/one-click-install-b060/install-mainline.ps1 | iex
+```
+
+| Menu choice | Package | Default directory |
+| --- | --- | --- |
+| Stable | Current Windows package from CI run [34380813272](https://github.com/Miku0139oao/Polycode/actions/runs/34380813272) (`bcc4eaf5`), including experimental `context_budget` / `computer_use`. **Not** a fully accepted stable release. | `%LOCALAPPDATA%\Polycode-Mainline` |
+| Preview | Published v0.2.1 Preview (2026-09-08). | `%LOCALAPPDATA%\Polycode-Preview-v0.2.1` |
+
+The bootstrap pins the size and SHA-256 of all six package files for the chosen
+channel, verifies them, then runs the original installer with `-AllowCandidate`.
+Inspect [`install-mainline.ps1`](install-mainline.ps1) before `iex` if you prefer.
+Official `install.ps1 | iex` stays disabled; choosing Stable does **not** open
+that installer.
+
+Scripted / non-interactive:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/cursor/one-click-install-b060/install-mainline.ps1))) -Action Install -Channel Stable
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/cursor/one-click-install-b060/install-mainline.ps1))) -Action Update -Channel Preview -NoPath
+```
+
+The dedicated 2026-09-08 Preview one-liner still works if you want that package
+only, without the menu:
 
 ```powershell
 irm https://raw.githubusercontent.com/Miku0139oao/Polycode/fix/windows-terminal-ci/install-preview.ps1 | iex
 ```
 
-The bootstrap pins the size and SHA-256 of all six release assets, verifies
-them, runs the original installer and prints the launch command. You can
-download and inspect `install-preview.ps1` before running it. For `-AddToPath`,
-custom directories and the verification record see
-[Preview installation](integrations/PREVIEW_INSTALL.md); for the manual
-six-asset install see the [release notes](integrations/acceptance/preview-v0.2.1/release-notes.md).
+Read the [Preview scope and limitations](integrations/acceptance/preview-v0.2.1/release-notes.md)
+first if you use that older package. The menu script also accepts
+`-InstallRoot D:\Polycode-Mainline`. Preview-only options remain in
+[Preview installation](integrations/PREVIEW_INSTALL.md).
 
 Targets: Windows 10 22H2 / Windows 11 x64, PowerShell 5.1 or 7. ARM64 is not a
 native target. Provider credentials live in `%LOCALAPPDATA%\Polycode\auth`
@@ -241,7 +266,7 @@ sandboxing, permissions and more. Upstream's hosted docs are at
 | `integrations/native-provider/` | Provider service: OAuth, credential store, ChatGPT and Cursor transports, launcher (Node/Bun) |
 | `integrations/tests/`, `integrations/*.mjs` | Installer, candidate-readiness and Windows smoke/probe suites |
 | `integrations/*.md`, `integrations/acceptance/` | Fork documentation and per-release acceptance records |
-| `install.ps1`, `install-preview.ps1`, `polycode.ps1` | Windows installer, Preview bootstrap and source-checkout launcher |
+| `install.ps1`, `install-mainline.ps1`, `install-preview.ps1`, `polycode.ps1` | Windows installer, interactive Stable/Preview bootstrap, Preview-only bootstrap and source-checkout launcher |
 | `.github/workflows/candidate-release.yml` | `Windows candidate` CI: build, package, install and smoke-test the Windows artifact |
 | `third_party/` | Vendored upstream source (Mermaid diagram stack) |
 
