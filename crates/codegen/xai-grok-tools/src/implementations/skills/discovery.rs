@@ -65,6 +65,31 @@ fn is_vendor_default_skill(path: &str, name: &str) -> bool {
         || (in_claude && CLAUDE_DEFAULT_SKILLS.contains(&name))
 }
 
+/// Paseo product skills (`paseo`, `paseo-*`). Their descriptions match generic
+/// verbs (spawn a subagent, loop, advisor), so native Polycode/Grok would
+/// otherwise route unrelated work through Paseo.
+fn is_paseo_product_skill(name: &str) -> bool {
+    name == "paseo" || name.starts_with("paseo-")
+}
+
+/// A Paseo-hosted agent sets at least one of these. Native Polycode/Grok does not.
+fn paseo_host_session() -> bool {
+    const VARS: &[&str] = &[
+        "PASEO_CLI",
+        "PASEO_AGENT_ID",
+        "PASEO_AGENT_CWD",
+        "PASEO_HOST",
+        "PASEO_WORKSPACE",
+        "PASEO_SESSION",
+    ];
+    VARS.iter()
+        .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+}
+
+fn allow_paseo_product_skill(name: &str, paseo_host: bool) -> bool {
+    paseo_host || !is_paseo_product_skill(name)
+}
+
 /// Find SKILL.md files inside `skills/` subdirectories, recursively.
 pub fn find_skill_paths(dir: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
@@ -817,6 +842,10 @@ pub fn parse_skill_files(skill_files: Vec<(PathBuf, SkillScope)>) -> Vec<SkillIn
     // a `/.cursor/` or `/.claude/` path. Always applied, independent of the
     // per-vendor toggle, so vendor builtins never leak into Grok Build.
     skills.retain(|s| !is_vendor_default_skill(&s.path, &s.name));
+    // Paseo skills in ~/.agents/skills hijack native subagent/loop/advisor
+    // unless this process is a Paseo-hosted agent.
+    let paseo_host = paseo_host_session();
+    skills.retain(|s| allow_paseo_product_skill(&s.name, paseo_host));
 
     skills
 }
@@ -1453,6 +1482,46 @@ model: test-model
             "/home/u/.claude/skills/shell/SKILL.md",
             "shell"
         ));
+    }
+
+    #[test]
+    fn paseo_product_skills_are_named_paseo_or_paseo_dash() {
+        assert!(is_paseo_product_skill("paseo"));
+        assert!(is_paseo_product_skill("paseo-subagent"));
+        assert!(is_paseo_product_skill("paseo-loop"));
+        assert!(!is_paseo_product_skill("archify"));
+        assert!(!is_paseo_product_skill("pase"));
+        assert!(!allow_paseo_product_skill("paseo-subagent", false));
+        assert!(allow_paseo_product_skill("paseo-subagent", true));
+        assert!(allow_paseo_product_skill("review", false));
+    }
+
+    #[test]
+    fn parse_skill_files_drops_paseo_product_skills_outside_a_paseo_host() {
+        if paseo_host_session() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let paseo = tmp.path().join(".agents").join("skills").join("paseo-subagent");
+        std::fs::create_dir_all(&paseo).unwrap();
+        std::fs::write(
+            paseo.join("SKILL.md"),
+            "---\nname: paseo-subagent\ndescription: spawn subagents\n---\n",
+        )
+        .unwrap();
+        let review = tmp.path().join(".agents").join("skills").join("review");
+        std::fs::create_dir_all(&review).unwrap();
+        std::fs::write(
+            review.join("SKILL.md"),
+            "---\nname: review\ndescription: review code\n---\n",
+        )
+        .unwrap();
+        let skills = parse_skill_files(vec![
+            (paseo.join("SKILL.md"), SkillScope::User),
+            (review.join("SKILL.md"), SkillScope::User),
+        ]);
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["review"]);
     }
 
     #[test]
