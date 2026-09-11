@@ -209,7 +209,17 @@ pub(crate) fn session_usage_block_text(
         format_duration(std::time::Duration::from_millis(t.api_duration_ms)),
     ));
     rows.push(format!("  Reported cost:  {}", format_cost(t)));
-    rows.push("  Model API costs, not subscription balances.".to_string());
+    match subscription_only_providers(usage) {
+        // Subscription providers send token counts but no per-call price: the session
+        // draws down the plan quota shown under "Usage limit" instead of a dollar figure.
+        Some(providers) if t.cost_usd_ticks.is_none() => {
+            rows.push(format!(
+                "  Billed against your {providers} plan quota, not per call;"
+            ));
+            rows.push("  see the account quota above. No dollar cost is reported.".to_string());
+        }
+        _ => rows.push("  Model API costs, not subscription balances.".to_string()),
+    }
 
     if !usage.model_usage.is_empty() {
         rows.push("  By model:".to_string());
@@ -232,6 +242,37 @@ pub(crate) fn session_usage_block_text(
     join_header_rows(
         "Session usage (all models; since start/resume):".to_string(),
         rows,
+    )
+}
+
+/// "ChatGPT", "Cursor" or "ChatGPT and Cursor" when every model this session called is a
+/// `codex/` or `cursor/` subscription route; `None` if any model is native or unattributed.
+fn subscription_only_providers(
+    usage: &xai_grok_shell::extensions::notification::PromptUsage,
+) -> Option<String> {
+    use xai_grok_shell::polycode::ProviderId;
+    if usage.model_usage.is_empty() {
+        return None;
+    }
+    let mut seen = Vec::new();
+    for model in usage.model_usage.keys() {
+        let provider = [ProviderId::Codex, ProviderId::Cursor]
+            .into_iter()
+            .find(|p| {
+                model
+                    .strip_prefix(p.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+            })?;
+        if !seen.contains(&provider) {
+            seen.push(provider);
+        }
+    }
+    seen.sort_by_key(|p| p.as_str());
+    Some(
+        seen.iter()
+            .map(|p| p.display_name())
+            .collect::<Vec<_>>()
+            .join(" and "),
     )
 }
 
@@ -400,6 +441,56 @@ mod tests {
             text.contains("Model API costs, not subscription balances."),
             "{text}"
         );
+    }
+
+    /// A ChatGPT/Cursor-only session has no per-call price to report; the block says so
+    /// instead of implying an API bill exists somewhere. One native model flips it back.
+    #[test]
+    fn subscription_only_session_explains_quota_billing_instead_of_api_costs() {
+        let mut usage = PromptUsage {
+            totals: model_row(800, 80, None),
+            ..Default::default()
+        };
+        usage
+            .model_usage
+            .insert("codex/gpt-6-astra".into(), model_row(300, 30, None));
+        usage
+            .model_usage
+            .insert("cursor/composer-2".into(), model_row(500, 50, None));
+        let text = session_usage_block_text(&usage);
+        assert!(
+            text.contains("Reported cost:  not available (not reported)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Billed against your ChatGPT and Cursor plan quota, not per call"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("Model API costs, not subscription balances."),
+            "{text}"
+        );
+        assert!(!text.contains("$0"), "{text}");
+
+        let mut cursor_only = PromptUsage {
+            totals: model_row(500, 50, None),
+            ..Default::default()
+        };
+        cursor_only
+            .model_usage
+            .insert("cursor/composer-2".into(), model_row(500, 50, None));
+        let text = session_usage_block_text(&cursor_only);
+        assert!(text.contains("  Billed against your Cursor plan quota"), "{text}");
+
+        usage
+            .model_usage
+            .insert("grok-4.5".into(), model_row(100, 10, None));
+        let text = session_usage_block_text(&usage);
+        assert!(
+            text.contains("Model API costs, not subscription balances."),
+            "{text}"
+        );
+        assert!(!text.contains("plan quota"), "{text}");
     }
 
     #[test]
