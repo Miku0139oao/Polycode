@@ -237,3 +237,164 @@ async fn model_settings_active_children_and_unavailable_child_guard_block_commit
         })
         .await;
 }
+
+fn wrapped_user(query: &str) -> ConversationItem {
+    ConversationItem::user(format!("<user_query>\n{query}\n</user_query>"))
+}
+
+#[test]
+fn model_switch_recap_keeps_real_turns_for_any_provider() {
+    let recap = model_switch_recap_text(&[
+        ConversationItem::system("sys"),
+        wrapped_user("fix the login page"),
+        ConversationItem::assistant("Patched auth.rs"),
+        ConversationItem::system_reminder("<system-reminder>skills</system-reminder>"),
+        ConversationItem::assistant_tool_calls(vec![xai_grok_sampling_types::ToolCall {
+            id: std::sync::Arc::<str>::from("call_1"),
+            name: "run_terminal_command".into(),
+            arguments: std::sync::Arc::<str>::from(r#"{"command":"ls"}"#),
+        }]),
+        wrapped_user("可以，先這樣做。"),
+    ])
+    .expect("prior turns must produce a recap");
+    assert!(recap.contains("The session model changed. This is the same conversation."));
+    assert!(recap.contains("User: fix the login page"));
+    assert!(recap.contains("Assistant: Patched auth.rs"));
+    assert!(recap.contains("Assistant used tools: run_terminal_command"));
+    assert!(recap.contains("User: 可以，先這樣做。"));
+    assert!(
+        !recap.contains("skills"),
+        "synthetic reminders must not be copied into the recap"
+    );
+}
+
+#[test]
+fn model_switch_recap_skips_empty_and_synthetic_only_history() {
+    assert!(
+        model_switch_recap_text(&[
+            ConversationItem::system("sys"),
+            ConversationItem::system_reminder("nudge"),
+        ])
+        .is_none()
+    );
+}
+
+#[test]
+fn model_switch_recap_clips_long_lines_and_caps_body() {
+    let recap = model_switch_recap_text(&[
+        ConversationItem::user("你".repeat(600)),
+        ConversationItem::assistant("ok"),
+    ])
+    .unwrap();
+    assert!(recap.contains("User: "));
+    assert!(recap.contains('…'));
+    assert!(
+        !recap.contains(&"你".repeat(600)),
+        "user recap lines must clip at 500 chars"
+    );
+
+    let many: Vec<ConversationItem> = (0..80)
+        .flat_map(|i| {
+            [
+                ConversationItem::user(format!("query-{i}-{}", "x".repeat(200))),
+                ConversationItem::assistant(format!("answer-{i}-{}", "y".repeat(200))),
+            ]
+        })
+        .collect();
+    let recap = model_switch_recap_text(&many).unwrap();
+    let body = recap
+        .split("Prior turns:\n")
+        .nth(1)
+        .unwrap()
+        .split("\nContinue from this context.")
+        .next()
+        .unwrap();
+    assert!(body.len() <= 12_000);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn model_switch_injects_recap_when_model_or_route_changes() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (actor, mut pending, _reply, _persist) = fixture().await;
+            actor.chat_state_handle.replace_conversation(vec![
+                ConversationItem::system("sys"),
+                wrapped_user("keep this conversation"),
+                ConversationItem::assistant("working on it"),
+            ]);
+            actor.commit_pending_model_switch(&mut pending).await.unwrap();
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            let recap = conversation.iter().find_map(|item| match item {
+                ConversationItem::User(user)
+                    if user.synthetic_reason
+                        == Some(xai_grok_sampling_types::SyntheticReason::SystemReminder)
+                        && item.text_content().contains("The session model changed") =>
+                {
+                    Some(item.text_content())
+                }
+                _ => None,
+            });
+            let recap = recap.expect("provider/model switch must inject a recap");
+            assert!(recap.contains("User: keep this conversation"));
+            assert!(recap.contains("Assistant: working on it"));
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn model_switch_does_not_inject_recap_when_model_and_route_stay() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (actor, mut pending, _reply, _persist) = fixture().await;
+            let mut live = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            live.model = pending.sampling_config.model.clone();
+            live.base_url = pending.sampling_config.base_url.clone();
+            actor.chat_state_handle.update_sampling_config(live);
+            actor.chat_state_handle.replace_conversation(vec![
+                ConversationItem::system("sys"),
+                wrapped_user("already on this model"),
+                ConversationItem::assistant("ok"),
+            ]);
+            actor.commit_pending_model_switch(&mut pending).await.unwrap();
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            assert!(
+                conversation.iter().all(|item| {
+                    !item
+                        .text_content()
+                        .contains("The session model changed. This is the same conversation.")
+                }),
+                "effort/config commits on the same model+route must not inject a recap"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn model_switch_injects_recap_on_route_change_even_when_model_id_matches() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (actor, mut pending, _reply, _persist) = fixture().await;
+            let mut live = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            live.model = pending.sampling_config.model.clone();
+            live.base_url = "https://other-provider.invalid/v1".into();
+            actor.chat_state_handle.update_sampling_config(live);
+            actor.chat_state_handle.replace_conversation(vec![
+                ConversationItem::system("sys"),
+                wrapped_user("same id different provider"),
+                ConversationItem::assistant("still this session"),
+            ]);
+            actor.commit_pending_model_switch(&mut pending).await.unwrap();
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            assert!(
+                conversation.iter().any(|item| {
+                    item.text_content()
+                        .contains("User: same id different provider")
+                        && item
+                            .text_content()
+                            .contains("The session model changed. This is the same conversation.")
+                }),
+                "switching providers must recap even when the model id string is unchanged"
+            );
+        })
+        .await;
+}

@@ -1,6 +1,62 @@
 use super::*;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
+use xai_chat_state::compaction_utils::extract_user_query;
 use xai_chat_state::conversation_util::replace_or_insert_system_head;
+
+fn clip_recap_line(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    format!("{}…", trimmed.chars().take(max_chars).collect::<String>())
+}
+
+/// Plain-text recap so a newly selected model (any provider) still sees prior work.
+/// Does not invent content: only user queries and assistant text already in the session.
+pub(super) fn model_switch_recap_text(conversation: &[ConversationItem]) -> Option<String> {
+    let mut lines = Vec::new();
+    for item in conversation {
+        match item {
+            ConversationItem::User(user) if user.synthetic_reason.is_none() => {
+                let query = extract_user_query(&item.text_content());
+                if !query.is_empty() {
+                    lines.push(format!("User: {}", clip_recap_line(&query, 500)));
+                }
+            }
+            ConversationItem::Assistant(assistant) => {
+                let text = assistant.content.trim();
+                if !text.is_empty() {
+                    lines.push(format!("Assistant: {}", clip_recap_line(text, 800)));
+                } else if !assistant.tool_calls.is_empty() {
+                    let names = assistant
+                        .tool_calls
+                        .iter()
+                        .map(|call| call.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    lines.push(format!("Assistant used tools: {names}"));
+                }
+            }
+            _ => {}
+        }
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    let mut body = String::new();
+    for line in &lines {
+        if body.len() + line.len() > 12_000 {
+            break;
+        }
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(line);
+    }
+    Some(format!(
+        "<system-reminder>\nThe session model changed. This is the same conversation. Prior turns:\n{body}\nContinue from this context. Do not claim the conversation is empty or that prior work is missing.\n</system-reminder>"
+    ))
+}
 #[cfg(test)]
 #[path = "model_settings_tests.rs"]
 mod model_settings_tests;
@@ -366,6 +422,16 @@ impl SessionActor {
         if turn_in_flight && is_family_switch {
             tracing::warn!("Family-switch compact skipped: turn in flight");
         }
+        // Any provider/route change, not Cursor-only. Skip first bind (`previous` is
+        // None) and effort-only updates that keep the same model + base URL.
+        let recap_needed = previous.as_ref().is_some_and(|config| {
+            config.model != sampling_config.model || config.base_url != sampling_config.base_url
+        });
+        let recap = if recap_needed {
+            model_switch_recap_text(&self.chat_state_handle.get_conversation().await)
+        } else {
+            None
+        };
         if is_family_switch && !turn_in_flight && self.history_has_model_minted_items().await {
             self.abort_and_clear_prefire().await;
             let estimated_total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
@@ -382,6 +448,12 @@ impl SessionActor {
             if let Err(e) = self.run_compact_only(trigger_info, true).await {
                 tracing::error!(error = %e, "Family-switch compaction failed; switching anyway");
             }
+        }
+        if let Some(text) = recap {
+            let mut conversation = self.chat_state_handle.get_conversation().await;
+            conversation.push(ConversationItem::system_reminder(text));
+            persist_chat_history_jsonl_sync(&self.session_info, &conversation);
+            self.chat_state_handle.replace_conversation(conversation);
         }
         Ok(model_id)
     }
