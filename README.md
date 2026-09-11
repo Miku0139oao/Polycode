@@ -51,7 +51,7 @@ and login records are not evidence for the native architecture described here.
 | `/login [grok\|codex\|cursor]` | Browser OAuth for the selected provider. The TUI stays open through authorization; no external CLI login is required or imported. |
 | `/model <name> [effort]` | Pick a model the signed-in account actually offers. Logging in never switches models on its own. |
 | `/usage [show\|manage]` | Provider usage; `manage` opens native xAI billing. |
-| `/fast [on\|off\|status]` | Priority processing where the provider supports it (may cost more). |
+| `/fast [on\|off\|status]` | Faster processing where the account's catalog supports it (may cost more): ChatGPT priority tier, or the Cursor `-fast` model variant at the current reasoning effort. |
 
 A small loopback **provider service** (bundled Bun runtime, code in
 [`integrations/native-provider/`](integrations/native-provider/)) handles
