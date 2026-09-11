@@ -111,7 +111,7 @@ irm https://raw.githubusercontent.com/Miku0139oao/Polycode/fix/windows-terminal-
 
 | Menu choice | Package | Default directory |
 | --- | --- | --- |
-| Candidate | Unpublished CI artifact from run [34580565124](https://github.com/Miku0139oao/Polycode/actions/runs/34580565124) (`93428605`), including ChatGPT/Cursor patches plus the model picker, per-provider context window, post-compaction and Grok catalog fixes, Cursor's two included quotas in `/usage`, and Cursor effort/fast variants folded into one model family. **Not** an accepted stable release. Requires authenticated `gh` to download the Actions artifact. | `%LOCALAPPDATA%\Polycode-Candidate` |
+| Candidate | Unpublished CI artifact from run [34627921720](https://github.com/Miku0139oao/Polycode/actions/runs/34627921720) (`4c3d6ec`), including ChatGPT/Cursor patches plus last-used model restore, Cursor catalog windows, tool continuation after `/fast`, and no provider-picker overlay on `--resume`. **Not** an accepted stable release. Requires authenticated `gh` to download the Actions artifact. | `%LOCALAPPDATA%\Polycode-Candidate` |
 | Preview | Published v0.2.1 Preview (2026-09-08). | `%LOCALAPPDATA%\Polycode-Preview-v0.2.1` |
 | Stable | Current Windows package from CI run [34380813272](https://github.com/Miku0139oao/Polycode/actions/runs/34380813272) (`bcc4eaf5`), including experimental `context_budget` / `computer_use`. **Not** a fully accepted stable release. | `%LOCALAPPDATA%\Polycode-Mainline` |
 
