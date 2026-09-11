@@ -1063,6 +1063,25 @@ test('models are dynamic canonical IDs only, deduplicated; unknown context stays
   } });
   assert.deepEqual(await instance.models(A), [{ id: 'canonical', name: 'Exact name', contextWindow: null }, { id: 'another', name: 'another', contextWindow: 12345 }, { id: 'limited', name: 'Limited', contextWindow: 272000 }]);
 });
+test('effort and fast catalog entries fold into one family that resolves back to Cursor IDs', async t => {
+  const instance = provider(t, { fetchImpl: async () => Response.json({ models: [
+    { modelId: 'gpt-5.3-codex', displayName: 'GPT-5.3 Codex', contextTokenLimit: 272000 },
+    { modelId: 'gpt-5.3-codex-fast', displayName: 'GPT-5.3 Codex Fast', contextTokenLimit: 272000 },
+    { modelId: 'gpt-5.3-codex-high', displayName: 'GPT-5.3 Codex High', contextTokenLimit: 272000 },
+    { modelId: 'gpt-5.3-codex-1m', displayName: 'GPT-5.3 Codex 1M', contextTokenLimit: 1000000 },
+    { modelId: 'composer-2.5', displayName: 'Composer 2.5' },
+    { modelId: 'composer-2.5-fast', displayName: 'Composer 2.5 Fast' },
+  ] }) });
+  const models = await instance.models(A);
+  assert.deepEqual(models.map(m => [m.id, m.name, m.contextWindow, m.supportsFast, m.defaultReasoningEffort]), [
+    ['gpt-5.3-codex', 'GPT-5.3 Codex', 272000, true, 'medium'],
+    ['gpt-5.3-codex-1m', 'GPT-5.3 Codex 1M', 1000000, undefined, undefined],
+    ['composer-2.5', 'Composer 2.5', null, true, undefined],
+  ]);
+  assert.deepEqual(models[0].reasoningEfforts.map(o => o.value), ['medium', 'high']);
+  assert.deepEqual(models[0].variants, { 'medium:std': 'gpt-5.3-codex', 'medium:fast': 'gpt-5.3-codex-fast', 'high:std': 'gpt-5.3-codex-high' });
+  assert.deepEqual(models[2].variants, { 'default:std': 'composer-2.5', 'default:fast': 'composer-2.5-fast' });
+});
 
 test('model failures are not hidden as a catalog/default/fallback', async t => {
   for (const response of [new Response('OFFLINE_SECRET', { status: 403 }), Response.json({ models: [{ displayModelId: 'no-canonical-id' }] }), Response.json({ models: [{ modelId: 'same', displayName: 'one' }, { modelId: 'same', displayName: 'two' }] })]) {

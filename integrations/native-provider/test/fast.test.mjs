@@ -25,8 +25,12 @@ test('wire priority is explicit, off/default omit it, invalid and conflicting co
   for (const header of ['yes', 'priority', true]) assert.throws(() => applyFast('codex', model, { ...base }, header));
   assert.throws(() => applyFast('codex', model, { ...base, service_tier: 'priority' }, 'off'), /Conflicting/);
   for (const tier of ['fast', 'flex', 'auto', 'default', false, {}]) assert.throws(() => toResponses({ ...base, service_tier: tier }));
-  assert.throws(() => applyFast('cursor', model, { ...base }, 'on'), /unsupported/);
+  assert.throws(() => applyFast('cursor', {}, { ...base }, 'on'), /no fast variant/);
+  assert.throws(() => applyFast('other', model, { ...base }, 'on'), /unsupported/);
   assert.throws(() => applyFast('codex', {}, { ...base, service_tier: 'priority' }), /unsupported/);
+  const cursorBody = { ...base };
+  applyFast('cursor', model, cursorBody, 'on');
+  assert.equal(cursorBody.service_tier, 'priority');
 });
 test('catalog discovery preserves capability and direct Responses receives priority without a model suffix', async () => {
   const requests = [];
@@ -64,9 +68,60 @@ test('bridge capability and per-request on/off are isolated and capability loss 
   assert.equal((await (await call('/codex/v1/chat/completions', base, 'on')).json()).service_tier, 'priority');
   assert.equal((await (await call('/codex/v1/chat/completions', base)).json()).service_tier, undefined);
   assert.equal((await (await call('/codex/v1/chat/completions', base, 'off')).json()).service_tier, undefined);
+  // Cursor has no service tier: a capability flag without a concrete fast variant still rejects before inference.
   assert.equal((await call('/cursor/v1/chat/completions', base, 'on')).status, 400);
   models = [{ id: 'a', name: 'A', contextWindow: 64000 }];
   assert.equal((await call('/codex/v1/chat/completions', base, 'on')).status, 400);
   assert.deepEqual(await (await capability()).json(), { supported: false });
   assert.equal(sent.length, 3);
+});
+test('Cursor families resolve effort and fast selections to the concrete catalog model ID', async t => {
+  const family = {
+    id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex', contextWindow: 272000, supportsFast: true, defaultReasoningEffort: 'medium',
+    reasoningEfforts: [{ id: 'low', value: 'low', label: 'low', default: false }, { id: 'medium', value: 'medium', label: 'medium', default: true }, { id: 'high', value: 'high', label: 'high', default: false }],
+    variants: { 'medium:std': 'gpt-5.3-codex', 'medium:fast': 'gpt-5.3-codex-fast', 'low:std': 'gpt-5.3-codex-low', 'high:std': 'gpt-5.3-codex-high', 'high:fast': 'gpt-5.3-codex-high-fast' },
+  };
+  const models = [family, { id: 'composer-2.5', name: 'Composer 2.5', contextWindow: 200000, supportsFast: true, variants: { 'default:std': 'composer-2.5', 'default:fast': 'composer-2.5-fast' } }, { id: 'solo', name: 'Solo', contextWindow: 1000 }];
+  const sent = [];
+  const credential = { accessToken: 'mock' };
+  const store = { get: async () => credential, snapshot: async () => ({ revision: 'one', credential }), update: async (_, fn) => ({ revision: 'one', credential: await fn(credential) }) };
+  const provider = { refresh: async c => c, models: async () => models, complete: async body => { sent.push(body); return Response.json(body); }, close() {} };
+  const service = new NativeProviderService({ codex: provider, cursor: provider }, store, { token: 'mock-process-token' });
+  await service.start();
+  t.after(() => service.close());
+  const call = (body, fast) => fetch(service.url + '/cursor/v1/chat/completions', { method: 'POST', headers: { Authorization: 'Bearer mock-process-token', ...(fast == null ? {} : { [FAST_HEADER]: fast }) }, body: JSON.stringify(body) });
+  const capability = model => fetch(service.url + '/control/fast-capability', { method: 'POST', headers: { Authorization: 'Bearer mock-process-token' }, body: JSON.stringify({ provider: 'cursor', model }) });
+  assert.deepEqual(await (await capability('gpt-5.3-codex')).json(), { supported: true });
+  assert.deepEqual(await (await capability('solo')).json(), { supported: false });
+
+  const messages = [{ role: 'user', content: 'hi' }];
+  const cases = [
+    [{ model: 'cursor/gpt-5.3-codex', messages }, undefined, 'gpt-5.3-codex'],
+    [{ model: 'gpt-5.3-codex', messages, reasoning_effort: 'low' }, 'off', 'gpt-5.3-codex-low'],
+    [{ model: 'gpt-5.3-codex', messages, reasoning_effort: 'high' }, 'on', 'gpt-5.3-codex-high-fast'],
+    [{ model: 'gpt-5.3-codex', messages, reasoning: { effort: 'medium' }, service_tier: 'priority' }, undefined, 'gpt-5.3-codex-fast'],
+    [{ model: 'composer-2.5', messages }, 'on', 'composer-2.5-fast'],
+    [{ model: 'composer-2.5', messages }, undefined, 'composer-2.5'],
+    [{ model: 'solo', messages }, undefined, 'solo'],
+  ];
+  for (const [body, fast, expected] of cases) {
+    const response = await call(body, fast);
+    assert.equal(response.status, 200, `${body.model} ${body.reasoning_effort ?? ''} ${fast ?? ''}`);
+    const wire = await response.json();
+    assert.equal(wire.model, expected);
+    assert.equal(wire.reasoning_effort, undefined);
+    assert.equal(wire.reasoning, undefined);
+    assert.equal(wire.service_tier, undefined);
+  }
+  assert.equal(sent.length, cases.length);
+  // Cursor publishes no low-fast variant: reject instead of silently downgrading.
+  const missing = await call({ model: 'gpt-5.3-codex', messages, reasoning_effort: 'low' }, 'on');
+  assert.equal(missing.status, 400);
+  assert.match((await missing.json()).error.message, /effort low in fast mode/);
+  assert.equal((await call({ model: 'gpt-5.3-codex', messages, reasoning_effort: 'xhigh' })).status, 400);
+  assert.equal((await call({ model: 'composer-2.5', messages, reasoning_effort: 'high' })).status, 400);
+  assert.equal((await call({ model: 'solo', messages }, 'on')).status, 400);
+  // Concrete variant IDs are not advertised once folded.
+  assert.equal((await call({ model: 'gpt-5.3-codex-high', messages })).status, 400);
+  assert.equal(sent.length, cases.length);
 });

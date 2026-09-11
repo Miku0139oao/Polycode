@@ -40,6 +40,15 @@ cursor.close(); // Idempotent; aborts login/HTTP operations and all remote sessi
 - `models`: `[{id, name, contextWindow: number | null}]`. Canonical remote IDs
   only, no prefixing/aliases/defaults. `null` means the server did not supply a
   context size. Catalog errors throw, rather than produce fabricated models.
+  Cursor publishes reasoning effort and fast mode as separate catalog entries
+  (`gpt-5.3-codex-low`, `gpt-5.3-codex-low-fast`, ...). `variants.mjs` folds
+  such a group into one family entry that carries `reasoningEfforts`,
+  `supportsFast` and a `variants` map back to the concrete IDs; the service
+  resolves the family plus the selected effort and `/fast` state into the
+  exact Cursor ID before `complete`. The unsuffixed entry is exposed as the
+  `medium` default and labelled as Cursor's default. Context-size variants
+  (`-1m`) stay separate entries because they change the context window, and
+  ambiguous groups (two IDs for one effort/fast pair) are left unfolded.
 - `complete`: always resolves a standard `Response`. Success is Chat Completions
   JSON or SSE according to `body.stream`. Pre-response errors use HTTP 4xx/5xx
   with `{error:{type,code,message}}`; errors during SSE use a standalone `error`

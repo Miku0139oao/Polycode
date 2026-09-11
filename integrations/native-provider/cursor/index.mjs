@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { CursorProviderError, fail, safeError, checkSignal, onAbort, delay, errorBody } from './errors.mjs';
 import { API, WEBSITE, Connection, headers, request, httpError, readJson } from './transport.mjs';
 import { validateMessages } from './content.mjs';
+import { foldCursorCatalog } from './variants.mjs';
 
 function finitePercent(value) {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1000 ? value : undefined;
@@ -282,7 +283,7 @@ export function createCursorProvider({
         if (catalog.has(model.id) && json(catalog.get(model.id)) !== json(model)) throw fail('invalid_models', 'Cursor returned conflicting model IDs.');
         catalog.set(model.id, model);
       }
-      return [...catalog.values()];
+      return foldCursorCatalog([...catalog.values()]);
     } catch (e) { throw safeError(e); } finally { op.finish(); }
   }
   async function usage(input, { signal } = {}) {
