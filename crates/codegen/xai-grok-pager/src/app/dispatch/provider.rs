@@ -83,15 +83,25 @@ fn card(app: &mut AppView, title: String, options: Vec<QuestionOption>, login: b
     agent.active_pane = crate::app::agent_view::ActivePane::Prompt;
     agent.prompt.set_text("");
 }
+fn local_placeholder_already_bound(app: &AppView) -> bool {
+    app.provider.local_target.is_some_and(|id| {
+        app.agents
+            .get(&id)
+            .is_some_and(|agent| agent.session.session_id.is_some())
+    })
+}
 /// Reuse the last signed-in model (or CLI `-m`) instead of the provider-then-model cards.
-/// Only the first unauthenticated startup catalog (`provider: None`) may restore; login and
-/// `/provider` keep the explicit picker. Missing or signed-out targets fall through to the menu.
+/// Only the first unauthenticated startup catalog (`provider: None`) may restore; login,
+/// `/provider`, and an already-bound resume/fork session keep the current model.
 fn try_restore_preferred(app: &mut AppView) -> Option<Vec<Effect>> {
     if app.provider.restore_attempted || app.provider.login_menu {
         return None;
     }
     app.provider.restore_attempted = true;
-    if app.provider.local_target.is_none() || app.provider.creating {
+    if app.provider.local_target.is_none()
+        || app.provider.creating
+        || local_placeholder_already_bound(app)
+    {
         return None;
     }
     let model = app
@@ -509,13 +519,13 @@ pub(super) fn complete(
                     .update_catalog(native_models.available.clone());
             }
             app.provider.catalog = catalog;
-            if provider.is_none()
-                && let Some(effects) = try_restore_preferred(app)
-            {
-                return effects;
-            }
             if let Some(provider) = provider {
                 models(app, provider);
+            } else if let Some(effects) = try_restore_preferred(app) {
+                return effects;
+            } else if local_placeholder_already_bound(app) {
+                // `--resume` raced the startup catalog: keep the loaded session.
+                close_card(app);
             } else {
                 menu(app);
             }

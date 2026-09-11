@@ -87,6 +87,34 @@ fn polycode_startup_keeps_picker_when_last_model_is_signed_out() {
 }
 
 #[test]
+fn polycode_startup_does_not_restore_or_overlay_picker_on_a_bound_session() {
+    let (mut app, id) = startup_picker();
+    app.provider.preferred_model = Some("codex/actual".into());
+    app.agents.get_mut(&id).unwrap().session.session_id =
+        Some(acp::SessionId::new("resumed-session"));
+    let generation = app.provider.generation;
+    let effects = complete(&mut app, generation, id, startup_catalog_reply(true, None));
+    assert!(
+        effects.is_empty(),
+        "expected no create/restore over resume, got {effects:?}"
+    );
+    assert!(!app.provider.creating);
+    assert!(app.provider.restore_attempted);
+    assert!(app.agents[&id].question_view.is_none());
+    assert!(app.agents[&id].active_modal.is_none());
+    assert_eq!(
+        app.agents[&id]
+            .session
+            .session_id
+            .as_ref()
+            .unwrap()
+            .0
+            .as_ref(),
+        "resumed-session"
+    );
+}
+
+#[test]
 fn polycode_login_menu_does_not_auto_restore_last_model() {
     let (mut app, id) = local_picker();
     app.provider.preferred_model = Some("codex/actual".into());
@@ -170,11 +198,9 @@ fn polycode_oauth_and_catalog_do_not_create_until_explicit_model_choice() {
     assert!(!app.provider.creating);
     assert!(effects.iter().any(|e| matches!(e, Effect::PersistPreferredModel { model_id, .. } if model_id.0.as_ref() == "codex/actual")));
     let effects = dispatch_enabled(&mut app, Command::Model("codex/actual".into()));
-    assert!(
-        !effects
-            .iter()
-            .any(|e| matches!(e, Effect::CreateSession { .. }))
-    );
+    assert!(!effects
+        .iter()
+        .any(|e| matches!(e, Effect::CreateSession { .. })));
     assert_eq!(
         app.agents[&id]
             .session

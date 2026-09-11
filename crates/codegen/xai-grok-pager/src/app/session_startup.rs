@@ -685,6 +685,14 @@ pub enum MaterializedStartup {
         suppress_code_restore: bool,
     },
 }
+impl MaterializedStartup {
+    /// Polycode's first-run provider/model cards are only for a new session.
+    /// `--resume` / `--continue` / `--fork-session` already have a model; overlaying
+    /// the picker on `Loading session…` queues typed prompts and never samples.
+    pub fn polycode_startup_picker(&self) -> bool {
+        matches!(self, Self::NewAuto | Self::NewWithId { .. })
+    }
+}
 /// Whether materialization may resolve a non-id resume arg by title locally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TitleResolution {
@@ -1436,6 +1444,36 @@ mod tests {
         assert_eq!(
             parse(&["grok"]).session_startup_intent().unwrap(),
             SessionStartupIntent::NewAuto
+        );
+    }
+    #[test]
+    fn polycode_startup_picker_only_for_new_sessions() {
+        assert!(MaterializedStartup::NewAuto.polycode_startup_picker());
+        assert!(
+            MaterializedStartup::NewWithId {
+                session_id: "x".into()
+            }
+            .polycode_startup_picker()
+        );
+        assert!(
+            !MaterializedStartup::Resume {
+                session_id: "x".into(),
+                original_cwd: None,
+                title: None,
+                deferred_local_miss: false,
+                suppress_code_restore: false,
+            }
+            .polycode_startup_picker()
+        );
+        assert!(
+            !MaterializedStartup::Fork {
+                parent_session_id: "p".into(),
+                parent_cwd: None,
+                parent_title: None,
+                new_session_id: None,
+                suppress_code_restore: false,
+            }
+            .polycode_startup_picker()
         );
     }
     #[test]

@@ -339,6 +339,10 @@ try {
   writeFileSync(file,nonce+'-resumed');
   t=new WindowsTerminal(binary,[...nativeArgs,'--resume',session],workspace,env);
   await text('Mock cursor');
+  await t.until(()=>{
+    const tail=plain(t.output).slice(-3000);
+    return !tail.includes('Loading session') && !tail.includes('Choose a provider');
+  },90000);
   await pause(1000);
   await command('Read the resumed fixture.');
   await text('WINDOWS_RESUME_PASS');

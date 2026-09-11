@@ -1371,11 +1371,17 @@ pub(crate) async fn run(
     // else: auth_state defaults to Done (already authenticated eagerly)
     // Effects stashed until after the initial render, so the user sees the welcome/auth UI right away
     super::external::apply(&mut app);
-    let mut post_render_effects = if xai_grok_shell::polycode::enabled() {
+    let mut post_render_effects = if xai_grok_shell::polycode::enabled()
+        && materialized.polycode_startup_picker()
+    {
         dispatch::dispatch(
             Action::Provider(crate::app::provider::Command::Menu { login: force_login }),
             &mut app,
         )
+    } else if xai_grok_shell::polycode::enabled() {
+        // Resume/fork already bind a session; the startup picker would overlay
+        // `Loading session…` and queue the first prompt instead of sending it.
+        vec![]
     } else if needs_interactive_login {
         if connection.auth_methods.is_empty() {
             // preferred_method pin unavailable: no advertised method to start
