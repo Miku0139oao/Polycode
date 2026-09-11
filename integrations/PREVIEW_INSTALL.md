@@ -5,7 +5,7 @@ install / update / switch / list / uninstall menu (Candidate, Preview or Stable)
 is:
 
 ```powershell
-irm https://raw.githubusercontent.com/Miku0139oao/Polycode/cursor/model-picker-ui-b060/install-mainline.ps1 | iex
+irm https://raw.githubusercontent.com/Miku0139oao/Polycode/fix/windows-terminal-ci/install-mainline.ps1 | iex
 ```
 
 This page documents the dedicated Preview-only one-liner, which still pins the

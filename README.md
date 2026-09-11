@@ -106,12 +106,12 @@ live in separate directories and cannot overwrite each other. Production
 changes on install/update; overwrite and switch always move user `PATH`.
 
 ```powershell
-irm https://raw.githubusercontent.com/Miku0139oao/Polycode/cursor/model-picker-ui-b060/install-mainline.ps1 | iex
+irm https://raw.githubusercontent.com/Miku0139oao/Polycode/fix/windows-terminal-ci/install-mainline.ps1 | iex
 ```
 
 | Menu choice | Package | Default directory |
 | --- | --- | --- |
-| Candidate | Unpublished CI artifact from run [34492775130](https://github.com/Miku0139oao/Polycode/actions/runs/34492775130) (`8e44e8b9`), including ChatGPT/Cursor patches. **Not** an accepted stable release. Requires authenticated `gh` to download the Actions artifact. | `%LOCALAPPDATA%\Polycode-Candidate` |
+| Candidate | Unpublished CI artifact from run [34525101732](https://github.com/Miku0139oao/Polycode/actions/runs/34525101732) (`ef6ec4a5`), including ChatGPT/Cursor patches plus the model picker, per-provider context window, post-compaction and Grok catalog fixes. **Not** an accepted stable release. Requires authenticated `gh` to download the Actions artifact. | `%LOCALAPPDATA%\Polycode-Candidate` |
 | Preview | Published v0.2.1 Preview (2026-09-08). | `%LOCALAPPDATA%\Polycode-Preview-v0.2.1` |
 | Stable | Current Windows package from CI run [34380813272](https://github.com/Miku0139oao/Polycode/actions/runs/34380813272) (`bcc4eaf5`), including experimental `context_budget` / `computer_use`. **Not** a fully accepted stable release. | `%LOCALAPPDATA%\Polycode-Mainline` |
 
@@ -125,11 +125,11 @@ Official `install.ps1 | iex` stays disabled; choosing Stable or Candidate does
 Scripted / non-interactive:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/cursor/model-picker-ui-b060/install-mainline.ps1))) -Action Install -Channel Candidate
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/cursor/model-picker-ui-b060/install-mainline.ps1))) -Action List
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/cursor/model-picker-ui-b060/install-mainline.ps1))) -Action Switch -Channel Candidate
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/cursor/model-picker-ui-b060/install-mainline.ps1))) -Action Uninstall -Channel Preview -Force
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/cursor/model-picker-ui-b060/install-mainline.ps1))) -Action Update -Channel Preview -NoPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/fix/windows-terminal-ci/install-mainline.ps1))) -Action Install -Channel Candidate
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/fix/windows-terminal-ci/install-mainline.ps1))) -Action List
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/fix/windows-terminal-ci/install-mainline.ps1))) -Action Switch -Channel Candidate
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/fix/windows-terminal-ci/install-mainline.ps1))) -Action Uninstall -Channel Preview -Force
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/fix/windows-terminal-ci/install-mainline.ps1))) -Action Update -Channel Preview -NoPath
 ```
 
 The dedicated 2026-09-08 Preview one-liner still works if you want that package

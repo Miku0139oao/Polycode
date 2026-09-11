@@ -17,8 +17,8 @@ if ([Environment]::OSVersion.Version.Build -lt 19045) { throw 'Windows 10 22H2 o
 $releaseBase = 'https://github.com/Miku0139oao/Polycode/releases/download/v0.2.1'
 $commitBase = 'https://raw.githubusercontent.com/Miku0139oao/Polycode/831e7375f88be4a346481c4b18d40cab8887f1d3'
 $candidateRepo = 'Miku0139oao/Polycode'
-$candidateRunId = '34492775130'
-$candidateGitSha = '8e44e8b91672d97e1d46372a238263d5df1a593b'
+$candidateRunId = '34525101732'
+$candidateGitSha = 'ef6ec4a537d09cdf3ce692129afe22617a6baa55'
 $candidateArtifact = 'polycode-windows-candidate'
 $previewAssets = [ordered]@{
     'install.ps1' = @{ bytes = 34301; sha256 = '06607648b697bbc783e2cc730a230cc51aacb3000287c25bdee9850b630c8476'; uri = ($releaseBase + '/install.ps1') }
@@ -38,11 +38,11 @@ $stableAssets = [ordered]@{
 }
 $candidateAssets = [ordered]@{
     'install.ps1' = @{ bytes = 34301; sha256 = '06607648b697bbc783e2cc730a230cc51aacb3000287c25bdee9850b630c8476' }
-    'manifest.json' = @{ bytes = 6851; sha256 = '1a139f51c4142d443989e20f8d86ca4b9a56dde2801227a12faafc46fd46995a' }
-    'SHA256SUMS' = @{ bytes = 434; sha256 = '689b7488093f95934fb9f03fd36b8a696bb99ef030e580eec3ba8ce79f1795d2' }
-    'polycode-windows-x64.gz' = @{ bytes = 59536750; sha256 = 'a2f5ab22cc31076714708d8a5212e1883fe394b45ce65392c4f34eca4b3c73d0' }
+    'manifest.json' = @{ bytes = 6851; sha256 = '6140b133d41d27b76ecd25996393314d93e0a8169648b61ab141f987327477a5' }
+    'SHA256SUMS' = @{ bytes = 434; sha256 = 'be12ff9e7e84e57e7ba895bafa725c790723bc372bc5f18d241fd2fae3a198a1' }
+    'polycode-windows-x64.gz' = @{ bytes = 59545863; sha256 = 'edaf839aeacc0270ba06bfa367b8a556ca231393fda7056b886383ea9269c9e1' }
     'polycode-bun-windows-x64.gz' = @{ bytes = 39647574; sha256 = '7411c0ae90f6aa34c8181ca233fbf4016335b89cf4e4f50c1b062db53da13949' }
-    'polycode-runtime.zip' = @{ bytes = 1962574; sha256 = '45993ac5dc4008dfb779677963aeadfb1cf850b38d40ec7817d58a8e3b47ac9d' }
+    'polycode-runtime.zip' = @{ bytes = 1964001; sha256 = 'c5c3a612351a489fe126c0baf3c6ee0d8ddfcba5fbda47beb142ad3fdb218002' }
 }
 
 function Assert-ChannelAsset([string]$Path, [long]$Bytes, [string]$Sha256) {
@@ -143,7 +143,7 @@ function Save-ChannelState([string]$Root, [string]$Name) {
     }
     if ($Name -eq 'Preview') { $state.source = 'release-v0.2.1'; $state.gitSha = '39b25f39df9b1b7341ba7957c0ea54167ea80af8' }
     elseif ($Name -eq 'Stable') { $state.source = 'ci-mainline'; $state.runId = '34380813272'; $state.gitSha = 'bcc4eaf5da43b8920a1579b85abab07ded60fcdf' }
-    else { $state.source = 'ci-candidate'; $state.runId = '34492775130'; $state.gitSha = '8e44e8b91672d97e1d46372a238263d5df1a593b'; $state.artifact = 'polycode-windows-candidate' }
+    else { $state.source = 'ci-candidate'; $state.runId = '34525101732'; $state.gitSha = 'ef6ec4a537d09cdf3ce692129afe22617a6baa55'; $state.artifact = 'polycode-windows-candidate' }
     $json = ($state | ConvertTo-Json)
     [IO.File]::WriteAllText((Join-Path $Root 'channel-state.json'), $json)
 }
@@ -325,7 +325,7 @@ if ((-not $selectedAction -or (-not $selectedChannel -and -not $channelOptional)
     }
     if ($selectedAction -ne 'List' -and -not $selectedChannel) {
         $pick = Read-MenuChoice '哪一個頻道？' @(
-            'Candidate — ChatGPT/Cursor 修補（CI 34492775130 / 8e44e8b9，未發布）',
+            'Candidate — ChatGPT/Cursor 修補（CI 34525101732 / ef6ec4a5，未發布）',
             'Preview — v0.2.1（2026-09-08 已發布）',
             '穩定版 — 目前 Windows 建議包（CI mainline，不是完整驗收穩定版）'
         )
@@ -409,7 +409,7 @@ try {
     } elseif ($selectedChannel -eq 'Stable') {
         Write-Warning 'Installing Polycode current Windows package from CI run 34380813272 (bcc4eaf5). Official stable publication is not open. This is not the 2026-09-08 Preview attestation.'
     } else {
-        Write-Warning 'Installing unpublished Candidate from CI run 34492775130 (8e44e8b9) with ChatGPT/Cursor patches. This is not an accepted stable release.'
+        Write-Warning 'Installing unpublished Candidate from CI run 34525101732 (ef6ec4a5) with ChatGPT/Cursor patches. This is not an accepted stable release.'
         Assert-CandidateTools
     }
     if ($selectedAction -eq 'Overwrite') {
