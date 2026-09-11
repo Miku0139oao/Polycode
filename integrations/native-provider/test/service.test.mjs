@@ -46,6 +46,20 @@ test('usage lists every signed-in account and never invents quota', async t => {
   });
   assert.ok(!JSON.stringify(failed).includes('secret'));
 });
+test('Cursor usage keeps both included quotas and the plan name, dropping unknown or duplicate buckets', async t => {
+  const folder = await mkdtemp(join(tmpdir(), 'polycode-auth-test-')), store = new CredentialStore(folder);
+  const provider = { startLogin: async () => { throw new Error('unused'); }, refresh: async c => c, models: async () => [], complete: async () => Response.json({}), close() {},
+    usage: async () => ({ plan: 'Ultra', usedPercent: 12.07, limitCents: 40000, displayMessage: "You've hit your usage limit", billingCycleEnd: '1789411380000', email: 'secret@example.com',
+      quotas: [{ id: 'cursor_models', usedPercent: 9.02 }, { id: 'other_models', usedPercent: 32.4 }, { id: 'cursor_models', usedPercent: 99 }, { id: 'on_demand', usedPercent: 1 }, { id: 'other_models', usedPercent: 'lots' }] }) };
+  const service = new NativeProviderService({ cursor: provider }, store, { token: 'local-fixture-secret' }); await service.start();
+  t.after(async () => { await service.close(); await rm(folder, { recursive: true, force: true }); });
+  await store.set('cursor', { accessToken: 'secret-account-token' });
+  const body = await (await fetch(service.url + '/control/usage', { headers: { Authorization: 'Bearer local-fixture-secret' } })).json();
+  assert.deepEqual(body, { providers: [{ id: 'cursor', name: 'Cursor', loggedIn: true, usage: {
+    plan: 'Ultra', quotas: [{ id: 'cursor_models', usedPercent: 9.02 }, { id: 'other_models', usedPercent: 32.4 }],
+    usedPercent: 12.07, limitCents: 40000, displayMessage: "You've hit your usage limit", billingCycleEnd: '1789411380000' } }] });
+  assert.ok(!JSON.stringify(body).includes('secret'));
+});
 test('signed-out model calls fail without attempting another provider', async t => {
   const f = await fixture(t), r = await f.call('/codex/v1/chat/completions', { model: 'model-a', messages: [] });
   assert.equal(r.status, 401); assert.equal(f.sent(), undefined);

@@ -931,6 +931,29 @@ fn account_usage_lines(
     if let Some(plan) = &usage.plan {
         lines.push(plain(theme, format!("Plan: {plan}")));
     }
+    let quotas: Vec<_> = usage
+        .quotas
+        .iter()
+        .filter_map(|quota| quota.label().map(|label| (label, quota.used_percent)))
+        .collect();
+    if !quotas.is_empty() {
+        // The dashboard's included quotas are the plan's real limits. The dollar axis
+        // (`display_message`, `used_percent`, `limit_cents`) is Cursor's legacy included-spend
+        // pool and reads "hit your usage limit" while both quotas still have room, so it is
+        // not shown alongside them.
+        for (label, percent) in quotas {
+            lines.push(plain(theme, label));
+            lines.push(percent_bar(theme, percent));
+        }
+        if let Some(reset) = usage
+            .billing_cycle_end
+            .as_deref()
+            .and_then(format_cycle_end)
+        {
+            lines.push(muted_line(theme, format!("Resets: {reset}")));
+        }
+        return lines;
+    }
     if let Some(message) = &usage.display_message {
         lines.push(plain(theme, message.clone()));
     }
@@ -1396,6 +1419,61 @@ mod tests {
             render_usage_modal(&mut buf, area, &mut state, Some(&balance), false, &theme);
             assert_eq!(state.window.tab_rects.len(), 3);
             assert!(state.window.close_button_rect.is_some());
+        }
+    }
+
+    /// Ultra dashboard: Cursor Models 9%, Other Models 32%, while the legacy included-dollar
+    /// axis reports "hit your usage limit" at $400/$400. The two quotas are what the plan
+    /// enforces, so they replace the dollar axis instead of contradicting it.
+    #[test]
+    fn cursor_included_quotas_replace_the_legacy_dollar_axis() {
+        use xai_grok_shell::polycode::{AccountUsage, ProviderId, ProviderUsage, UsageQuota};
+        let theme = Theme::current();
+        let mut state = state_with_session();
+        state.ctx.provider = UsageProvider::Subscription(ProviderId::Cursor);
+        state.ctx.active_model = Some("cursor/gpt-6".into());
+        state.session_usage_text = Some("Session usage: no model calls yet.".into());
+        state.subscription_accounts = Some(vec![ProviderUsage {
+            id: ProviderId::Cursor,
+            name: "Cursor".into(),
+            logged_in: true,
+            usage: Some(AccountUsage {
+                plan: Some("Ultra".into()),
+                quotas: vec![
+                    UsageQuota {
+                        id: "cursor_models".into(),
+                        used_percent: 9.02,
+                    },
+                    UsageQuota {
+                        id: "other_models".into(),
+                        used_percent: 32.4,
+                    },
+                ],
+                used_percent: Some(12.07),
+                limit_cents: Some(40_000),
+                display_message: Some("You've hit your usage limit".into()),
+                billing_cycle_end: Some("1789497780000".into()),
+                ..AccountUsage::default()
+            }),
+            message: None,
+        }]);
+        let lines: Vec<String> = usage_limit_lines(&state, None, &theme)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let text = lines.join("\n");
+        let at = |needle: &str| {
+            lines
+                .iter()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("missing {needle:?}:\n{text}"))
+        };
+        assert_eq!(at("Cursor Models (Cursor Grok, Composer)") + 1, at("  9%"));
+        assert_eq!(at("Other Models") + 1, at("  32%"));
+        assert!(at("Plan: Ultra") < at("Cursor Models (Cursor Grok, Composer)"));
+        assert!(at("Resets: 2026-09-15 18:43 UTC") > at("  32%"));
+        for absent in ["hit your usage limit", "$400.00", "  12%"] {
+            assert!(!text.contains(absent), "{absent:?} must not be shown:\n{text}");
         }
     }
 

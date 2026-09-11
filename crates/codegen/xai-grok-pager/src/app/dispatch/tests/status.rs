@@ -1828,6 +1828,7 @@ fn subscription_usage_result_fills_signed_in_accounts() {
                             limit_cents: None,
                             display_message: None,
                             billing_cycle_end: None,
+                            quotas: vec![],
                         }),
                         message: None,
                     },

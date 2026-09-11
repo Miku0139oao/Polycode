@@ -51,7 +51,7 @@ and login records are not evidence for the native architecture described here.
 | `/login [grok\|codex\|cursor]` | Browser OAuth for the selected provider. The TUI stays open through authorization; no external CLI login is required or imported. |
 | `/model <name> [effort]` | Pick a model the signed-in account actually offers. Logging in never switches models on its own. |
 | `/usage [show\|manage]` | Provider usage; `manage` opens native xAI billing. |
-| `/fast [on\|off\|status]` | Priority processing where the provider supports it (may cost more). |
+| `/fast [on\|off\|status]` | Faster processing where the account's catalog supports it (may cost more): ChatGPT priority tier, or the Cursor `-fast` model variant at the current reasoning effort. |
 
 A small loopback **provider service** (bundled Bun runtime, code in
 [`integrations/native-provider/`](integrations/native-provider/)) handles
@@ -111,7 +111,7 @@ irm https://raw.githubusercontent.com/Miku0139oao/Polycode/fix/windows-terminal-
 
 | Menu choice | Package | Default directory |
 | --- | --- | --- |
-| Candidate | Unpublished CI artifact from run [34525101732](https://github.com/Miku0139oao/Polycode/actions/runs/34525101732) (`ef6ec4a5`), including ChatGPT/Cursor patches plus the model picker, per-provider context window, post-compaction and Grok catalog fixes. **Not** an accepted stable release. Requires authenticated `gh` to download the Actions artifact. | `%LOCALAPPDATA%\Polycode-Candidate` |
+| Candidate | Unpublished CI artifact from run [34580565124](https://github.com/Miku0139oao/Polycode/actions/runs/34580565124) (`93428605`), including ChatGPT/Cursor patches plus the model picker, per-provider context window, post-compaction and Grok catalog fixes, Cursor's two included quotas in `/usage`, and Cursor effort/fast variants folded into one model family. **Not** an accepted stable release. Requires authenticated `gh` to download the Actions artifact. | `%LOCALAPPDATA%\Polycode-Candidate` |
 | Preview | Published v0.2.1 Preview (2026-09-08). | `%LOCALAPPDATA%\Polycode-Preview-v0.2.1` |
 | Stable | Current Windows package from CI run [34380813272](https://github.com/Miku0139oao/Polycode/actions/runs/34380813272) (`bcc4eaf5`), including experimental `context_budget` / `computer_use`. **Not** a fully accepted stable release. | `%LOCALAPPDATA%\Polycode-Mainline` |
 

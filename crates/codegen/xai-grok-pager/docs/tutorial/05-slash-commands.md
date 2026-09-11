@@ -19,9 +19,13 @@ A few worth knowing on day one:
 | `/feedback` | Send feedback to the team |
 
 `/usage` lists every signed-in account: native xAI, ChatGPT, and Cursor.
-Each account keeps its own quota. Session token counts are not remaining
-quota. If a signed-in provider API does not return a usage limit, that
-account says so instead of inventing a percent.
+Each account keeps its own quota. Cursor shows the two included quotas its
+dashboard enforces, **Cursor Models** (Cursor Grok, Composer) and **Other
+Models**, rather than the older single dollar pool. Session token counts are
+not remaining quota, and ChatGPT/Cursor sessions report no per-call dollar
+cost because those models draw down the plan quota. If a signed-in provider
+API does not return a usage limit, that account says so instead of inventing
+a percent.
 
 Two of those deserve a second look:
 

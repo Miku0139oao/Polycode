@@ -49,7 +49,7 @@ try {
       // Signed-out startup never dispatches OAuth. Preserve raw VT evidence in
       // the workflow workspace even when a screen assertion fails.
       writeFileSync(`windows-smoke-terminal-${provider}.json`, JSON.stringify({ provider, output: terminal.output }));
-      result.observations.push({provider,exitCode:terminal.exitCode,forcedExit:!!terminal.forcedExit});
+      result.observations.push({provider,exitCode:terminal.exitCode,forcedExit:!!terminal.forcedExit,closeMs:terminal.closeMs,quitPresses:terminal.quitPresses});
     }
     assert.ok(!terminal.forcedExit,'Native terminal failed to exit normally');
     assert.equal(terminal.exitCode, 0, 'Native terminal exited with an error');

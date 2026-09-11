@@ -998,6 +998,22 @@ test('Cursor usage copies allowlisted dashboard fields and never invents a perce
     displayMessage: "You've used 46% of your usage limit",
     billingCycleEnd: '1771077734000',
   });
+  // Ultra dashboard: Cursor Models 9%, Other Models 32%, while the legacy included-dollar axis says "hit your usage limit".
+  assert.deepEqual(cursorAccountUsage({
+    billingCycleEnd: '1789411380000',
+    planUsage: { totalSpend: 40000, includedSpend: 40000, limit: 40000, autoPercentUsed: 9.02, apiPercentUsed: 32.4, totalPercentUsed: 12.07 },
+    displayMessage: "You've hit your usage limit",
+    autoModelSelectedDisplayMessage: "You've used 12% of your included total usage",
+  }, { planInfo: { planName: 'Ultra', price: '$200/mo', planOwner: 'PLAN_OWNER_STRIPE' } }), {
+    plan: 'Ultra',
+    quotas: [{ id: 'cursor_models', usedPercent: 9.02 }, { id: 'other_models', usedPercent: 32.4 }],
+    usedPercent: 12.07,
+    limitCents: 40000,
+    displayMessage: "You've hit your usage limit",
+    billingCycleEnd: '1789411380000',
+  });
+  assert.deepEqual(cursorAccountUsage({ planUsage: { apiPercentUsed: 3 } }, { planInfo: { planName: 'x'.repeat(65) } }), { quotas: [{ id: 'other_models', usedPercent: 3 }] });
+  assert.equal(cursorAccountUsage({ planUsage: { autoPercentUsed: -1, apiPercentUsed: 'many' } }), null);
   assert.equal(cursorAccountUsage({ planUsage: { totalSpend: 10 } }), null);
   assert.deepEqual(cursorAccountUsage({ planUsage: { totalSpend: 10, limit: 20 } }), { limitCents: 20 });
   assert.equal(cursorAccountUsage({ planUsage: { totalPercentUsed: 'full' } }), null);
@@ -1006,21 +1022,31 @@ test('Cursor usage copies allowlisted dashboard fields and never invents a perce
     email: 'secret@example.com',
   })).includes('secret'), false);
 });
-test('usage posts GetCurrentPeriodUsage on the official host', async t => {
+test('usage posts GetCurrentPeriodUsage and GetPlanInfo on the official host', async t => {
+  const calls = [];
   const instance = provider(t, { fetchImpl: async (url, options) => {
-    assert.equal(url, 'https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage');
+    calls.push(url);
+    assert.match(url, /^https:\/\/api2\.cursor\.sh\/aiserver\.v1\.DashboardService\/(GetCurrentPeriodUsage|GetPlanInfo)$/);
     assert.equal(options.method, 'POST');
     assert.equal(options.body, '{}');
     assert.equal(options.headers.authorization, `Bearer ${A.accessToken}`);
     assert.equal(options.headers['connect-protocol-version'], '1');
     assert.equal(options.redirect, 'error');
-    return Response.json({ planUsage: { totalPercentUsed: 8, limit: 1000, remaining: 920 }, displayMessage: 'ok' });
+    if (url.endsWith('GetPlanInfo')) return Response.json({ planInfo: { planName: 'Pro', price: '$20/mo' } });
+    return Response.json({ planUsage: { totalPercentUsed: 8, limit: 1000, remaining: 920, autoPercentUsed: 4, apiPercentUsed: 50 }, displayMessage: 'ok' });
   } });
-  assert.deepEqual(await instance.usage(A), { usedPercent: 8, limitCents: 1000, remainingCents: 920, displayMessage: 'ok' });
+  assert.deepEqual(await instance.usage(A), { plan: 'Pro', quotas: [{ id: 'cursor_models', usedPercent: 4 }, { id: 'other_models', usedPercent: 50 }], usedPercent: 8, limitCents: 1000, remainingCents: 920, displayMessage: 'ok' });
+  assert.deepEqual(calls.sort(), ['https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage', 'https://api2.cursor.sh/aiserver.v1.DashboardService/GetPlanInfo']);
+});
+test('usage survives a failed GetPlanInfo without a plan name', async t => {
+  const instance = provider(t, { fetchImpl: async url => url.endsWith('GetPlanInfo')
+    ? new Response('OFFLINE_SECRET', { status: 500 })
+    : Response.json({ planUsage: { autoPercentUsed: 1, apiPercentUsed: 2 } }) });
+  assert.deepEqual(await instance.usage(A), { quotas: [{ id: 'cursor_models', usedPercent: 1 }, { id: 'other_models', usedPercent: 2 }] });
 });
 test('usage failures do not leak upstream bodies or become a fake 0%', async t => {
   for (const response of [new Response('OFFLINE_SECRET', { status: 403 }), Response.json({ planUsage: { totalSpend: 1 } })]) {
-    const instance = provider(t, { fetchImpl: async () => response });
+    const instance = provider(t, { fetchImpl: async () => response.clone() });
     if (response.status === 403) {
       await assert.rejects(instance.usage(A), e => !e.message.includes('OFFLINE_SECRET'));
     } else {
@@ -1036,6 +1062,25 @@ test('models are dynamic canonical IDs only, deduplicated; unknown context stays
     return Response.json({ models: [{ modelId: 'canonical', displayModelId: 'alias', aliases: ['other'], displayName: 'Exact name' }, { modelId: 'canonical', displayName: 'Exact name' }, { modelId: 'another', contextWindow: 12345 }, { modelId: 'limited', displayName: 'Limited', contextTokenLimit: 272000 }] });
   } });
   assert.deepEqual(await instance.models(A), [{ id: 'canonical', name: 'Exact name', contextWindow: null }, { id: 'another', name: 'another', contextWindow: 12345 }, { id: 'limited', name: 'Limited', contextWindow: 272000 }]);
+});
+test('effort and fast catalog entries fold into one family that resolves back to Cursor IDs', async t => {
+  const instance = provider(t, { fetchImpl: async () => Response.json({ models: [
+    { modelId: 'gpt-5.3-codex', displayName: 'GPT-5.3 Codex', contextTokenLimit: 272000 },
+    { modelId: 'gpt-5.3-codex-fast', displayName: 'GPT-5.3 Codex Fast', contextTokenLimit: 272000 },
+    { modelId: 'gpt-5.3-codex-high', displayName: 'GPT-5.3 Codex High', contextTokenLimit: 272000 },
+    { modelId: 'gpt-5.3-codex-1m', displayName: 'GPT-5.3 Codex 1M', contextTokenLimit: 1000000 },
+    { modelId: 'composer-2.5', displayName: 'Composer 2.5' },
+    { modelId: 'composer-2.5-fast', displayName: 'Composer 2.5 Fast' },
+  ] }) });
+  const models = await instance.models(A);
+  assert.deepEqual(models.map(m => [m.id, m.name, m.contextWindow, m.supportsFast, m.defaultReasoningEffort]), [
+    ['gpt-5.3-codex', 'GPT-5.3 Codex', 272000, true, 'medium'],
+    ['gpt-5.3-codex-1m', 'GPT-5.3 Codex 1M', 1000000, undefined, undefined],
+    ['composer-2.5', 'Composer 2.5', null, true, undefined],
+  ]);
+  assert.deepEqual(models[0].reasoningEfforts.map(o => o.value), ['medium', 'high']);
+  assert.deepEqual(models[0].variants, { 'medium:std': 'gpt-5.3-codex', 'medium:fast': 'gpt-5.3-codex-fast', 'high:std': 'gpt-5.3-codex-high' });
+  assert.deepEqual(models[2].variants, { 'default:std': 'composer-2.5', 'default:fast': 'composer-2.5-fast' });
 });
 
 test('model failures are not hidden as a catalog/default/fallback', async t => {

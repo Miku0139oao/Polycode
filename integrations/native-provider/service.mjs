@@ -4,6 +4,7 @@ export { CredentialStore } from './store.mjs';
 import { catalogRevision, validateReasoningMetadata, validateSelectedEffort } from './model-settings.mjs';
 import { diagnostic } from './diagnostics.mjs';
 import { applyFast, FAST_HEADER, supportsFast } from './fast.mjs';
+import { resolveCursorVariant } from './cursor/variants.mjs';
 
 function waiter(promise, signal) {
   if (!signal) return promise;
@@ -18,6 +19,29 @@ const reply = data => Response.json(data, { headers: { 'Cache-Control': 'no-stor
 const failure = cause => ({ error: { message: cause.status ? cause.message : 'Subscription provider operation failed. Check login, quota and provider availability.', type: 'polycode_provider_error' } });
 const names = { codex: 'ChatGPT', cursor: 'Cursor' };
 const NO_QUOTA = 'This account API did not return a usage quota.';
+// Cursor encodes effort and fast mode in the model ID. Effort and fast were
+// already validated against the folded family, so translate them into the
+// concrete Cursor ID and drop the generic controls the Cursor transport rejects.
+function validateVariantMetadata(model) {
+  if (model.supportsFast !== undefined && typeof model.supportsFast !== 'boolean') throw new Error('Invalid catalog');
+  if (model.variants === undefined) return;
+  const entries = Object.entries(model.variants && typeof model.variants === 'object' && !Array.isArray(model.variants) ? model.variants : {});
+  if (!entries.length || entries.length > 32 || entries.some(([key, id]) => !/^(none|minimal|low|medium|high|xhigh|max|default):(fast|std)$/.test(key)
+    || typeof id !== 'string' || !id || id.length > 512 || /[\x00-\x1f\x7f]/.test(id))) throw new Error('Invalid catalog');
+}
+function selectCursorVariant(model, body) {
+  const effort = body.reasoning_effort ?? body.reasoning?.effort;
+  const fast = body.service_tier === 'priority';
+  const id = resolveCursorVariant(model, effort, fast);
+  if (id === undefined) {
+    const wanted = effort ?? model.defaultReasoningEffort;
+    throw error(`Cursor does not offer ${model.id}${wanted ? ` at effort ${wanted}` : ''}${fast ? ' in fast mode' : ' without fast mode'}; pick another effort or toggle /fast.`);
+  }
+  body.model = id;
+  delete body.reasoning_effort;
+  delete body.reasoning;
+  delete body.service_tier;
+}
 function finitePercent(value) {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1000 ? value : undefined;
 }
@@ -49,6 +73,16 @@ function sanitizeUsage(id, raw) {
   }
   if (id === 'cursor') {
     const usage = {};
+    if (typeof raw.plan === 'string' && raw.plan.length <= 64 && !/[\x00-\x1f\x7f]/.test(raw.plan)) usage.plan = raw.plan;
+    const seen = new Set();
+    const quotas = (Array.isArray(raw.quotas) ? raw.quotas : []).flatMap(quota => {
+      if (!quota || typeof quota !== 'object' || !['cursor_models', 'other_models'].includes(quota.id) || seen.has(quota.id)) return [];
+      const usedPercent = finitePercent(quota.usedPercent);
+      if (usedPercent === undefined) return [];
+      seen.add(quota.id);
+      return [{ id: quota.id, usedPercent }];
+    });
+    if (quotas.length) usage.quotas = quotas;
     const usedPercent = finitePercent(raw.usedPercent);
     if (usedPercent !== undefined) usage.usedPercent = usedPercent;
     const limitCents = nonNegativeInt(raw.limitCents);
@@ -112,7 +146,7 @@ export class NativeProviderService {
     if (!refresh && cached?.revision === snapshot.revision) return cached.models;
     const models = await this.providers[provider].models(snapshot.credential, { signal });
     if (!Array.isArray(models) || models.length > 500 || models.some(m => typeof m.id !== 'string' || !m.id || m.id.length > 512 || typeof m.name !== 'string' || m.name.length > 512 || /[\x00-\x1f\x7f]/.test(m.id + m.name) || (m.contextWindow !== null && (!Number.isSafeInteger(m.contextWindow) || m.contextWindow <= 0))) || new Set(models.map(m => m.id)).size !== models.length) throw new Error('Invalid catalog');
-    for (const model of models) validateReasoningMetadata(model);
+    for (const model of models) { validateReasoningMetadata(model); validateVariantMetadata(model); }
     if ((await this.store.snapshot(provider)).revision !== snapshot.revision) throw error('Account changed while loading models; refresh the catalog.', 409);
     this.catalogs.set(provider, { revision: snapshot.revision, models });
     return models;
@@ -234,6 +268,7 @@ export class NativeProviderService {
         if (!model) throw error('Model is not advertised by the selected provider');
         validateSelectedEffort(model, body);
         applyFast(provider, model, body, req.headers[FAST_HEADER]);
+        if (provider === 'cursor') selectCursorVariant(model, body);
         return this.providers[provider].complete(body, snapshot.credential, { signal });
       }
       throw error('Unknown bridge endpoint', 404);
