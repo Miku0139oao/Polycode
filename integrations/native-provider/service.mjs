@@ -49,6 +49,16 @@ function sanitizeUsage(id, raw) {
   }
   if (id === 'cursor') {
     const usage = {};
+    if (typeof raw.plan === 'string' && raw.plan.length <= 64 && !/[\x00-\x1f\x7f]/.test(raw.plan)) usage.plan = raw.plan;
+    const seen = new Set();
+    const quotas = (Array.isArray(raw.quotas) ? raw.quotas : []).flatMap(quota => {
+      if (!quota || typeof quota !== 'object' || !['cursor_models', 'other_models'].includes(quota.id) || seen.has(quota.id)) return [];
+      const usedPercent = finitePercent(quota.usedPercent);
+      if (usedPercent === undefined) return [];
+      seen.add(quota.id);
+      return [{ id: quota.id, usedPercent }];
+    });
+    if (quotas.length) usage.quotas = quotas;
     const usedPercent = finitePercent(raw.usedPercent);
     if (usedPercent !== undefined) usage.usedPercent = usedPercent;
     const limitCents = nonNegativeInt(raw.limitCents);

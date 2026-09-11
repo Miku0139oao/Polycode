@@ -13,11 +13,25 @@ function cycleEnd(value) {
   if (typeof value === 'string' && /^\d{10,16}$/.test(value)) return value;
   if (Number.isSafeInteger(value) && value > 0) return String(value);
 }
-/** Allowlisted Cursor dashboard quota fields only. Does not derive a percent from spend/limit. */
-export function cursorAccountUsage(data) {
+/**
+ * Allowlisted Cursor dashboard quota fields only. Does not derive a percent from spend/limit.
+ *
+ * Cursor plans carry two included quotas that the dashboard shows as "Cursor Models"
+ * (Cursor Grok, Composer; `autoPercentUsed`) and "Other Models" (`apiPercentUsed`).
+ * `totalPercentUsed` is Cursor's weighted aggregate of the two, and `displayMessage`
+ * describes the legacy included-dollar axis (`includedSpend / limit`), which reads
+ * "You've hit your usage limit" even while both quotas have room.
+ */
+export function cursorAccountUsage(data, planInfo) {
   if (!data || typeof data !== 'object') return null;
   const plan = data.planUsage && typeof data.planUsage === 'object' ? data.planUsage : {};
   const usage = {};
+  const planName = planInfo?.planInfo?.planName;
+  if (typeof planName === 'string' && planName.length && planName.length <= 64 && !/[\x00-\x1f\x7f]/.test(planName)) usage.plan = planName;
+  const quotas = [['cursor_models', plan.autoPercentUsed], ['other_models', plan.apiPercentUsed]]
+    .map(([id, value]) => [id, finitePercent(value)]).filter(([, value]) => value !== undefined)
+    .map(([id, usedPercent]) => ({ id, usedPercent }));
+  if (quotas.length) usage.quotas = quotas;
   const usedPercent = finitePercent(plan.totalPercentUsed);
   if (usedPercent !== undefined) usage.usedPercent = usedPercent;
   const limitCents = nonNegativeInt(plan.limit);
@@ -275,15 +289,20 @@ export function createCursorProvider({
     live(signal);
     const c = credential(input, now());
     const op = operation(signal, requestTimeoutMs);
-    try {
-      const response = await request(fetchImpl, `${API}/aiserver.v1.DashboardService/GetCurrentPeriodUsage`, {
+    const rpc = async method => {
+      const response = await request(fetchImpl, `${API}/aiserver.v1.DashboardService/${method}`, {
         method: 'POST',
         headers: { ...headers(c.accessToken, uuid(), now()), 'content-type': 'application/json', accept: 'application/json', 'connect-protocol-version': '1' },
         body: '{}',
         signal: op.signal,
       });
       if (!response.ok) { void response.body?.cancel().catch(() => {}); throw httpError(response.status); }
-      return cursorAccountUsage(await readJson(response, op.signal));
+      return readJson(response, op.signal);
+    };
+    try {
+      // The plan name is decoration: a failed GetPlanInfo must not hide the quota.
+      const [period, planInfo] = await Promise.all([rpc('GetCurrentPeriodUsage'), rpc('GetPlanInfo').catch(() => undefined)]);
+      return cursorAccountUsage(period, planInfo);
     } catch (e) { throw safeError(e); } finally { op.finish(); }
   }
 

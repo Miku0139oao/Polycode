@@ -143,6 +143,29 @@ pub struct AccountUsage {
     pub display_message: Option<String>,
     #[serde(default)]
     pub billing_cycle_end: Option<String>,
+    /// Cursor's two included quotas (`cursor_models`, `other_models`). When present they are
+    /// the plan's real limits; `used_percent`/`display_message` describe the legacy dollar axis.
+    #[serde(default)]
+    pub quotas: Vec<UsageQuota>,
+}
+
+/// One included-usage bucket as the provider dashboard reports it. Ids are allowlisted in [`Bridge::usage`].
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageQuota {
+    pub id: String,
+    pub used_percent: f64,
+}
+
+impl UsageQuota {
+    /// Dashboard wording for a bucket id; `None` for ids the pager does not know.
+    pub fn label(&self) -> Option<&'static str> {
+        match self.id.as_str() {
+            "cursor_models" => Some("Cursor Models (Cursor Grok, Composer)"),
+            "other_models" => Some("Other Models"),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -471,6 +494,15 @@ impl Bridge {
             }
             if provider.id == ProviderId::Codex && usage.windows.is_empty() {
                 return Err("Invalid bridge usage report".into());
+            }
+            let mut quotas = std::collections::HashSet::new();
+            for quota in &usage.quotas {
+                if quota.label().is_none()
+                    || !quotas.insert(quota.id.as_str())
+                    || !Self::finite_percent(quota.used_percent)
+                {
+                    return Err("Invalid bridge usage report".into());
+                }
             }
         }
         Ok(())
@@ -1317,6 +1349,8 @@ mod tests {
                         "windows":[{"id":"primary","usedPercent":12.5,"windowSeconds":18000,"resetAt":1778670307}]
                     }},
                     {"id":"cursor","name":"Cursor","loggedIn":true,"usage":{
+                        "plan":"Ultra",
+                        "quotas":[{"id":"cursor_models","usedPercent":9.02},{"id":"other_models","usedPercent":32.4}],
                         "usedPercent":15.48,"limitCents":40000,"remainingCents":16778,
                         "displayMessage":"You've used 46% of your usage limit",
                         "billingCycleEnd":"1771077734000"
@@ -1328,9 +1362,19 @@ mod tests {
         let bridge = Bridge::new(&origin, "usage-fixture-token".into()).unwrap();
         let report = bridge.usage().await.unwrap();
         assert_eq!(report.providers[0].usage.as_ref().unwrap().plan.as_deref(), Some("plus"));
+        let cursor = report.providers[1].usage.as_ref().unwrap();
+        assert_eq!(cursor.remaining_cents, Some(16778));
+        assert_eq!(cursor.plan.as_deref(), Some("Ultra"));
         assert_eq!(
-            report.providers[1].usage.as_ref().unwrap().remaining_cents,
-            Some(16778)
+            cursor
+                .quotas
+                .iter()
+                .map(|q| (q.label().unwrap(), q.used_percent))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Cursor Models (Cursor Grok, Composer)", 9.02),
+                ("Other Models", 32.4)
+            ]
         );
         let requests = server.join().unwrap();
         assert!(requests[0].starts_with("GET /control/usage "));
@@ -1354,6 +1398,17 @@ mod tests {
         }))
         .unwrap();
         assert!(bridge.validate_usage(&invented).is_err());
+        for quotas in [
+            serde_json::json!([{"id":"on_demand","usedPercent":1.0}]),
+            serde_json::json!([{"id":"cursor_models","usedPercent":1.0},{"id":"cursor_models","usedPercent":2.0}]),
+            serde_json::json!([{"id":"other_models","usedPercent":-3.0}]),
+        ] {
+            let bad = serde_json::from_value::<UsageReport>(serde_json::json!({
+                "providers":[{"id":"cursor","name":"Cursor","loggedIn":true,"usage":{"quotas":quotas}}]
+            }))
+            .unwrap();
+            assert!(bridge.validate_usage(&bad).is_err(), "{quotas}");
+        }
     }
     #[test]
     fn model_settings_invalid_default_is_not_silently_dropped() {
