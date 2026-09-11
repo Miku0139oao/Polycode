@@ -26,7 +26,10 @@ impl UsageProvider {
         match xai_grok_shell::polycode::registered_model_provider(id) {
             Some(RegisteredModelProvider::NativeGrok) => Self::NativeGrok,
             Some(RegisteredModelProvider::Subscription(provider)) => Self::Subscription(provider),
-            None => Self::Unavailable,
+            None => match xai_grok_shell::polycode::logged_in_subscription(id) {
+                Some(provider) => Self::Subscription(provider),
+                None => Self::Unavailable,
+            },
         }
     }
 
@@ -63,8 +66,9 @@ impl UsageProvider {
     }
 
     pub(crate) fn heading(self, model: Option<&str>) -> Vec<String> {
-        let mut lines = vec![format!("Active provider: {}", self.label())];
-        lines.push(format!("Active model: {}", model.unwrap_or("unavailable")));
-        lines
+        vec![
+            format!("Active model: {}", model.unwrap_or("unavailable")),
+            format!("Active provider: {}", self.label()),
+        ]
     }
 }

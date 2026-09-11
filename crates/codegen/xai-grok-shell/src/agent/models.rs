@@ -1160,6 +1160,31 @@ impl ModelsManager {
             .await
     }
 
+    /// User-requested refetch of the native Grok catalog (the `/provider` "Refresh models" action).
+    ///
+    /// The startup fetch and its retry ladder are the only other paths that pull the remote list; when
+    /// they failed (offline, VPN, auth still refreshing) the catalog stays at the bundled fallback until
+    /// the next token refresh. Returns whether a real remote catalog is loaded afterwards. Skips the
+    /// request when the endpoint needs a session and none exists (it would only 401).
+    pub(crate) async fn refresh_native_catalog(&self) -> bool {
+        let needs_session = *self.inner.fetch_auth.read() == ModelFetchAuth::Session;
+        if needs_session && self.inner.auth_manager.current_or_expired().is_none() {
+            tracing::info!("native model catalog refresh skipped: signed out of Grok");
+            return false;
+        }
+        self.fetch_and_apply().await;
+        let has_real_catalog = self.inner.catalog.read().has_fetched_real_catalog;
+        xai_grok_telemetry::unified_log::info(
+            "model catalog: user refresh finished",
+            None,
+            Some(serde_json::json!({
+                "has_real_catalog": has_real_catalog,
+                "model_count": self.available().len(),
+            })),
+        );
+        has_real_catalog
+    }
+
     async fn fetch_and_apply_inner(&self, remote_fetch_enabled: bool) {
         if !remote_fetch_enabled {
             tracing::info!("model catalog refresh skipped: remote_fetch disabled");

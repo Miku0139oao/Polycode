@@ -1,10 +1,11 @@
 # One-line Windows Preview installation
 
 For Windows x64 with 64-bit PowerShell 5.1 or PowerShell 7, the interactive
-install/update menu (Stable or Preview) is:
+install / update / switch / list / uninstall menu (Candidate, Preview or Stable)
+is:
 
 ```powershell
-irm https://raw.githubusercontent.com/Miku0139oao/Polycode/cursor/one-click-install-b060/install-mainline.ps1 | iex
+irm https://raw.githubusercontent.com/Miku0139oao/Polycode/fix/windows-terminal-ci/install-mainline.ps1 | iex
 ```
 
 This page documents the dedicated Preview-only one-liner, which still pins the

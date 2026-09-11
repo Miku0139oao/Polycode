@@ -1149,6 +1149,59 @@ impl SessionActor {
         }
     }
 
+    /// Window to compact against when a subscription (bridge) model rejects the request for length.
+    ///
+    /// Bridge routes never return `x-grok-context-window`, so [`Self::should_compact_on_error`] can
+    /// never fire for them; the server's own context-length message is the overflow signal. The
+    /// estimate the request failed at bounds the window from above; it is recorded so later turns
+    /// budget and auto-compact against a measured value instead of the placeholder.
+    ///
+    /// A second rejection in the same prompt while the estimate sits under the learned bound means the
+    /// compacted history still does not fit: return `None` and let the error surface rather than loop.
+    async fn bridge_overflow_window(
+        &self,
+        error: &xai_grok_sampler::SamplingErrorInfo,
+    ) -> Option<u64> {
+        if self.compaction.is_suppressed()
+            || !xai_grok_sampling_types::is_context_length_error(&error.message)
+        {
+            return None;
+        }
+        let cfg = self.chat_state_handle.get_sampling_config().await?;
+        if !crate::polycode::is_bridge_endpoint(&cfg.base_url) {
+            return None;
+        }
+        let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
+        if estimated_total == 0 {
+            return None;
+        }
+        let known = crate::polycode::known_context_window(&cfg.base_url, &cfg.model);
+        let prompt_index = self.chat_state_handle.get_prompt_index().await;
+        let compacted_this_prompt = self
+            .chat_state_handle
+            .get_last_compaction_prompt_index()
+            .await
+            == Some(prompt_index);
+        if compacted_this_prompt && known.is_some_and(|bound| estimated_total < bound) {
+            tracing::warn!(
+                estimated_total,
+                learned_window = known,
+                model = %cfg.model,
+                "bridge context-length rejection after compaction in this prompt; not compacting again"
+            );
+            return None;
+        }
+        let window = known.map_or(estimated_total, |bound| bound.min(estimated_total));
+        crate::polycode::learn_context_window(&cfg.base_url, &cfg.model, window);
+        tracing::info!(
+            estimated_total,
+            window,
+            model = %cfg.model,
+            "bridge context-length rejection; compacting against the rejected estimate"
+        );
+        Some(window)
+    }
+
     /// Classify a terminal sampler failure and decide recovery.
     /// `transient`: turn-loop retry state (the loop owns the counters).
     pub(crate) async fn handle_sampling_failure(
@@ -1233,13 +1286,15 @@ impl SessionActor {
         // Never compact mid-salvage: the rewrite would drop the continue reminder and split the joined report
         // Genuine overflows already completed truncated in the quiet arm above
         // The remaining mid-salvage kinds (rate limit) take their terminal arms below
-        if !mid_salvage_continuation && self.should_compact_on_error(&error).await {
-            // SAFETY: `should_compact_on_error` returned true only when `model_metadata.context_window` was Some(>0)
-            let cw = error
-                .model_metadata
-                .as_ref()
-                .and_then(|m| m.context_window)
-                .expect("should_compact_on_error guarantees context_window");
+        let overflow_window = if mid_salvage_continuation {
+            None
+        } else if self.should_compact_on_error(&error).await {
+            // `should_compact_on_error` returned true only when `model_metadata.context_window` was Some(>0)
+            error.model_metadata.as_ref().and_then(|m| m.context_window)
+        } else {
+            self.bridge_overflow_window(&error).await
+        };
+        if let Some(cw) = overflow_window {
             {
                 let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
                 let percentage = xai_token_estimation::usage_percentage_u8(total_tokens, cw);

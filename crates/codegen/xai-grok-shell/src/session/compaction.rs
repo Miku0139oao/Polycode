@@ -24,8 +24,8 @@ use agent_client_protocol as acp;
 use std::sync::Arc;
 use xai_chat_state::compaction_utils::{
     CompactedHistoryInput, CompactionAttempt, build_compacted_history, is_degenerate_summary,
-    prepare_conversation_for_verbatim_summarization, sanitize_compacted_history,
-    validate_compacted_history,
+    prepare_conversation_for_verbatim_summarization, restate_user_query_after_summary,
+    sanitize_compacted_history, validate_compacted_history,
 };
 use xai_grok_sampling_types::{ApiBackend, ConversationItem};
 /// Prefix on the early-guard failure payloads below; the user-facing normalizer strips it (the renderer prepends its own headline).
@@ -951,6 +951,10 @@ impl SessionActor {
                 .as_ref()
                 .map(|c| c.api_backend == ApiBackend::Messages)
                 .unwrap_or(false);
+            // Subscription models answer the last user message; make that the request, not the summary carrier.
+            let query_after_summary = sampling_config.as_ref().is_some_and(|c| {
+                xai_grok_sampler::local_transport::subscription_provider(&c.base_url).is_some()
+            });
             let model_id = sampling_config.map(|c| c.model).unwrap_or_default();
             let compaction = xai_grok_telemetry::events::CompactionScope::begin(
                 xai_grok_telemetry::events::CompactionBeginParams {
@@ -1732,7 +1736,14 @@ impl SessionActor {
                 .count
                 .load(std::sync::atomic::Ordering::Relaxed);
             let apply_start = std::time::Instant::now();
-            let raw_compacted = build_compacted_history(CompactedHistoryInput {
+            let shape_for_model = |items: Vec<ConversationItem>| {
+                if query_after_summary {
+                    restate_user_query_after_summary(items)
+                } else {
+                    items
+                }
+            };
+            let raw_compacted = shape_for_model(build_compacted_history(CompactedHistoryInput {
                 system_message: system_message.clone(),
                 user_message_prefix: user_message_prefix.clone(),
                 agents_md_reminder: agents_md_reminder.clone(),
@@ -1742,7 +1753,7 @@ impl SessionActor {
                 summary_before_recent: use_short_prompt,
                 transcript_hint: transcript_hint.clone(),
                 summary_count,
-            });
+            }));
             let sanitize_result = sanitize_compacted_history(raw_compacted);
             let compacted_history = if sanitize_result.stripped_tool_call_ids.is_empty() {
                 sanitize_result.items
@@ -1766,7 +1777,7 @@ impl SessionActor {
                     "compaction: sanitized history still has invalid ToolResults -- \
                      falling back to minimal compacted history (no recent_messages)"
                 );
-                build_compacted_history(CompactedHistoryInput {
+                shape_for_model(build_compacted_history(CompactedHistoryInput {
                     system_message,
                     user_message_prefix,
                     agents_md_reminder,
@@ -1776,7 +1787,7 @@ impl SessionActor {
                     summary_before_recent: use_short_prompt,
                     transcript_hint,
                     summary_count,
-                })
+                }))
             };
             let post_compaction_ms = apply_start.elapsed().as_millis() as u64;
             let prompt_index_at_compaction = self.chat_state_handle.get_prompt_index().await;
@@ -2019,16 +2030,13 @@ impl SessionActor {
         {
             return None;
         }
-        let sampling_cfg = self.chat_state_handle.get_sampling_config().await;
-        let context_window = sampling_cfg.as_ref().map(|c| c.context_window)?;
-        let cw = context_window.get();
-        let model = sampling_cfg
-            .as_ref()
-            .map(|c| c.model.clone())
-            .unwrap_or_default();
+        let sampling_cfg = self.chat_state_handle.get_sampling_config().await?;
+        let measured = self.measured_context_window(&sampling_cfg);
+        let model = sampling_cfg.model.clone();
         let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
+        // An unmeasured window reports 0 so consumers show "unknown" instead of a percentage of the placeholder.
         self.signals_handle()
-            .update_context_usage(estimated_total, cw);
+            .update_context_usage(estimated_total, measured.map_or(0, |cw| cw.get()));
         if self.compaction.is_suppressed() {
             return None;
         }
@@ -2043,6 +2051,8 @@ impl SessionActor {
             )
             .is_ok()
         {
+            // Debug trigger: budget the compaction against whatever the config holds.
+            let cw = sampling_cfg.context_window.get();
             let percentage = xai_token_estimation::usage_percentage_u8(estimated_total, cw);
             tracing::info!(
                 "Forced auto-compact trigger (debug): model={model}, \
@@ -2054,6 +2064,8 @@ impl SessionActor {
                 percentage,
             });
         }
+        // No threshold against an unmeasured window: the server's own rejection compacts instead.
+        let context_window = measured?;
         if let Some(trigger_info) = self.should_auto_compact(estimated_total, context_window) {
             tracing::info!(
                 "Pre-sampling auto-compact trigger: model={model}, \
@@ -2073,7 +2085,7 @@ impl SessionActor {
         }
         let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
         let cfg = self.chat_state_handle.get_sampling_config().await?;
-        let cw = cfg.context_window.get();
+        let cw = self.measured_context_window(&cfg)?.get();
         if estimated_total <= cw {
             return None;
         }
@@ -2113,11 +2125,15 @@ impl SessionActor {
         self.compaction
             .auto_compact_suppressed
             .store(SUPPRESS_NONE, std::sync::atomic::Ordering::Relaxed);
-        if prev.context_window <= cfg.context_window.get() {
+        let Some(context_window) = self.measured_context_window(&cfg) else {
+            return Ok(());
+        };
+        // `prev.context_window == 0` means the previous window was unmeasured: no shrink shortcut, let the threshold decide.
+        if prev.context_window != 0 && prev.context_window <= context_window.get() {
             return Ok(());
         }
         let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
-        let Some(trigger_info) = self.should_auto_compact(total_tokens, cfg.context_window) else {
+        let Some(trigger_info) = self.should_auto_compact(total_tokens, context_window) else {
             return Ok(());
         };
         tracing::info!(
@@ -2125,7 +2141,7 @@ impl SessionActor {
             prev.model_slug,
             prev.context_window,
             cfg.model,
-            cfg.context_window.get(),
+            context_window.get(),
             trigger_info.percentage,
         );
         if let Err(e) = self.run_compact_only(trigger_info, false).await {
@@ -2142,10 +2158,24 @@ impl SessionActor {
             self.compaction.previous_model.set(Some(
                 crate::session::compaction_config::PreviousModelInfo {
                     model_slug: cfg.model.clone(),
-                    context_window: cfg.context_window.get(),
+                    // 0 marks an unmeasured window so the switch path cannot compare against the placeholder.
+                    context_window: self.measured_context_window(&cfg).map_or(0, |cw| cw.get()),
                 },
             ));
         }
+    }
+    /// The window to budget `cfg` against, or `None` while it is unmeasured.
+    ///
+    /// Native models always carry a catalog window. A subscription (bridge) model whose catalog omits
+    /// one holds the 200k placeholder in `cfg.context_window`; treating that as real would compact a
+    /// larger model early and report a made-up percentage. `GROK_DEBUG_CONTEXT_WINDOW` is authoritative.
+    pub(crate) fn measured_context_window(
+        &self,
+        cfg: &xai_grok_sampling_types::SamplingConfig,
+    ) -> Option<std::num::NonZeroU64> {
+        (self.compaction.context_window_override.is_some()
+            || crate::polycode::context_window_known(&cfg.base_url, &cfg.model))
+        .then_some(cfg.context_window)
     }
     /// Compact without auto-continue. The outer turn loop rebuilds and retries.
     /// Emits telemetry (`auto_compact_fired`) and UI notifications automatically.

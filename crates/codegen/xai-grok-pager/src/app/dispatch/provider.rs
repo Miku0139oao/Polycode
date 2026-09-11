@@ -120,7 +120,7 @@ fn menu(app: &mut AppView) {
     }
     options.push(option(
         "Refresh models",
-        "Refresh the subscription model catalog",
+        "Refetch the Grok (native) and subscription model catalogs",
         "refresh",
     ));
     card(
@@ -160,10 +160,16 @@ fn models(app: &mut AppView, _provider: Choice) {
             } else {
                 "Grok native"
             };
+            let short = model
+                .name
+                .split_once(" / ")
+                .map(|(_, rest)| rest.trim())
+                .filter(|rest| !rest.is_empty())
+                .unwrap_or(model.name.as_str());
             crate::slash::command::ArgItem {
-                display: format!("{} [{}]", model.name, id.0),
+                display: format!("{short} [{}]", id.0),
                 description: provider.into(),
-                match_text: format!("{provider} {} {}", model.name, id.0),
+                match_text: format!("{provider} {} {short} {}", model.name, id.0),
                 insert_text: id.0.to_string(),
             }
         })

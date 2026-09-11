@@ -16,7 +16,53 @@ const error = (message, status = 400) => Object.assign(new Error(message), { sta
 const json = (res, status, data) => { res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data)); };
 const reply = data => Response.json(data, { headers: { 'Cache-Control': 'no-store' } });
 const failure = cause => ({ error: { message: cause.status ? cause.message : 'Subscription provider operation failed. Check login, quota and provider availability.', type: 'polycode_provider_error' } });
-const names = { codex: 'OpenAI / ChatGPT subscription', cursor: 'Cursor subscription (experimental)' };
+const names = { codex: 'ChatGPT', cursor: 'Cursor' };
+const NO_QUOTA = 'This account API did not return a usage quota.';
+function finitePercent(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1000 ? value : undefined;
+}
+function positiveInt(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+function nonNegativeInt(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+function sanitizeWindow(raw) {
+  if (!raw || typeof raw !== 'object' || !['primary', 'secondary'].includes(raw.id)) return;
+  const usedPercent = finitePercent(raw.usedPercent);
+  if (usedPercent === undefined) return;
+  const window = { id: raw.id, usedPercent };
+  const windowSeconds = positiveInt(raw.windowSeconds);
+  if (windowSeconds !== undefined && windowSeconds <= 366 * 24 * 3600) window.windowSeconds = windowSeconds;
+  const resetAt = positiveInt(raw.resetAt);
+  if (resetAt !== undefined) window.resetAt = resetAt;
+  return window;
+}
+function sanitizeUsage(id, raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  if (id === 'codex') {
+    const windows = Array.isArray(raw.windows) ? raw.windows.map(sanitizeWindow).filter(Boolean).slice(0, 2) : [];
+    if (!windows.length) return null;
+    const usage = { windows };
+    if (typeof raw.plan === 'string' && raw.plan.length <= 64 && !/[\x00-\x1f\x7f]/.test(raw.plan)) usage.plan = raw.plan;
+    return usage;
+  }
+  if (id === 'cursor') {
+    const usage = {};
+    const usedPercent = finitePercent(raw.usedPercent);
+    if (usedPercent !== undefined) usage.usedPercent = usedPercent;
+    const limitCents = nonNegativeInt(raw.limitCents);
+    if (limitCents !== undefined) usage.limitCents = limitCents;
+    const remainingCents = nonNegativeInt(raw.remainingCents);
+    if (remainingCents !== undefined) usage.remainingCents = remainingCents;
+    if (typeof raw.displayMessage === 'string' && raw.displayMessage.length <= 240 && !/[\x00-\x1f\x7f]/.test(raw.displayMessage)) {
+      usage.displayMessage = raw.displayMessage;
+    }
+    if (typeof raw.billingCycleEnd === 'string' && /^\d{10,16}$/.test(raw.billingCycleEnd)) usage.billingCycleEnd = raw.billingCycleEnd;
+    return Object.keys(usage).length ? usage : null;
+  }
+  return null;
+}
 const ALLOWED = new Set(['auth.openai.com', 'cursor.com']);
 // Only fixed diagnostic codes cross the control boundary, never provider payloads or disk paths.
 const LOGIN_FAILURE_CODES = new Set(['authentication_error', 'invalid_credential', 'expired_credential',
@@ -90,6 +136,27 @@ export class NativeProviderService {
     }
     return { providers };
   }
+  async usage(signal) {
+    const providers = [];
+    for (const id of Object.keys(this.providers)) {
+      let loggedIn = false, usage, message;
+      try { loggedIn = Boolean(await this.store.get(id)); }
+      catch (cause) { message = diagnostic(cause, 'credential storage'); }
+      if (loggedIn) {
+        try {
+          const snapshot = await this.credentialSnapshot(id, signal);
+          if (typeof this.providers[id].usage !== 'function') {
+            message = NO_QUOTA;
+          } else {
+            usage = sanitizeUsage(id, await this.providers[id].usage(snapshot.credential, { signal }));
+            if (!usage) message = NO_QUOTA;
+          }
+        } catch (cause) { message = diagnostic(cause, 'usage lookup'); }
+      }
+      providers.push({ id, name: names[id], loggedIn, ...(usage ? { usage } : {}), ...(message ? { message } : {}) });
+    }
+    return { providers };
+  }
   async login(provider) {
     if (!this.providers[provider]) throw error('Unknown subscription provider');
     for (const old of this.attempts.values()) if (old.provider === provider && old.state === 'pending') this.cancel(old);
@@ -127,6 +194,7 @@ export class NativeProviderService {
       if (req.headers.origin || req.headers.host !== new URL(this.url).host || !req.url?.startsWith('/') || Buffer.byteLength(auth) !== Buffer.byteLength(expected) || !timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) throw error('Unauthorized local bridge request', 401);
       const url = new URL(req.url, this.url);
       if (req.method === 'GET' && url.pathname === '/control/catalog') return reply(await this.catalog(false, signal));
+      if (req.method === 'GET' && url.pathname === '/control/usage') return reply(await this.usage(signal));
       if (req.method === 'POST' && url.pathname === '/control/refresh') { await readBody(); return reply(await this.catalog(true, signal)); }
       if (req.method === 'POST' && url.pathname === '/control/fast-capability') {
         const b = await readBody();

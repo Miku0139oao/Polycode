@@ -230,10 +230,14 @@ impl SessionActor {
                 .unwrap_or_else(|| sampling_config.model.clone()),
         );
         let new_context_window = self.compaction.context_window_override.unwrap_or_else(|| {
-            std::num::NonZeroU64::new(sampling_config.context_window).unwrap_or_else(|| {
-                std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW)
-                    .expect("DEFAULT_CONTEXT_WINDOW is non-zero")
-            })
+            // A bridge model's catalog entry may omit the window; a bound learned from a length rejection beats the placeholder.
+            crate::polycode::known_context_window(&sampling_config.base_url, &sampling_config.model)
+                .and_then(std::num::NonZeroU64::new)
+                .or_else(|| std::num::NonZeroU64::new(sampling_config.context_window))
+                .unwrap_or_else(|| {
+                    std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW)
+                        .expect("DEFAULT_CONTEXT_WINDOW is non-zero")
+                })
         });
         let prev_threshold = self.compaction.threshold_percent.get();
         if prev_threshold != auto_compact_threshold_percent {
@@ -292,6 +296,10 @@ impl SessionActor {
             .auth_manager
             .as_ref()
             .and_then(|am| am.current_or_expired().map(|a| a.key));
+        // The context bar must follow the new model's window right away, not at the next turn's compaction check.
+        let switched_context_window = self
+            .measured_context_window(&next_sampling)
+            .map_or(0, |cw| cw.get());
         self.chat_state_handle
             .update_sampling_config_and_credentials(next_sampling, xai_chat_state::Credentials {
                 api_key: sampling_config.api_key.clone(),
@@ -312,6 +320,9 @@ impl SessionActor {
         self.invalidate_model_auth_memo();
         self.signals_handle()
             .record_model_usage(&sampling_config.model);
+        let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
+        self.signals_handle()
+            .update_context_usage(estimated_total, switched_context_window);
         if apply_prompt_override && !skip_prompt_rewrite {
             let mut conversation = self.chat_state_handle.get_conversation().await;
             for item in conversation.iter_mut() {

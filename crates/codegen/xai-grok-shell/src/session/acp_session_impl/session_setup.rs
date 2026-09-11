@@ -584,7 +584,11 @@ impl SessionActor {
     pub(super) async fn build_session_info(&self) -> SessionInfoData {
         let config = self.chat_state_handle.get_sampling_config().await;
         let model = config.as_ref().map(|c| c.model.clone());
-        let context_window = config.as_ref().map(|c| c.context_window.get()).unwrap_or(0);
+        // 0 for an unmeasured (bridge) window: `/context` must not present the placeholder as capacity.
+        let context_window = config
+            .as_ref()
+            .and_then(|c| self.measured_context_window(c))
+            .map_or(0, |cw| cw.get());
         let model_metadata = self.chat_state_handle.get_last_model_metadata().await;
         let total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
         let counts = self.chat_state_handle.get_conversation_counts().await;

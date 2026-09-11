@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { createCursorProvider } from './index.mjs';
+import { createCursorProvider, cursorAccountUsage } from './index.mjs';
 import { Connection } from './transport.mjs';
 import * as p from './protocol.mjs';
 import { gifBase64, gifHex, historyHex, userImageHex, usageFrameHex, userRuleHex } from './wire-fixtures.mjs';
@@ -964,6 +964,11 @@ test('auth polling cancels via signal and close; no further poll', async t => {
   }
 });
 
+test('refresh does not rotate an opaque token that has no known expiry', async t => {
+  const instance = provider(t, { fetchImpl: async () => assert.fail('must not refresh when expiry is unknown') });
+  const original = { accessToken: 'OFFLINE_OPAQUE_ACCESS', refreshToken: 'OFFLINE_REFRESH_A' };
+  assert.deepEqual(await instance.refresh(original), original);
+});
 test('refresh uses official bearer refresh endpoint; rotation is plain caller-owned data', async t => {
   const original = { ...A, expiresAt: 1 };
   const instance = provider(t, { fetchImpl: async (url, options) => {
@@ -977,17 +982,60 @@ test('refresh uses official bearer refresh endpoint; rotation is plain caller-ow
   assert.equal(result.accessToken, 'OFFLINE_NEW_ACCESS');
   assert.equal(result.refreshToken, 'OFFLINE_NEW_REFRESH');
   assert.equal(original.accessToken, A.accessToken);
-  await assert.rejects(instance.refresh(B), e => e.code === 'refresh_unavailable');
+  await assert.rejects(instance.refresh({ ...B, expiresAt: 1 }), e => e.code === 'refresh_unavailable');
 });
 
+test('Cursor usage copies allowlisted dashboard fields and never invents a percent', () => {
+  assert.deepEqual(cursorAccountUsage({
+    billingCycleEnd: '1771077734000',
+    planUsage: { totalPercentUsed: 15.48, limit: 40000, remaining: 16778, totalSpend: 23222 },
+    displayMessage: "You've used 46% of your usage limit",
+    email: 'secret@example.com',
+  }), {
+    usedPercent: 15.48,
+    limitCents: 40000,
+    remainingCents: 16778,
+    displayMessage: "You've used 46% of your usage limit",
+    billingCycleEnd: '1771077734000',
+  });
+  assert.equal(cursorAccountUsage({ planUsage: { totalSpend: 10 } }), null);
+  assert.deepEqual(cursorAccountUsage({ planUsage: { totalSpend: 10, limit: 20 } }), { limitCents: 20 });
+  assert.equal(cursorAccountUsage({ planUsage: { totalPercentUsed: 'full' } }), null);
+  assert.equal(JSON.stringify(cursorAccountUsage({
+    planUsage: { totalPercentUsed: 1 },
+    email: 'secret@example.com',
+  })).includes('secret'), false);
+});
+test('usage posts GetCurrentPeriodUsage on the official host', async t => {
+  const instance = provider(t, { fetchImpl: async (url, options) => {
+    assert.equal(url, 'https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage');
+    assert.equal(options.method, 'POST');
+    assert.equal(options.body, '{}');
+    assert.equal(options.headers.authorization, `Bearer ${A.accessToken}`);
+    assert.equal(options.headers['connect-protocol-version'], '1');
+    assert.equal(options.redirect, 'error');
+    return Response.json({ planUsage: { totalPercentUsed: 8, limit: 1000, remaining: 920 }, displayMessage: 'ok' });
+  } });
+  assert.deepEqual(await instance.usage(A), { usedPercent: 8, limitCents: 1000, remainingCents: 920, displayMessage: 'ok' });
+});
+test('usage failures do not leak upstream bodies or become a fake 0%', async t => {
+  for (const response of [new Response('OFFLINE_SECRET', { status: 403 }), Response.json({ planUsage: { totalSpend: 1 } })]) {
+    const instance = provider(t, { fetchImpl: async () => response });
+    if (response.status === 403) {
+      await assert.rejects(instance.usage(A), e => !e.message.includes('OFFLINE_SECRET'));
+    } else {
+      assert.equal(await instance.usage(A), null);
+    }
+  }
+});
 test('models are dynamic canonical IDs only, deduplicated; unknown context stays null', async t => {
   const instance = provider(t, { fetchImpl: async (url, options) => {
     assert.equal(url, 'https://api2.cursor.sh/aiserver.v1.AiService/GetUsableModels');
     assert.equal(options.headers.authorization, `Bearer ${A.accessToken}`);
     assert.equal(options.headers['connect-protocol-version'], '1');
-    return Response.json({ models: [{ modelId: 'canonical', displayModelId: 'alias', aliases: ['other'], displayName: 'Exact name' }, { modelId: 'canonical', displayName: 'Exact name' }, { modelId: 'another', contextWindow: 12345 }] });
+    return Response.json({ models: [{ modelId: 'canonical', displayModelId: 'alias', aliases: ['other'], displayName: 'Exact name' }, { modelId: 'canonical', displayName: 'Exact name' }, { modelId: 'another', contextWindow: 12345 }, { modelId: 'limited', displayName: 'Limited', contextTokenLimit: 272000 }] });
   } });
-  assert.deepEqual(await instance.models(A), [{ id: 'canonical', name: 'Exact name', contextWindow: null }, { id: 'another', name: 'another', contextWindow: 12345 }]);
+  assert.deepEqual(await instance.models(A), [{ id: 'canonical', name: 'Exact name', contextWindow: null }, { id: 'another', name: 'another', contextWindow: 12345 }, { id: 'limited', name: 'Limited', contextWindow: 272000 }]);
 });
 
 test('model failures are not hidden as a catalog/default/fallback', async t => {
@@ -1050,7 +1098,7 @@ test('refresh/models cancellation interrupts noncooperative injected fetch witho
   const instance = provider(t, { fetchImpl: () => new Promise(() => {}) });
   for (const method of ['models', 'refresh']) {
     const abort = new AbortController();
-    const pending = instance[method](A, { signal: abort.signal });
+    const pending = instance[method](method === 'refresh' ? { ...A, expiresAt: 1 } : A, { signal: abort.signal });
     abort.abort('OFFLINE_SECRET_REASON');
     await assert.rejects(pending, e => e.code === 'cancelled' && !e.message.includes('OFFLINE_SECRET'));
   }

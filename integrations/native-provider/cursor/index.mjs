@@ -3,6 +3,34 @@ import { CursorProviderError, fail, safeError, checkSignal, onAbort, delay, erro
 import { API, WEBSITE, Connection, headers, request, httpError, readJson } from './transport.mjs';
 import { validateMessages } from './content.mjs';
 
+function finitePercent(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1000 ? value : undefined;
+}
+function nonNegativeInt(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+function cycleEnd(value) {
+  if (typeof value === 'string' && /^\d{10,16}$/.test(value)) return value;
+  if (Number.isSafeInteger(value) && value > 0) return String(value);
+}
+/** Allowlisted Cursor dashboard quota fields only. Does not derive a percent from spend/limit. */
+export function cursorAccountUsage(data) {
+  if (!data || typeof data !== 'object') return null;
+  const plan = data.planUsage && typeof data.planUsage === 'object' ? data.planUsage : {};
+  const usage = {};
+  const usedPercent = finitePercent(plan.totalPercentUsed);
+  if (usedPercent !== undefined) usage.usedPercent = usedPercent;
+  const limitCents = nonNegativeInt(plan.limit);
+  if (limitCents !== undefined) usage.limitCents = limitCents;
+  const remainingCents = nonNegativeInt(plan.remaining);
+  if (remainingCents !== undefined) usage.remainingCents = remainingCents;
+  if (typeof data.displayMessage === 'string' && data.displayMessage.length <= 240 && !/[\x00-\x1f\x7f]/.test(data.displayMessage)) {
+    usage.displayMessage = data.displayMessage;
+  }
+  const billingCycleEnd = cycleEnd(data.billingCycleEnd);
+  if (billingCycleEnd) usage.billingCycleEnd = billingCycleEnd;
+  return Object.keys(usage).length ? usage : null;
+}
 export { CursorProviderError };
 const invalid = () => fail('invalid_request', 'Invalid or unsupported Chat Completions request.', 400);
 const object = x => x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -17,6 +45,12 @@ function json(value, depth = 0) {
   throw invalid();
 }
 const hash = value => createHash('sha256').update(value).digest('hex');
+function firstPositiveInt(...values) {
+  for (const value of values) {
+    if (Number.isSafeInteger(value) && value > 0) return value;
+  }
+  return null;
+}
 function token(value) {
   if (typeof value !== 'string' || !value.length || value.length > 65536 || /\s|[\x00-\x1f\x7f]/.test(value)) {
     throw fail('invalid_credential', 'Cursor credential is missing or malformed.', 401);
@@ -199,8 +233,9 @@ export function createCursorProvider({
     live(signal);
     const old = credential(input, now(), true);
     // A still-valid access token needs no refresh, including poll responses
-    // without a refresh token. Preserve unknown expiry as unknown.
-    if (old.expiresAt !== undefined && old.expiresAt > now() + 60000) return old;
+    // without a refresh token. Unknown expiry must not rotate: a new
+    // accessToken hash cannot resume a parked tool call (409).
+    if (old.expiresAt === undefined || old.expiresAt > now() + 60000) return old;
     if (!old.refreshToken) throw fail('refresh_unavailable', 'No Cursor refresh token; sign in again.', 401);
     const op = operation(signal, requestTimeoutMs);
     try {
@@ -225,13 +260,30 @@ export function createCursorProvider({
       for (const item of result.models) {
         if (typeof item?.modelId !== 'string' || !item.modelId) throw fail('invalid_models', 'Cursor model catalog is missing a canonical model ID.');
         const name = item.displayName ?? item.modelId;
-        const contextWindow = item.contextWindow ?? null; // Unknown means unknown: no guessed context sizes.
+        const contextWindow = firstPositiveInt(
+          item.contextWindow, item.context_window, item.contextTokenLimit, item.context_token_limit,
+        ); // Unknown means unknown: no guessed 200k/1M sizes.
         if (typeof name !== 'string' || !name || (contextWindow !== null && (!Number.isSafeInteger(contextWindow) || contextWindow <= 0))) throw fail('invalid_models', 'Cursor returned invalid model metadata.');
         const model = { id: item.modelId, name, contextWindow };
         if (catalog.has(model.id) && json(catalog.get(model.id)) !== json(model)) throw fail('invalid_models', 'Cursor returned conflicting model IDs.');
         catalog.set(model.id, model);
       }
       return [...catalog.values()];
+    } catch (e) { throw safeError(e); } finally { op.finish(); }
+  }
+  async function usage(input, { signal } = {}) {
+    live(signal);
+    const c = credential(input, now());
+    const op = operation(signal, requestTimeoutMs);
+    try {
+      const response = await request(fetchImpl, `${API}/aiserver.v1.DashboardService/GetCurrentPeriodUsage`, {
+        method: 'POST',
+        headers: { ...headers(c.accessToken, uuid(), now()), 'content-type': 'application/json', accept: 'application/json', 'connect-protocol-version': '1' },
+        body: '{}',
+        signal: op.signal,
+      });
+      if (!response.ok) { void response.body?.cancel().catch(() => {}); throw httpError(response.status); }
+      return cursorAccountUsage(await readJson(response, op.signal));
     } catch (e) { throw safeError(e); } finally { op.finish(); }
   }
 
@@ -410,6 +462,6 @@ export function createCursorProvider({
     operations.clear();
     for (const session of [...sessions]) drop(session);
   }
-  return { startLogin, refresh, models, complete, close };
+  return { startLogin, refresh, models, usage, complete, close };
 }
 export default createCursorProvider;

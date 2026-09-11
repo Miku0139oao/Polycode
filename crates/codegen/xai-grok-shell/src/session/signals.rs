@@ -1207,8 +1207,12 @@ impl SessionSignalsActor {
                     tokens_used,
                     context_window,
                 } => {
+                    // `context_window == 0` means unmeasured: no percentage.
                     self.signals.context_window_usage =
-                        ((tokens_used * 100) / context_window).min(100) as u8;
+                        xai_token_estimation::usage_percentage_truncated_u8(
+                            tokens_used,
+                            context_window,
+                        );
                     self.signals.context_tokens_used = tokens_used;
                     self.signals.context_window_tokens = context_window;
                 }

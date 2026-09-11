@@ -415,12 +415,17 @@ impl ContextInfoBlock {
             // The percentage is recomputed from `used / total` so we get two decimal places of precision
             // The `usage_pct: u8` field on `ContextInfo` is pre-rounded to an integer
             Line::from(Span::styled(
-                format!(
-                    "{} / {} tokens ({:.2}%)",
-                    fmt_tok_big(used),
-                    fmt_tok_big(total),
-                    precise_usage_percent(used, total),
-                ),
+                if total == 0 {
+                    // The provider reported no window; a percentage here would be against nothing.
+                    format!("{} / ? tokens (window not reported)", fmt_tok_big(used))
+                } else {
+                    format!(
+                        "{} / {} tokens ({:.2}%)",
+                        fmt_tok_big(used),
+                        fmt_tok_big(total),
+                        precise_usage_percent(used, total),
+                    )
+                },
                 Style::default().fg(theme.text_secondary),
             )),
             // Model name (one step dimmer than the tokens line so it reads as a supporting caption rather than the primary number)

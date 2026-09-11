@@ -340,7 +340,6 @@ pub(super) fn handle_billing_fetched(
         // The open usage modal renders from the mirrors updated above
         // Only its own fetch generation may settle the loading/error flags (background refreshes carry nonce 0)
         if let Some(state) = super::status::usage_modal_state_mut(agent)
-            && state.ctx.provider.permits_native_billing()
             && state.fetch_nonce == nonce
         {
             state.billing_loading = false;

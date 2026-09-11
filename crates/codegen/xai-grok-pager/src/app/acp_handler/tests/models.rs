@@ -368,3 +368,49 @@
         );
     }
 
+
+    /// Switching models re-derives the context bar total from the new model's advertised window.
+    /// A model without one clears the total so the bar renders `used / ?` instead of the old window.
+    #[test]
+    fn model_switch_resyncs_context_total_to_the_new_model() {
+        let mut app = make_app_with_agent("sess-1");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+
+        let grok = acp::ModelId::new(std::sync::Arc::from("grok-4.6"));
+        let mut grok_info = make_model_info("grok-4.6");
+        grok_info.meta = serde_json::json!({ "totalContextTokens": 500_000 })
+            .as_object()
+            .cloned();
+        let cursor = acp::ModelId::new(std::sync::Arc::from("cursor/unknown-window"));
+        let cursor_info = make_model_info("cursor/unknown-window");
+        let codex = acp::ModelId::new(std::sync::Arc::from("codex/gpt"));
+        let mut codex_info = make_model_info("codex/gpt");
+        codex_info.meta = serde_json::json!({ "totalContextTokens": 272_000 })
+            .as_object()
+            .cloned();
+        for (id, info) in [(&grok, grok_info), (&cursor, cursor_info), (&codex, codex_info)] {
+            agent.session.models.available.insert(id.clone(), info);
+        }
+
+        agent.session.models.set_current(grok.clone(), None);
+        agent.apply_context_used(100_000, 500_000);
+        let snap = agent.context_state.as_ref().unwrap();
+        assert_eq!((snap.used, snap.total, snap.usage_pct), (100_000, 500_000, 20));
+
+        // Unmeasured window: no stale 500k, no invented percentage
+        agent.session.models.set_current(cursor.clone(), None);
+        agent.sync_context_total_to_model();
+        let snap = agent.context_state.as_ref().unwrap();
+        assert_eq!((snap.used, snap.total, snap.usage_pct, snap.free_tokens), (100_000, 0, 0, 0));
+        // The streaming refresh cannot resurrect the old window either
+        agent.apply_context_used(120_000, 0);
+        let snap = agent.context_state.as_ref().unwrap();
+        assert_eq!((snap.used, snap.total), (120_000, 0));
+
+        // Measured window: percentage follows the new model immediately
+        agent.session.models.set_current(codex.clone(), None);
+        agent.sync_context_total_to_model();
+        let snap = agent.context_state.as_ref().unwrap();
+        assert_eq!((snap.used, snap.total, snap.usage_pct), (120_000, 272_000, 44));
+        assert_eq!(snap.free_tokens, 152_000);
+    }

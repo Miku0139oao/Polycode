@@ -22,6 +22,30 @@ test('local bridge rejects unauthenticated and browser-origin requests', async t
   assert.equal(r.providers[0].loggedIn, false); assert.deepEqual(r.providers[0].models, []);
   assert.ok(!JSON.stringify(r).includes('local-fixture-secret'));
 });
+test('usage lists every signed-in account and never invents quota', async t => {
+  const f = await fixture(t);
+  assert.deepEqual(await (await f.call('/control/usage')).json(), {
+    providers: [{ id: 'codex', name: 'ChatGPT', loggedIn: false }],
+  });
+  await f.store.set('codex', { accessToken: 'secret-account-token' });
+  const missing = await (await f.call('/control/usage')).json();
+  assert.deepEqual(missing, {
+    providers: [{ id: 'codex', name: 'ChatGPT', loggedIn: true, message: 'This account API did not return a usage quota.' }],
+  });
+  assert.ok(!JSON.stringify(missing).includes('secret-account-token'));
+  f.provider.usage = async () => ({ windows: [{ id: 'primary', usedPercent: 22, windowSeconds: 18000 }], plan: 'plus', email: 'secret@example.com' });
+  const ok = await (await f.call('/control/usage')).json();
+  assert.deepEqual(ok, {
+    providers: [{ id: 'codex', name: 'ChatGPT', loggedIn: true, usage: { plan: 'plus', windows: [{ id: 'primary', usedPercent: 22, windowSeconds: 18000 }] } }],
+  });
+  assert.ok(!JSON.stringify(ok).includes('secret'));
+  f.provider.usage = async () => { throw Object.assign(new Error('secret-upstream-body'), { code: 'upstream_http_error', status: 502 }); };
+  const failed = await (await f.call('/control/usage')).json();
+  assert.deepEqual(failed, {
+    providers: [{ id: 'codex', name: 'ChatGPT', loggedIn: true, message: 'Polycode failed during usage lookup (upstream_http_error, HTTP 502).' }],
+  });
+  assert.ok(!JSON.stringify(failed).includes('secret'));
+});
 test('signed-out model calls fail without attempting another provider', async t => {
   const f = await fixture(t), r = await f.call('/codex/v1/chat/completions', { model: 'model-a', messages: [] });
   assert.equal(r.status, 401); assert.equal(f.sent(), undefined);

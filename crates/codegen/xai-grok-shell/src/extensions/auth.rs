@@ -14,6 +14,20 @@ use crate::session::ExtMethodResult;
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
         "x.ai/auth/polycode/reload" if crate::polycode::enabled() => {
+            #[derive(Deserialize, Default)]
+            struct ReloadParams {
+                #[serde(default)]
+                refresh: bool,
+            }
+            let params: ReloadParams = serde_json::from_str(args.params.get()).unwrap_or_default();
+            // The pager replaces its whole model list with this reply. Rebuilding from the bundled
+            // two-model fallback while the first remote fetch is still in flight, or after it failed,
+            // is what leaves the Grok (native) list short.
+            if params.refresh {
+                agent.models_manager.refresh_native_catalog().await;
+            } else {
+                agent.models_manager.wait_for_first_catalog().await;
+            }
             super::session_admin::handle_reload_models(agent)?;
             to_raw_response(&acp::SessionModelState::new(
                 agent.models_manager.current_model_id(),

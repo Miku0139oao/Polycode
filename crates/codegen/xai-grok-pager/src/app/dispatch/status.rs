@@ -92,10 +92,8 @@ pub(super) fn open_usage_info_modal_for_provider(
         return vec![];
     }
 
-    let billing_reachable = provider.permits_native_billing()
-        && usage_visible
-        && !agent.chat_kind
-        && redirect_url.is_none();
+    let billing_reachable = usage_visible && !agent.chat_kind && redirect_url.is_none();
+    let subscription_reachable = xai_grok_shell::polycode::enabled();
     let nonce = next_usage_fetch_nonce();
     let mut state = UsageInfoModalState::new(
         tab,
@@ -105,11 +103,8 @@ pub(super) fn open_usage_info_modal_for_provider(
             active_model,
             usage_visible,
             chat_kind: agent.chat_kind,
-            billing_redirect_url: provider
-                .permits_native_billing()
-                .then_some(redirect_url)
-                .flatten(),
-            subscription_tier: provider.permits_native_billing().then_some(tier).flatten(),
+            billing_redirect_url: usage_visible.then_some(redirect_url).flatten(),
+            subscription_tier: usage_visible.then_some(tier).flatten(),
         },
     );
     state.fetch_nonce = nonce;
@@ -133,12 +128,18 @@ pub(super) fn open_usage_info_modal_for_provider(
             nonce,
         });
     }
-    // Native-only: subscription pages never query the xAI billing service.
     if billing_reachable {
         state.billing_loading = true;
         effects.push(Effect::FetchBilling {
             agent_id: id,
             silent: true,
+            nonce,
+        });
+    }
+    if subscription_reachable {
+        state.subscription_loading = true;
+        effects.push(Effect::FetchSubscriptionUsage {
+            agent_id: id,
             nonce,
         });
     }

@@ -30,9 +30,14 @@ export class WindowsTerminal {
   }
   async close() {
     this.write('\x1b'); await delay(500);
+    const quitRequestedAt = Date.now();
     this.write('\x11'); await delay(250); this.write('\x11');
-    const deadline = Date.now() + 10000;
+    const deadline = quitRequestedAt + 10000;
     while (!this.exited && Date.now() < deadline) await delay(100);
+    // Milliseconds from the first Ctrl+Q until the process exited (or until the
+    // harness gave up), so a report can tell a slow teardown from a lost keypress.
+    // A repeated close() on an already-exited terminal must not overwrite it.
+    this.closeMs ??= Date.now() - quitRequestedAt;
     if (!this.exited) {
       this.forcedExit = true;
       // A WSL console can contain shared hosts. Never use node-pty's

@@ -25,6 +25,14 @@ impl ProviderId {
             Self::Cursor => "cursor",
         }
     }
+    /// Short picker label. Catalog `provider.name` can be a long marketing string
+    /// (`Cursor subscription (experimental)`); that must not become every model row.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Codex => "ChatGPT",
+            Self::Cursor => "Cursor",
+        }
+    }
 }
 /// Positive process-local registration identity. Unknown is never native by default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +42,11 @@ pub enum RegisteredModelProvider {
 }
 pub fn registered_model_provider(id: &str) -> Option<RegisteredModelProvider> {
     bridge().and_then(|b| b.registered_model_provider(id))
+}
+/// Account-level identity for `/usage`: a `codex/` or `cursor/` id on a signed-in
+/// catalog provider is enough. Exact catalog model rows are not required.
+pub fn logged_in_subscription(id: &str) -> Option<ProviderId> {
+    bridge().and_then(|b| b.logged_in_subscription(id))
 }
 /// Recover the catalog identity from an exact registered subscription route.
 /// Upstream model slugs alone are not identities: two providers can share one.
@@ -94,12 +107,65 @@ pub struct LoginStatus {
     pub message: Option<String>,
 }
 
+/// Allowlisted `/control/usage` snapshot. Unknown upstream fields are dropped before this type.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageReport {
+    pub providers: Vec<ProviderUsage>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderUsage {
+    pub id: ProviderId,
+    pub name: String,
+    pub logged_in: bool,
+    #[serde(default)]
+    pub usage: Option<AccountUsage>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountUsage {
+    #[serde(default)]
+    pub plan: Option<String>,
+    #[serde(default)]
+    pub windows: Vec<UsageWindow>,
+    #[serde(default)]
+    pub used_percent: Option<f64>,
+    #[serde(default)]
+    pub remaining_cents: Option<i64>,
+    #[serde(default)]
+    pub limit_cents: Option<i64>,
+    #[serde(default)]
+    pub display_message: Option<String>,
+    #[serde(default)]
+    pub billing_cycle_end: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageWindow {
+    pub id: String,
+    pub used_percent: f64,
+    #[serde(default)]
+    pub window_seconds: Option<u64>,
+    #[serde(default)]
+    pub reset_at: Option<i64>,
+}
+
 pub struct Bridge {
     base: Url,
     token: String,
     client: Client,
     catalog: RwLock<Catalog>,
     registered_models: RwLock<IndexMap<String, RegisteredModelProvider>>,
+    /// Upper bounds on `provider/model` windows learned from context-length rejections.
+    /// Subscription routes never report `x-grok-context-window`, so this is the only measurement
+    /// available for a model whose catalog entry omits the window.
+    learned_windows: RwLock<IndexMap<String, u64>>,
     initial_provider: Option<String>,
 }
 pub fn bridge() -> Option<&'static Bridge> {
@@ -185,6 +251,7 @@ impl Bridge {
             client,
             catalog: RwLock::new(Catalog::default()),
             registered_models: RwLock::new(IndexMap::new()),
+            learned_windows: RwLock::new(IndexMap::new()),
             initial_provider: None,
         })
     }
@@ -332,6 +399,87 @@ impl Bridge {
         }
         Ok(())
     }
+    fn logged_in_subscription(&self, id: &str) -> Option<ProviderId> {
+        let (prefix, rest) = id.split_once('/')?;
+        if rest.is_empty() {
+            return None;
+        }
+        let provider = match prefix {
+            "codex" => ProviderId::Codex,
+            "cursor" => ProviderId::Cursor,
+            _ => return None,
+        };
+        self.catalog()
+            .providers
+            .iter()
+            .any(|p| p.id == provider && p.logged_in)
+            .then_some(provider)
+    }
+    fn finite_percent(value: f64) -> bool {
+        value.is_finite() && (0.0..=1000.0).contains(&value)
+    }
+    fn validate_usage(&self, report: &UsageReport) -> Result<(), String> {
+        let mut providers = std::collections::HashSet::new();
+        if report.providers.len() > 8 {
+            return Err("Invalid bridge usage report".into());
+        }
+        for provider in &report.providers {
+            if !providers.insert(provider.id.as_str())
+                || !self.safe_text(&provider.name)
+                || provider
+                    .message
+                    .as_deref()
+                    .is_some_and(|s| !self.safe_text(s) || s.len() > 240)
+            {
+                return Err("Invalid bridge usage report".into());
+            }
+            let Some(usage) = &provider.usage else {
+                continue;
+            };
+            if usage
+                .plan
+                .as_deref()
+                .is_some_and(|s| s.len() > 64 || !self.safe_text(s))
+                || usage
+                    .display_message
+                    .as_deref()
+                    .is_some_and(|s| s.len() > 240 || !self.safe_text(s))
+                || usage.billing_cycle_end.as_deref().is_some_and(|s| {
+                    s.len() < 10 || s.len() > 16 || !s.bytes().all(|b| b.is_ascii_digit())
+                })
+                || usage.windows.len() > 2
+                || usage
+                    .used_percent
+                    .is_some_and(|p| !Self::finite_percent(p))
+                || usage.remaining_cents.is_some_and(|c| c < 0)
+                || usage.limit_cents.is_some_and(|c| c < 0)
+            {
+                return Err("Invalid bridge usage report".into());
+            }
+            let mut windows = std::collections::HashSet::new();
+            for window in &usage.windows {
+                if !matches!(window.id.as_str(), "primary" | "secondary")
+                    || !windows.insert(window.id.as_str())
+                    || !Self::finite_percent(window.used_percent)
+                    || window
+                        .window_seconds
+                        .is_some_and(|s| s == 0 || s > 366 * 24 * 3600)
+                    || window.reset_at.is_some_and(|s| s <= 0)
+                {
+                    return Err("Invalid bridge usage report".into());
+                }
+            }
+            if provider.id == ProviderId::Codex && usage.windows.is_empty() {
+                return Err("Invalid bridge usage report".into());
+            }
+        }
+        Ok(())
+    }
+    pub async fn usage(&self) -> Result<UsageReport, String> {
+        let report: UsageReport = self.request(Method::GET, "control/usage", None).await?;
+        self.validate_usage(&report)?;
+        Ok(report)
+    }
     pub async fn start(&self, provider: ProviderId) -> Result<LoginAttempt, String> {
         let attempt: LoginAttempt = self
             .request(
@@ -423,6 +571,45 @@ impl Bridge {
                 == Some(RegisteredModelProvider::Subscription(provider.id))).then_some(id)
         })
     }
+    /// Measured window for a bridge model: the smaller of the catalog value and any learned bound.
+    /// `None` while the catalog omits the window and no request has been rejected for length yet.
+    fn known_context_window(&self, base: &str, model: &str) -> Option<u64> {
+        let catalog = self.catalog();
+        let provider = catalog
+            .providers
+            .iter()
+            .find(|provider| base == self.model_base(provider.id))?;
+        let entry = provider.models.iter().find(|entry| entry.id == model)?;
+        let learned = self
+            .learned_windows
+            .read()
+            .expect("learned windows")
+            .get(&format!("{}/{}", provider.id.as_str(), model))
+            .copied();
+        match (entry.context_window, learned) {
+            (Some(catalog), Some(learned)) => Some(catalog.min(learned)),
+            (catalog, learned) => catalog.or(learned),
+        }
+    }
+    /// A request estimated at `tokens` was rejected for length: the window is at most that.
+    /// Only ever tightens; a catalog entry outside the bridge is ignored.
+    fn learn_context_window(&self, base: &str, model: &str, tokens: u64) {
+        if tokens == 0 {
+            return;
+        }
+        let Some(provider) = self
+            .catalog()
+            .providers
+            .into_iter()
+            .find(|provider| base == self.model_base(provider.id))
+        else {
+            return;
+        };
+        let key = format!("{}/{}", provider.id.as_str(), model);
+        let mut learned = self.learned_windows.write().expect("learned windows");
+        let bound = learned.entry(key).or_insert(tokens);
+        *bound = (*bound).min(tokens);
+    }
     fn registered_model_provider(&self, id: &str) -> Option<RegisteredModelProvider> {
         let registered = self
             .registered_models
@@ -509,7 +696,8 @@ impl Bridge {
                 let key = format!("{}/{}", provider.id.as_str(), model.id);
                 let mut entry = ConfigModelOverride {
                     model: Some(model.id),
-                    name: Some(format!("{} / {}", provider.name, model.name)),
+                    name: Some(format!("{} / {}", provider.id.display_name(), model.name)),
+                    description: model.context_window.map(format_context_window),
                     context_window: model.context_window,
                     supports_reasoning_effort: Some(!model.reasoning_efforts.is_empty()),
                     reasoning_efforts: model.reasoning_efforts.clone(),
@@ -522,10 +710,6 @@ impl Bridge {
                 entry.info.id = Some(key.clone());
                 // Do not manufacture a default from the first option when upstream did not expose one.
                 entry.info.reasoning_effort = model.default_reasoning_effort;
-                if model.reasoning_efforts.is_empty() {
-                    entry.info.description =
-                        Some("Provider does not expose reasoning effort control".into());
-                }
                 entry.auth_provider = Some(crate::auth::AuthProviderRef::fail_closed(
                     "polycode process transport".into(),
                 ));
@@ -534,6 +718,14 @@ impl Bridge {
         }
     }
 }
+fn format_context_window(tokens: u64) -> String {
+    if tokens >= 1_000 && tokens % 1_000 == 0 {
+        format!("{}k context", tokens / 1_000)
+    } else {
+        format!("{tokens} context")
+    }
+}
+
 fn valid_reasoning_metadata(model: &Model) -> bool {
     let mut values = std::collections::HashSet::new();
     model.reasoning_efforts.len() <= 7
@@ -573,6 +765,28 @@ pub(crate) fn is_ready_model_entry(entry: &ModelEntry) -> bool {
 }
 pub fn is_bridge_endpoint(base: &str) -> bool {
     bridge().is_some_and(|b| b.owns_endpoint(base))
+}
+/// Measured window for a bridge model (catalog or learned); `None` for an unmeasured bridge model
+/// and for every non-bridge route, whose window lives in the native catalog.
+pub fn known_context_window(base: &str, model: &str) -> Option<u64> {
+    bridge()
+        .filter(|b| b.owns_endpoint(base))
+        .and_then(|b| b.known_context_window(base, model))
+}
+/// Whether `(base, model)` has a measured window. Native routes always do; a bridge model does
+/// only once its catalog or a length rejection supplied one, so callers stop budgeting against the
+/// 200k placeholder in the meantime.
+pub fn context_window_known(base: &str, model: &str) -> bool {
+    match bridge() {
+        Some(b) if b.owns_endpoint(base) => b.known_context_window(base, model).is_some(),
+        _ => true,
+    }
+}
+/// Record a length rejection for a bridge model; no-op for native routes.
+pub fn learn_context_window(base: &str, model: &str, tokens: u64) {
+    if let Some(b) = bridge().filter(|b| b.owns_endpoint(base)) {
+        b.learn_context_window(base, model, tokens);
+    }
 }
 
 #[cfg(test)]
@@ -762,6 +976,48 @@ mod tests {
         assert!(loopback_origin("http://[::1]:1234").is_ok());
     }
     #[test]
+    fn subscription_model_rows_use_short_names_and_omit_effort_warnings() {
+        let bridge = Bridge::new("http://127.0.0.1:1234", "picker-fixture-token".into()).unwrap();
+        let catalog: Catalog = serde_json::from_value(serde_json::json!({"providers":[{
+            "id":"cursor","name":"Cursor subscription (experimental)","loggedIn":true,
+            "models":[
+                {"id":"composer","name":"Composer","contextWindow":null},
+                {"id":"fast","name":"Fast","contextWindow":128000}
+            ]
+        }]}))
+        .unwrap();
+        bridge.validate_catalog(&catalog).unwrap();
+        *bridge.catalog.write().unwrap() = catalog;
+        let mut models = IndexMap::new();
+        bridge.inject(
+            &mut models,
+            &crate::agent::config::Config::default().endpoints,
+        );
+        assert_eq!(
+            models["cursor/composer"].info.name.as_deref(),
+            Some("Cursor / Composer")
+        );
+        assert_eq!(models["cursor/composer"].info.description, None);
+        assert_eq!(
+            models["cursor/fast"].info.name.as_deref(),
+            Some("Cursor / Fast")
+        );
+        assert_eq!(
+            models["cursor/fast"].info.description.as_deref(),
+            Some("128k context")
+        );
+        for entry in models.values() {
+            let name = entry.info.name.as_deref().unwrap_or_default();
+            assert!(!name.contains("experimental"), "{name}");
+            assert!(!name.contains("subscription"), "{name}");
+            assert_ne!(
+                entry.info.description.as_deref(),
+                Some("Provider does not expose reasoning effort control")
+            );
+        }
+    }
+
+    #[test]
     fn unknown_context_window_does_not_reject_subscription_catalog() {
         let bridge = Bridge::new("http://127.0.0.1:1234", "context-fixture-token".into()).unwrap();
         let mut catalog: Catalog = serde_json::from_value(serde_json::json!({"providers":[{
@@ -778,10 +1034,81 @@ mod tests {
             &crate::agent::config::Config::default().endpoints,
         );
         // The catalog does not fabricate upstream capacity. The native engine
-        // still applies its own existing default budget when no override exists.
+        // still applies its own existing default budget when no override exists,
+        // but ACP must not advertise that fallback as a measured window.
         assert!(bridge.ready_model("cursor/unknown-context", &models["cursor/unknown-context"]));
+        let acp = crate::agent::config::to_acp_model_info(&models);
+        let unknown = acp.values().next().expect("injected cursor model");
+        assert!(
+            unknown
+                .meta
+                .as_ref()
+                .is_none_or(|meta| !meta.contains_key("totalContextTokens")),
+            "unknown Cursor context must not be advertised as 200k"
+        );
         catalog.providers[0].models[0].context_window = Some(0);
         assert!(bridge.validate_catalog(&catalog).is_err());
+    }
+    /// The 200k placeholder is never treated as a measured window; a length rejection supplies the
+    /// only measurement for a model whose catalog omits one, and it only ever tightens.
+    #[test]
+    fn unknown_context_window_is_unmeasured_until_a_rejection_bounds_it() {
+        let bridge = Bridge::new("http://127.0.0.1:1234", "context-fixture-token".into()).unwrap();
+        let catalog: Catalog = serde_json::from_value(serde_json::json!({"providers":[{
+            "id":"cursor","name":"Cursor","loggedIn":true,
+            "models":[
+                {"id":"unknown-context","name":"Unknown","contextWindow":null},
+                {"id":"known-context","name":"Known","contextWindow":400000}
+            ]
+        }]}))
+        .unwrap();
+        *bridge.catalog.write().unwrap() = catalog;
+        let base = bridge.model_base(ProviderId::Cursor);
+        assert_eq!(bridge.known_context_window(&base, "unknown-context"), None);
+        assert_eq!(
+            bridge.known_context_window(&base, "known-context"),
+            Some(400_000)
+        );
+        assert_eq!(bridge.known_context_window(&base, "not-in-catalog"), None);
+        assert_eq!(
+            bridge.known_context_window("https://api.x.ai/v1", "unknown-context"),
+            None
+        );
+
+        bridge.learn_context_window(&base, "unknown-context", 0);
+        assert_eq!(bridge.known_context_window(&base, "unknown-context"), None);
+        bridge.learn_context_window(&base, "unknown-context", 150_000);
+        assert_eq!(
+            bridge.known_context_window(&base, "unknown-context"),
+            Some(150_000)
+        );
+        bridge.learn_context_window(&base, "unknown-context", 180_000);
+        assert_eq!(
+            bridge.known_context_window(&base, "unknown-context"),
+            Some(150_000),
+            "a looser bound never widens a learned window"
+        );
+        bridge.learn_context_window(&base, "unknown-context", 120_000);
+        assert_eq!(
+            bridge.known_context_window(&base, "unknown-context"),
+            Some(120_000)
+        );
+
+        bridge.learn_context_window(&base, "known-context", 300_000);
+        assert_eq!(
+            bridge.known_context_window(&base, "known-context"),
+            Some(300_000),
+            "a rejection below the catalog window tightens it"
+        );
+        bridge.learn_context_window("https://api.x.ai/v1", "grok-4.6", 1);
+        assert!(
+            bridge
+                .learned_windows
+                .read()
+                .unwrap()
+                .get("cursor/grok-4.6")
+                .is_none()
+        );
     }
     #[test]
     fn overlay_keeps_native_models_and_native_config() {
@@ -803,6 +1130,14 @@ mod tests {
             );
         }
         let entry = &models["codex/actual-id"];
+        let chatgpt = crate::agent::config::to_acp_model_info(&models)
+            .into_values()
+            .find(|model| model.name == "ChatGPT / Model")
+            .expect("injected ChatGPT model");
+        assert_eq!(
+            chatgpt.meta.as_ref().and_then(|meta| meta.get("totalContextTokens")),
+            Some(&serde_json::json!(128000))
+        );
         assert!(bridge.ready_model("codex/actual-id", entry));
         assert!(!bridge.ready_model("cursor/actual-id", entry));
         assert!(!bridge.ready_model("codex/missing", entry));
@@ -959,6 +1294,66 @@ mod tests {
             "https://unregistered.invalid/v1".into();
         restored.register_models(&rerouted, Some(&sources));
         assert_eq!(restored.registered_model_provider("native-original"), None);
+        assert_eq!(
+            restored.logged_in_subscription("cursor/claude-fable-5-1-max"),
+            Some(ProviderId::Cursor)
+        );
+        assert_eq!(
+            restored.logged_in_subscription("codex/gpt-5"),
+            None,
+            "signed-out ChatGPT is not a usage account"
+        );
+        assert_eq!(restored.logged_in_subscription("cursor/"), None);
+        assert_eq!(restored.logged_in_subscription("native-original"), None);
+    }
+    #[tokio::test]
+    async fn usage_report_is_allowlisted_and_rejects_secrets() {
+        let (origin, server) = server(vec![(
+            "200 OK",
+            serde_json::json!({
+                "providers":[
+                    {"id":"codex","name":"ChatGPT","loggedIn":true,"usage":{
+                        "plan":"plus",
+                        "windows":[{"id":"primary","usedPercent":12.5,"windowSeconds":18000,"resetAt":1778670307}]
+                    }},
+                    {"id":"cursor","name":"Cursor","loggedIn":true,"usage":{
+                        "usedPercent":15.48,"limitCents":40000,"remainingCents":16778,
+                        "displayMessage":"You've used 46% of your usage limit",
+                        "billingCycleEnd":"1771077734000"
+                    }}
+                ]
+            })
+            .to_string(),
+        )]);
+        let bridge = Bridge::new(&origin, "usage-fixture-token".into()).unwrap();
+        let report = bridge.usage().await.unwrap();
+        assert_eq!(report.providers[0].usage.as_ref().unwrap().plan.as_deref(), Some("plus"));
+        assert_eq!(
+            report.providers[1].usage.as_ref().unwrap().remaining_cents,
+            Some(16778)
+        );
+        let requests = server.join().unwrap();
+        assert!(requests[0].starts_with("GET /control/usage "));
+        assert!(
+            requests[0]
+                .to_ascii_lowercase()
+                .contains("authorization: bearer usage-fixture-token\r\n")
+        );
+        let leaked = UsageReport {
+            providers: vec![ProviderUsage {
+                id: ProviderId::Codex,
+                name: "ChatGPT".into(),
+                logged_in: true,
+                usage: None,
+                message: Some("usage-fixture-token".into()),
+            }],
+        };
+        assert!(bridge.validate_usage(&leaked).is_err());
+        let invented = serde_json::from_value::<UsageReport>(serde_json::json!({
+            "providers":[{"id":"codex","name":"ChatGPT","loggedIn":true,"usage":{"windows":[]}}]
+        }))
+        .unwrap();
+        assert!(bridge.validate_usage(&invented).is_err());
     }
     #[test]
     fn model_settings_invalid_default_is_not_silently_dropped() {

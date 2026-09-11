@@ -190,7 +190,14 @@ pub fn context_bar_line_for_session(
         return None;
     }
     let used = used_tokens?;
-    let total = total_tokens.filter(|&t| t > 0)?;
+    let Some(total) = total_tokens.filter(|&t| t > 0) else {
+        // The provider did not report a window: show what is known instead of a percentage of a placeholder.
+        // Same string in both hover states, so there is no layout shift.
+        return Some(Line::from(Span::styled(
+            format!("{} / ?", fmt_tokens(used)),
+            Style::default().fg(theme.text_secondary).bg(theme.bg_base),
+        )));
+    };
     let pct = xai_token_estimation::usage_percentage(used, total);
 
     // Default form drives the line width: `used / total`, right-padded to the minimum hover width so both states render at the same width
@@ -388,9 +395,20 @@ mod tests {
         let theme = Theme::default();
         for hovered in [false, true] {
             assert!(context_bar_line(None, Some(1_000_000), hovered, &theme).is_none());
-            assert!(context_bar_line(Some(1_000), None, hovered, &theme).is_none());
-            // Zero total is treated as missing.
-            assert!(context_bar_line(Some(1_000), Some(0), hovered, &theme).is_none());
+        }
+    }
+
+    /// A model whose provider does not report a window still shows the used count; a placeholder
+    /// percentage would be invented, and hiding the bar would drop the only real number.
+    #[test]
+    fn test_context_bar_shows_used_over_unknown_total() {
+        let theme = Theme::default();
+        for hovered in [false, true] {
+            for total in [None, Some(0)] {
+                let line = context_bar_line(Some(8_500), total, hovered, &theme)
+                    .expect("used tokens render without a window");
+                assert_eq!(line_text(&line), "8.5K / ?");
+            }
         }
     }
 

@@ -43,6 +43,10 @@ test('catalog discovery preserves capability and direct Responses receives prior
   const wire = JSON.parse(requests[1].options.body);
   assert.equal(wire.service_tier, 'priority');
   assert.equal(wire.model, 'a');
+  assert.equal(wire.reasoning.summary, 'auto');
+  assert.match(requests[1].options.headers['session-id'], /^[0-9a-f-]{36}$/i);
+  assert.equal(requests[1].options.headers['thread-id'], requests[1].options.headers['session-id']);
+  assert.equal(requests[1].options.headers.originator, 'polycode');
 });
 test('bridge capability and per-request on/off are isolated and capability loss rejects before inference', async t => {
   let models = [{ id: 'a', name: 'A', contextWindow: 64000, supportsFast: true }];

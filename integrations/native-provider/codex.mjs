@@ -18,6 +18,75 @@ function credential(data) {
   return { accessToken: data.access_token, refreshToken: data.refresh_token, expiresAt: Date.now() + data.expires_in * 1000, accountId };
 }
 const headers = c => ({ Authorization: `Bearer ${c.accessToken}`, 'ChatGPT-Account-Id': c.accountId, originator: 'polycode', 'Content-Type': 'application/json' });
+// Official Codex always identifies the Responses turn. Missing these can 400
+// after backend drift; they are request IDs, not account or transcript data.
+function responsesHeaders(c) {
+  const id = randomUUID();
+  return { ...headers(c), Accept: 'text/event-stream', 'session-id': id, 'thread-id': id };
+}
+const UPSTREAM_CODES = new Set([
+  'invalid_request_error', 'invalid_encrypted_content', 'model_not_found', 'model_not_available',
+  'insufficient_quota', 'context_length_exceeded', 'unsupported_parameter', 'unsupported_value',
+  'invalid_value', 'missing_required_parameter', 'account_deactivated', 'billing_not_active',
+]);
+const UPSTREAM_PARAMS = new Set(['model', 'include', 'reasoning', 'input', 'instructions', 'tools', 'tool_choice', 'service_tier', 'store', 'stream']);
+const UPSTREAM_HINTS = {
+  invalid_request_error: 'the request was rejected as invalid',
+  invalid_encrypted_content: 'conversation reasoning is not valid for this ChatGPT session; start a new session',
+  model_not_found: 'this model is not available on the signed-in ChatGPT account',
+  model_not_available: 'this model is not available on the signed-in ChatGPT account',
+  insufficient_quota: 'ChatGPT quota was exceeded',
+  context_length_exceeded: 'the conversation exceeds this model context window; start a new session',
+  unsupported_parameter: 'an unsupported option was sent to ChatGPT',
+  unsupported_value: 'an unsupported value was sent to ChatGPT',
+  invalid_value: 'an unsupported value was sent to ChatGPT',
+  missing_required_parameter: 'a required ChatGPT field was missing',
+  account_deactivated: 'the ChatGPT account is not active',
+  billing_not_active: 'ChatGPT billing is not active',
+};
+function finitePercent(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1000 ? value : undefined;
+}
+function positiveInt(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+function usageWindow(raw, id) {
+  if (!raw || typeof raw !== 'object') return;
+  const usedPercent = finitePercent(raw.used_percent);
+  if (usedPercent === undefined) return;
+  const window = { id, usedPercent };
+  const windowSeconds = positiveInt(raw.limit_window_seconds);
+  if (windowSeconds !== undefined && windowSeconds <= 366 * 24 * 3600) window.windowSeconds = windowSeconds;
+  const resetAt = positiveInt(raw.reset_at);
+  if (resetAt !== undefined) window.resetAt = resetAt;
+  return window;
+}
+/** Allowlisted ChatGPT quota fields only. Never copies email, account ids, or raw upstream text. */
+export function chatgptAccountUsage(data) {
+  if (!data || typeof data !== 'object') return null;
+  const rate = data.rate_limit && typeof data.rate_limit === 'object' ? data.rate_limit : {};
+  const windows = [usageWindow(rate.primary_window, 'primary'), usageWindow(rate.secondary_window, 'secondary')].filter(Boolean);
+  if (!windows.length) return null;
+  const usage = { windows };
+  if (typeof data.plan_type === 'string' && data.plan_type.length <= 64 && !/[\x00-\x1f\x7f]/.test(data.plan_type)) usage.plan = data.plan_type;
+  return usage;
+}
+export function chatgptUpstreamError(status, bodyText) {
+  let code, param, encrypted = false;
+  if (typeof bodyText === 'string' && bodyText && bodyText.length <= 4096) {
+    try {
+      const parsed = JSON.parse(bodyText), err = parsed?.error && typeof parsed.error === 'object' ? parsed.error : parsed;
+      const rawCode = err?.code ?? err?.type;
+      if (typeof rawCode === 'string' && UPSTREAM_CODES.has(rawCode)) code = rawCode;
+      if (typeof err?.param === 'string' && UPSTREAM_PARAMS.has(err.param)) param = err.param;
+      if (typeof err?.message === 'string' && err.message.includes('encrypted_content')) encrypted = true;
+    } catch { /* Non-JSON bodies stay generic; never echo raw upstream text. */ }
+  }
+  if (encrypted && !code) code = 'invalid_encrypted_content';
+  const hint = UPSTREAM_HINTS[code];
+  const where = param ? `; rejected field: ${param}` : '';
+  return `ChatGPT request failed (HTTP ${status}${code ? `: ${code}` : ''})${hint ? `; ${hint}` : '; check login, quota and model access.'}${where}`;
+}
 const text = content => typeof content === 'string' ? content : (content ?? []).filter(x => x.type === 'text').map(x => x.text).join('\n');
 function contentParts(content, output = false) {
   if (typeof content === 'string') return [{ type: output ? 'output_text' : 'input_text', text: content }];
@@ -83,7 +152,9 @@ export function toResponses(body) {
   }
   if (body.service_tier === 'priority') request.service_tier = 'priority';
   const effort = body.reasoning_effort ?? body.reasoning?.effort;
-  if (effort || body.reasoning?.summary) request.reasoning = { ...(effort ? { effort } : {}), summary: body.reasoning?.summary ?? 'auto' };
+  // Official Codex always sends a reasoning object with encrypted_content.
+  // include-without-reasoning is a documented 400 on the subscription endpoint.
+  request.reasoning = { ...(effort ? { effort } : {}), summary: body.reasoning?.summary ?? 'auto' };
   return { request, originals };
 }
 async function* events(stream, signal) {
@@ -110,8 +181,9 @@ async function* events(stream, signal) {
 }
 export async function translateResponses(response, body, originals) {
   if (!response.ok) {
-    // Never include upstream auth response bodies in logs or errors.
-    throw Object.assign(new Error(`ChatGPT request failed (HTTP ${response.status}); check login, quota and model access.`), { status: response.status });
+    let text = '';
+    try { text = await response.text(); } catch { /* ignore unread bodies */ }
+    throw Object.assign(new Error(chatgptUpstreamError(response.status, text)), { status: response.status });
   }
   if (!response.body) throw new Error('Missing provider stream');
   const id = 'chatcmpl-' + randomUUID(), created = Math.floor(Date.now() / 1000);
@@ -238,9 +310,26 @@ export function createCodexProvider({ fetchImpl = fetch, httpFactory = createSer
       if (!Array.isArray(models)) throw new Error('Invalid ChatGPT model catalog');
       return models.filter(m => m.visibility !== 'hide').map(m => ({ id: m.slug ?? m.id ?? m.model, name: m.display_name ?? m.displayName ?? m.slug ?? m.id, contextWindow: m.context_window ?? m.contextWindow ?? 128000, ...codexReasoningMetadata(m), ...codexFastMetadata(m) }));
     },
+    async usage(c, { signal } = {}) {
+      const r = await fetchImpl('https://chatgpt.com/backend-api/wham/usage', {
+        redirect: 'error',
+        headers: { Authorization: `Bearer ${c.accessToken}`, 'ChatGPT-Account-Id': c.accountId, originator: 'polycode', Accept: 'application/json' },
+        signal,
+      });
+      if (!r.ok) {
+        void r.body?.cancel?.().catch(() => {});
+        throw Object.assign(new Error(`ChatGPT usage lookup failed (HTTP ${r.status})`), { code: 'upstream_http_error', status: r.status });
+      }
+      let text = '';
+      try { text = await r.text(); } catch { throw Object.assign(new Error('ChatGPT usage lookup failed'), { code: 'invalid_response' }); }
+      if (text.length > 1024 * 1024) throw Object.assign(new Error('ChatGPT usage response is too large'), { code: 'size_limit' });
+      let data;
+      try { data = JSON.parse(text); } catch { throw Object.assign(new Error('ChatGPT returned invalid usage JSON'), { code: 'invalid_response' }); }
+      return chatgptAccountUsage(data);
+    },
     async complete(body, c, { signal } = {}) {
       const { request, originals } = toResponses(body);
-      const response = await fetchImpl(API + '/responses', { redirect: 'error', method: 'POST', headers: { ...headers(c), Accept: 'text/event-stream' }, body: JSON.stringify(request), signal });
+      const response = await fetchImpl(API + '/responses', { redirect: 'error', method: 'POST', headers: responsesHeaders(c), body: JSON.stringify(request), signal });
       return translateResponses(response, body, originals);
     },
     close() {},

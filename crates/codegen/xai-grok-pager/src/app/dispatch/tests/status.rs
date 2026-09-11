@@ -1719,7 +1719,7 @@ fn usage_modal_refetches_when_session_starts() {
 }
 
 #[test]
-fn subscription_usage_tabs_fetch_only_local_session_data() {
+fn usage_tabs_fetch_native_billing_for_every_signed_in_xai_account() {
     use crate::views::usage_modal::{UsageInfoTab, UsageProvider};
     use xai_grok_shell::polycode::ProviderId;
     for provider in [
@@ -1746,16 +1746,23 @@ fn subscription_usage_tabs_fetch_only_local_session_data() {
                         Effect::ShowContextInfo { .. },
                         Effect::ShowSessionInfo { .. },
                         Effect::FetchSessionUsage { .. },
+                        Effect::FetchBilling { silent: true, .. },
                     ]
                 ),
-                "subscription/unknown page must never fetch billing: {effects:?}"
+                "signed-in xAI billing is fetched even when the active model is a subscription: {effects:?}"
             );
             let state = usage_modal_state(&app);
             assert_eq!(state.ctx.provider, provider);
             assert_eq!(state.ctx.active_model.as_deref(), Some("opaque-active-id"));
-            assert!(state.ctx.subscription_tier.is_none());
-            assert!(state.ctx.billing_redirect_url.is_none());
-            assert!(!state.billing_loading);
+            assert_eq!(state.ctx.subscription_tier.as_deref(), Some("SuperGrok"));
+            assert!(state.billing_loading);
+            assert!(!state.subscription_loading);
+            assert!(
+                !effects
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::FetchSubscriptionUsage { .. })),
+                "pager tests have no process-local bridge"
+            );
         }
     }
 }
@@ -1794,6 +1801,65 @@ fn subscription_minimal_usage_never_fetches_or_links_native_billing() {
 }
 
 #[test]
+fn subscription_usage_result_fills_signed_in_accounts() {
+    use crate::views::usage_modal::{UsageInfoTab, UsageProvider};
+    use xai_grok_shell::polycode::{AccountUsage, ProviderId, ProviderUsage, UsageReport};
+    let mut app = test_app_with_agent();
+    super::super::status::open_usage_info_modal_for_provider(
+        &mut app,
+        UsageInfoTab::UsageLimit,
+        UsageProvider::Subscription(ProviderId::Cursor),
+    );
+    let nonce = current_usage_nonce(&app);
+    dispatch(
+        Action::TaskComplete(TaskResult::SubscriptionUsageComplete {
+            agent_id: AgentId(0),
+            report: Box::new(UsageReport {
+                providers: vec![
+                    ProviderUsage {
+                        id: ProviderId::Codex,
+                        name: "ChatGPT".into(),
+                        logged_in: true,
+                        usage: Some(AccountUsage {
+                            plan: Some("plus".into()),
+                            windows: vec![],
+                            used_percent: None,
+                            remaining_cents: None,
+                            limit_cents: None,
+                            display_message: None,
+                            billing_cycle_end: None,
+                        }),
+                        message: None,
+                    },
+                    ProviderUsage {
+                        id: ProviderId::Cursor,
+                        name: "Cursor".into(),
+                        logged_in: true,
+                        usage: None,
+                        message: Some("This account API did not return a usage quota.".into()),
+                    },
+                ],
+            }),
+            nonce,
+        }),
+        &mut app,
+    );
+    let state = usage_modal_state(&app);
+    assert!(!state.subscription_loading);
+    assert!(state.subscription_error.is_none());
+    assert_eq!(state.subscription_accounts.as_ref().unwrap().len(), 2);
+    assert_eq!(
+        state.subscription_accounts.as_ref().unwrap()[0]
+            .usage
+            .as_ref()
+            .unwrap()
+            .plan
+            .as_deref(),
+        Some("plus")
+    );
+}
+
+#[test]
 fn changing_usage_provider_reopens_with_a_new_generation_and_drops_old_result() {
     use crate::views::usage_modal::{UsageInfoTab, UsageProvider};
     use xai_grok_shell::polycode::ProviderId;
@@ -1805,7 +1871,12 @@ fn changing_usage_provider_reopens_with_a_new_generation_and_drops_old_result() 
         UsageInfoTab::UsageLimit,
         UsageProvider::Subscription(ProviderId::Cursor),
     );
-    assert_eq!(effects.len(), 3, "only local session fetches");
+    assert_eq!(effects.len(), 4, "session fetches plus native billing");
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::FetchBilling { .. }))
+    );
     assert_ne!(old_nonce, current_usage_nonce(&app));
     dispatch(
         Action::TaskComplete(TaskResult::SessionUsageFailed {
@@ -1817,7 +1888,7 @@ fn changing_usage_provider_reopens_with_a_new_generation_and_drops_old_result() 
         &mut app,
     );
     assert!(usage_modal_state(&app).session_usage_text.is_none());
-    assert!(!usage_modal_state(&app).billing_loading);
+    assert!(usage_modal_state(&app).billing_loading);
 }
 
 #[test]

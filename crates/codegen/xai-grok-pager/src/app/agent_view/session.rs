@@ -1114,6 +1114,21 @@ impl AgentView {
         }
         self.context_state = Some(next);
     }
+    /// Re-derive the context bar's total from the current model right after a model switch.
+    ///
+    /// Without this the previous model's window lingers (and mis-scales the percentage) until the next
+    /// `totalTokens` refresh. A model that advertises no window clears the total to 0 so the bar shows `used / ?`.
+    pub fn sync_context_total_to_model(&mut self) {
+        if self.chat_kind {
+            return;
+        }
+        let total = self.session.models.get_context_window().unwrap_or(0);
+        if let Some(snap) = self.context_state.as_mut() {
+            snap.total = total;
+            snap.usage_pct = xai_token_estimation::usage_percentage_u8(snap.used, total);
+            snap.free_tokens = xai_token_estimation::free_tokens(total, snap.used);
+        }
+    }
     /// Update context state from a streaming notification carrying only `used` and `total` fields.
     ///
     /// No-op for gateway/chat-kind sessions (same policy as [`Self::apply_full_context_info`]).

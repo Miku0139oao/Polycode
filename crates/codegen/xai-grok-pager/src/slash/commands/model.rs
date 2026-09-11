@@ -151,6 +151,41 @@ fn detect_effort_phase<'a>(
     None
 }
 
+/// Catalog names are `Provider / Model`. The picker shows the model; provider goes in the description column.
+fn short_model_name(info: &acp::ModelInfo) -> &str {
+    info.name
+        .split_once(" / ")
+        .map(|(_, rest)| rest.trim())
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(info.name.as_str())
+}
+
+fn model_row_description(id: &acp::ModelId, info: &acp::ModelInfo) -> String {
+    let provider = if id.0.starts_with("codex/") {
+        "ChatGPT"
+    } else if id.0.starts_with("cursor/") {
+        "Cursor"
+    } else {
+        "Grok"
+    };
+    let mut bits = vec![provider.to_string()];
+    if supports_reasoning_effort(info) {
+        bits.push("effort".into());
+    }
+    if let Some(desc) = info
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|desc| {
+            !desc.is_empty()
+                && !desc.eq_ignore_ascii_case("Provider does not expose reasoning effort control")
+        })
+    {
+        bits.push(desc.to_string());
+    }
+    bits.join(" · ")
+}
+
 /// One row per logical model.
 /// Reasoning models get a trailing space in `insert_text` so the prompt widget chains into the effort sub-menu.
 fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
@@ -163,9 +198,9 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
         let qualified =
             id.0.contains('/') || models.resolve_by_name_or_id(&info.name).as_ref() != Some(id);
         let label = if qualified {
-            format!("{} [{}]", info.name, id.0)
+            format!("{} [{}]", short_model_name(info), id.0)
         } else {
-            info.name.clone()
+            short_model_name(info).to_string()
         };
         let display = if is_current {
             format!("{label} (current)")
@@ -185,12 +220,12 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
         items.push(ArgItem {
             display,
             match_text: if qualified {
-                format!("{} {}", info.name, id.0)
+                format!("{} {} {}", info.name, short_model_name(info), id.0)
             } else {
                 info.name.clone()
             },
             insert_text,
-            description: info.description.clone().unwrap_or_default(),
+            description: model_row_description(id, info),
         });
     }
     items
@@ -450,6 +485,27 @@ mod tests {
         );
         // No interior whitespace, so nothing to split off
         assert!(split_trailing_token("reasoning-x-pro").is_none());
+    }
+
+    #[test]
+    fn subscription_rows_lead_with_the_model_not_a_capability_warning() {
+        let mut state = ModelState::default();
+        let id = acp::ModelId::new("cursor/composer");
+        let info = acp::ModelInfo::new(
+            id.clone(),
+            "Cursor subscription (experimental) / Composer".to_string(),
+        )
+        .description(Some(
+            "Provider does not expose reasoning effort control".into(),
+        ));
+        state.available.insert(id, info);
+        let items = build_model_items(&state);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].display, "Composer [cursor/composer]");
+        assert_eq!(items[0].description, "Cursor");
+        assert!(!items[0].display.contains("experimental"));
+        assert!(!items[0].description.contains("does not expose"));
+        assert!(items[0].match_text.contains("Composer"));
     }
 
     #[test]

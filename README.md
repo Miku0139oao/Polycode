@@ -99,31 +99,37 @@ Bun or external provider CLI is required on the user's machine.
 
 ## Install (Windows native)
 
-One command opens an interactive menu: **install or update**, then **Stable or
-Preview**. Both channels add the launcher to user `PATH` by default (`-NoPath`
-skips that). Existing production `%LOCALAPPDATA%\Polycode` is never replaced,
-and the two channels cannot overwrite each other.
+One command opens an interactive menu: **install, update, overwrite PATH,
+switch, list, or uninstall**, then **Candidate, Preview, or Stable**. Channels
+live in separate directories and cannot overwrite each other. Production
+`%LOCALAPPDATA%\Polycode` is never replaced or uninstalled. `-NoPath` skips PATH
+changes on install/update; overwrite and switch always move user `PATH`.
 
 ```powershell
-irm https://raw.githubusercontent.com/Miku0139oao/Polycode/cursor/one-click-install-b060/install-mainline.ps1 | iex
+irm https://raw.githubusercontent.com/Miku0139oao/Polycode/fix/windows-terminal-ci/install-mainline.ps1 | iex
 ```
 
 | Menu choice | Package | Default directory |
 | --- | --- | --- |
-| Stable | Current Windows package from CI run [34380813272](https://github.com/Miku0139oao/Polycode/actions/runs/34380813272) (`bcc4eaf5`), including experimental `context_budget` / `computer_use`. **Not** a fully accepted stable release. | `%LOCALAPPDATA%\Polycode-Mainline` |
+| Candidate | Unpublished CI artifact from run [34525101732](https://github.com/Miku0139oao/Polycode/actions/runs/34525101732) (`ef6ec4a5`), including ChatGPT/Cursor patches plus the model picker, per-provider context window, post-compaction and Grok catalog fixes. **Not** an accepted stable release. Requires authenticated `gh` to download the Actions artifact. | `%LOCALAPPDATA%\Polycode-Candidate` |
 | Preview | Published v0.2.1 Preview (2026-09-08). | `%LOCALAPPDATA%\Polycode-Preview-v0.2.1` |
+| Stable | Current Windows package from CI run [34380813272](https://github.com/Miku0139oao/Polycode/actions/runs/34380813272) (`bcc4eaf5`), including experimental `context_budget` / `computer_use`. **Not** a fully accepted stable release. | `%LOCALAPPDATA%\Polycode-Mainline` |
 
 The bootstrap pins the size and SHA-256 of all six package files for the chosen
 channel, verifies them, then runs the original installer with `-AllowCandidate`.
 Inspect [`install-mainline.ps1`](install-mainline.ps1) before `iex` if you prefer.
-Official `install.ps1 | iex` stays disabled; choosing Stable does **not** open
-that installer.
+Official `install.ps1 | iex` stays disabled; choosing Stable or Candidate does
+**not** open that installer. Uninstall deletes only that channel directory
+(including its `auth`) and removes its `PATH` entry.
 
 Scripted / non-interactive:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/cursor/one-click-install-b060/install-mainline.ps1))) -Action Install -Channel Stable
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/cursor/one-click-install-b060/install-mainline.ps1))) -Action Update -Channel Preview -NoPath
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/fix/windows-terminal-ci/install-mainline.ps1))) -Action Install -Channel Candidate
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/fix/windows-terminal-ci/install-mainline.ps1))) -Action List
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/fix/windows-terminal-ci/install-mainline.ps1))) -Action Switch -Channel Candidate
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/fix/windows-terminal-ci/install-mainline.ps1))) -Action Uninstall -Channel Preview -Force
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Miku0139oao/Polycode/fix/windows-terminal-ci/install-mainline.ps1))) -Action Update -Channel Preview -NoPath
 ```
 
 The dedicated 2026-09-08 Preview one-liner still works if you want that package
@@ -266,7 +272,7 @@ sandboxing, permissions and more. Upstream's hosted docs are at
 | `integrations/native-provider/` | Provider service: OAuth, credential store, ChatGPT and Cursor transports, launcher (Node/Bun) |
 | `integrations/tests/`, `integrations/*.mjs` | Installer, candidate-readiness and Windows smoke/probe suites |
 | `integrations/*.md`, `integrations/acceptance/` | Fork documentation and per-release acceptance records |
-| `install.ps1`, `install-mainline.ps1`, `install-preview.ps1`, `polycode.ps1` | Windows installer, interactive Stable/Preview bootstrap, Preview-only bootstrap and source-checkout launcher |
+| `install.ps1`, `install-mainline.ps1`, `install-preview.ps1`, `polycode.ps1` | Windows installer, interactive Candidate/Preview/Stable bootstrap with list/switch/uninstall, Preview-only bootstrap and source-checkout launcher |
 | `.github/workflows/candidate-release.yml` | `Windows candidate` CI: build, package, install and smoke-test the Windows artifact |
 | `third_party/` | Vendored upstream source (Mermaid diagram stack) |
 

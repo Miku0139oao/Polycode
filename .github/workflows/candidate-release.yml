@@ -1,5 +1,9 @@
 name: Windows candidate
 on:
+  push:
+    branches: [main, fix/windows-terminal-ci]
+  pull_request:
+    branches: [main, fix/windows-terminal-ci]
   workflow_dispatch:
     inputs:
       action:
@@ -18,6 +22,9 @@ on:
 permissions:
   contents: read
   actions: read
+concurrency:
+  group: windows-candidate-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 jobs:
   terminal-probe:
     if: inputs.action == 'terminal-probe'
@@ -41,12 +48,18 @@ jobs:
           name: windows-terminal-probe
           path: windows-terminal-probe.json
   build:
-    if: inputs.action == 'build'
+    if: github.event_name != 'workflow_dispatch' || inputs.action == 'build'
     runs-on: windows-2022
     timeout-minutes: 180
+    env:
+      CARGO_INCREMENTAL: 0
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-candidate-msvc-j4-noinc
+          cache-on-failure: true
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
@@ -94,28 +107,14 @@ jobs:
       - name: Build actual release executable
         shell: pwsh
         run: |
-          cargo build --locked --release --target x86_64-pc-windows-msvc -p xai-grok-pager-bin --bin xai-grok-pager -j2 --message-format=json-render-diagnostics > cargo-build.jsonl
+          cargo build --locked --release --target x86_64-pc-windows-msvc -p xai-grok-pager-bin --bin xai-grok-pager -j4 --message-format=json-render-diagnostics > cargo-build.jsonl
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node integrations/build-report.mjs cargo-build.jsonl target/x86_64-pc-windows-msvc/release/xai-grok-pager.exe native-build.json
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - name: Native bridge unit regression
-        shell: pwsh
-        run: |
-          cargo test --locked --release --target x86_64-pc-windows-msvc -p xai-grok-shell --lib polycode::tests:: -j2 -- --test-threads=1
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cargo test --locked --release --target x86_64-pc-windows-msvc -p xai-grok-shell --lib outbound_messages_preserve_partial_inbound_frames -j2 -- --test-threads=1
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - name: Compaction and fast mode regression
-        shell: pwsh
-        run: |
-          cargo test --locked --release --target x86_64-pc-windows-msvc -p xai-grok-shell --lib session_compact -j2 -- --test-threads=1
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cargo test --locked --release --target x86_64-pc-windows-msvc -p xai-grok-shell --lib fast -j2 -- --test-threads=1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Package Windows candidate
         shell: pwsh
         env:
-          CANDIDATE_VERSION: ${{ inputs.version }}
+          CANDIDATE_VERSION: ${{ inputs.version || 'v0.2.1' }}
         run: |
           ./integrations/package-release.ps1 -Binary "$PWD/target/x86_64-pc-windows-msvc/release/xai-grok-pager.exe" -Runtime (Get-Command bun.exe).Source -BuildReport "$PWD/native-build.json" -Output "$PWD/candidate-out" -Version $env:CANDIDATE_VERSION
       - name: Install and run candidate in a real Windows terminal
@@ -128,6 +127,7 @@ jobs:
           node integrations/tests/windows-native-tools.mjs target/x86_64-pc-windows-msvc/release/xai-grok-pager.exe --mcp --task --grep --clean-path --ripgrep $smoke.searchExecutable
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           Move-Item windows-tools-report.json windows-tools-node-report.json
+          if (Test-Path windows-tools-unified.jsonl) { Move-Item windows-tools-unified.jsonl windows-tools-node-unified.jsonl }
           node integrations/tests/windows-native-tools.mjs target/x86_64-pc-windows-msvc/release/xai-grok-pager.exe --bun-bridge --slow-shell --mcp --task --grep --clean-path --ripgrep $smoke.searchExecutable
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
@@ -145,8 +145,25 @@ jobs:
             windows-smoke-report.json
             windows-tools-report.json
             windows-tools-node-report.json
+            windows-tools-terminal.txt
+            windows-tools-unified.jsonl
+            windows-tools-node-unified.jsonl
             windows-terminal-probe.json
             windows-smoke-terminal-*.json
+      - name: Native bridge unit regression
+        shell: pwsh
+        run: |
+          cargo test --locked --release --target x86_64-pc-windows-msvc -p xai-grok-shell --lib polycode::tests:: -j4 -- --test-threads=1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked --release --target x86_64-pc-windows-msvc -p xai-grok-shell --lib outbound_messages_preserve_partial_inbound_frames -j4 -- --test-threads=1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Compaction and fast mode regression
+        shell: pwsh
+        run: |
+          cargo test --locked --release --target x86_64-pc-windows-msvc -p xai-grok-shell --lib session_compact -j4 -- --test-threads=1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked --release --target x86_64-pc-windows-msvc -p xai-grok-shell --lib fast -j4 -- --test-threads=1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
   publish:
     if: inputs.action == 'publish'
     runs-on: windows-2022
