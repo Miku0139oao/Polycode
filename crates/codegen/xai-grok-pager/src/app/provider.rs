@@ -34,6 +34,11 @@ pub struct State {
     pub attempt: Option<LoginAttempt>,
     pub catalog: Catalog,
     pub login_menu: bool,
+    /// Last-used (or CLI `-m`) model restored once the startup catalog arrives.
+    pub preferred_model: Option<String>,
+    pub preferred_effort: Option<xai_grok_shell::sampling::types::ReasoningEffort>,
+    /// One auto-restore attempt per process so Esc at the picker is not immediately undone.
+    pub restore_attempted: bool,
     /// A local-only view until explicit model choice commits its ACP session.
     pub local_target: Option<AgentId>,
     pub creating: bool,

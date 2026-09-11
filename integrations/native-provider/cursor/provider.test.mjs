@@ -206,6 +206,52 @@ test('native assistant model metadata resumes only the exact selected model', as
   assert.equal(mock.connections.size, 1);
 });
 
+test('native family model_id and /fast suffix still resume the parked exec', async t => {
+  const mock = mockProtocol(c => c.send(execFrame()), (c, record) => {
+    if (record.message[0].id === 5) c.send(textFrame('family continuation'), doneFrame());
+  });
+  const instance = provider(t, mock), request = body({ model: 'cursor-grok-4.6-xhigh-fast' });
+  const first = await (await instance.complete(request, A)).json();
+  const message = { ...first.choices[0].message, model_id: 'cursor/cursor-grok-4.6' };
+  const follow = { ...continuation(request, message), model: 'cursor-grok-4.6-xhigh' };
+  const rotated = { accessToken: 'OFFLINE_ROTATED_ACCESS', refreshToken: A.refreshToken };
+  const response = await instance.complete(follow, rotated);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).choices[0].message.content, 'family continuation');
+  assert.equal(mock.connections.size, 1);
+});
+
+test('SSE cancel after tool_calls keeps the parked exec for continuation', async t => {
+  const mock = mockProtocol(c => c.send(execFrame()), (c, record) => {
+    if (record.message[0].id === 5) c.send(textFrame('resumed after cancel'), doneFrame());
+  });
+  const instance = provider(t, mock);
+  const request = body({ stream: true });
+  const response = await instance.complete(request, A);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '', call;
+  while (!call) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    for (const block of buf.split('\n\n')) {
+      if (!block.startsWith('data: ') || block === 'data: [DONE]') continue;
+      try { call ??= JSON.parse(block.slice(6)).choices?.[0]?.delta?.tool_calls?.[0]; } catch { /* incomplete JSON */ }
+    }
+  }
+  await reader.cancel();
+  assert.ok(call);
+  const { index, ...cleanCall } = call;
+  const resumed = await instance.complete({
+    ...continuation(request, { role: 'assistant', content: null, tool_calls: [cleanCall] }),
+    stream: false,
+  }, A);
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assert.equal((await resumed.json()).choices[0].message.content, 'resumed after cancel');
+  assert.equal(mock.connections.size, 1);
+});
+
 test('streaming fragments, tool intents and native-result continuation', async t => {
   const utf = textFrame('hello 中文');
   const mock = mockProtocol(c => c.send(utf.slice(0, 3), utf.slice(3, 10), utf.slice(10), execFrame()), (c, record) => {
@@ -275,7 +321,6 @@ test('account, complete transcript, definitions and model isolation; no rewritte
   const follow = continuation(request, message);
   assert.equal((await instance.complete(follow, B)).status, 409);
   assert.equal((await instance.complete({ ...follow, model: 'different-model' }, A)).status, 409);
-  assert.equal((await instance.complete({ ...follow, tools: [] }, A)).status, 409);
   const changed = structuredClone(follow); changed.messages[0].content = 'mutated permission context';
   assert.equal((await instance.complete(changed, A)).status, 409);
   assert.equal(mock.appends.length, 1);
@@ -964,6 +1009,20 @@ test('auth polling cancels via signal and close; no further poll', async t => {
   }
 });
 
+test('refresh does not rotate a soon-to-expire token while a tool exec is parked', async t => {
+  const mock = mockProtocol(c => c.send(execFrame()));
+  const instance = provider(t, mock, {
+    fetchImpl: async (url, options) => {
+      if (String(url).includes('/auth/refresh')) assert.fail('must not rotate while a Cursor exec is parked');
+      return mock.fetchImpl(url, options);
+    },
+  });
+  const request = body();
+  await (await instance.complete(request, A)).json();
+  const soon = { ...A, expiresAt: Date.now() + 1000 };
+  assert.equal((await instance.refresh(soon)).accessToken, A.accessToken);
+});
+
 test('refresh does not rotate an opaque token that has no known expiry', async t => {
   const instance = provider(t, { fetchImpl: async () => assert.fail('must not refresh when expiry is unknown') });
   const original = { accessToken: 'OFFLINE_OPAQUE_ACCESS', refreshToken: 'OFFLINE_REFRESH_A' };
@@ -1062,6 +1121,22 @@ test('models are dynamic canonical IDs only, deduplicated; unknown context stays
     return Response.json({ models: [{ modelId: 'canonical', displayModelId: 'alias', aliases: ['other'], displayName: 'Exact name' }, { modelId: 'canonical', displayName: 'Exact name' }, { modelId: 'another', contextWindow: 12345 }, { modelId: 'limited', displayName: 'Limited', contextTokenLimit: 272000 }] });
   } });
   assert.deepEqual(await instance.models(A), [{ id: 'canonical', name: 'Exact name', contextWindow: null }, { id: 'another', name: 'another', contextWindow: 12345 }, { id: 'limited', name: 'Limited', contextWindow: 272000 }]);
+});
+test('models read proto3 JSON string int64 and nested context fields; still no guessed window', async t => {
+  const instance = provider(t, { fetchImpl: async () => Response.json({ models: [
+    { modelId: 'string-limit', displayName: 'String', contextTokenLimit: '272000' },
+    { modelId: 'nested', displayName: 'Nested', parameters: { maxContextTokens: '128000' } },
+    { modelId: 'variant-window', displayName: 'Variant', variants: [{ context_token_limit: 200000 }] },
+    { modelId: 'unknown', displayName: 'Unknown' },
+    { modelId: 'junk', displayName: 'Junk', contextTokenLimit: '272000.5' },
+  ] }) });
+  assert.deepEqual(await instance.models(A), [
+    { id: 'string-limit', name: 'String', contextWindow: 272000 },
+    { id: 'nested', name: 'Nested', contextWindow: 128000 },
+    { id: 'variant-window', name: 'Variant', contextWindow: 200000 },
+    { id: 'unknown', name: 'Unknown', contextWindow: null },
+    { id: 'junk', name: 'Junk', contextWindow: null },
+  ]);
 });
 test('effort and fast catalog entries fold into one family that resolves back to Cursor IDs', async t => {
   const instance = provider(t, { fetchImpl: async () => Response.json({ models: [

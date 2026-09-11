@@ -83,6 +83,46 @@ fn card(app: &mut AppView, title: String, options: Vec<QuestionOption>, login: b
     agent.active_pane = crate::app::agent_view::ActivePane::Prompt;
     agent.prompt.set_text("");
 }
+/// Reuse the last signed-in model (or CLI `-m`) instead of the provider-then-model cards.
+/// Only the first unauthenticated startup catalog (`provider: None`) may restore; login and
+/// `/provider` keep the explicit picker. Missing or signed-out targets fall through to the menu.
+fn try_restore_preferred(app: &mut AppView) -> Option<Vec<Effect>> {
+    if app.provider.restore_attempted || app.provider.login_menu {
+        return None;
+    }
+    app.provider.restore_attempted = true;
+    if app.provider.local_target.is_none() || app.provider.creating {
+        return None;
+    }
+    let model = app
+        .provider
+        .preferred_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())?
+        .to_owned();
+    let id = agent_client_protocol::ModelId::new(model.clone());
+    if !app.models.available.contains_key(&id) {
+        return None;
+    }
+    if (model.starts_with("codex/") || model.starts_with("cursor/"))
+        && !app.provider.catalog.providers.iter().any(|provider| {
+            provider.logged_in
+                && provider
+                    .models
+                    .iter()
+                    .any(|entry| model == format!("{}/{}", provider.id.as_str(), entry.id))
+        })
+    {
+        return None;
+    }
+    let effort = app.provider.preferred_effort.filter(|effort| {
+        app.models
+            .resolve_effort_for_model(&id, effort.as_str())
+            .is_ok()
+    });
+    Some(dispatch_enabled(app, Command::ModelEffort(model, effort)))
+}
 fn menu(app: &mut AppView) {
     if app.provider.selected.is_none() {
         app.provider.selected = match xai_grok_shell::polycode::initial_provider() {
@@ -469,6 +509,11 @@ pub(super) fn complete(
                     .update_catalog(native_models.available.clone());
             }
             app.provider.catalog = catalog;
+            if provider.is_none()
+                && let Some(effects) = try_restore_preferred(app)
+            {
+                return effects;
+            }
             if let Some(provider) = provider {
                 models(app, provider);
             } else {

@@ -1090,7 +1090,9 @@ pub(crate) async fn run(
     mut writer_event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::render::draw::WriterEvent>,
 ) -> anyhow::Result<RunResult> {
     let external_acp = connection.auth_manager.is_none();
-    if !external_acp { crate::unified_log::init(connection.tx.clone()); }
+    if !external_acp {
+        crate::unified_log::init(connection.tx.clone());
+    }
     crate::unified_log::info("pager started", None, None);
     xai_grok_telemetry::startup::enter(xai_grok_telemetry::startup::StartupPhase::AppInit);
     let mut app = AppView::new(
@@ -1221,6 +1223,29 @@ pub(crate) async fn run(
         .as_deref()
         .map(agent_client_protocol::ModelId::new);
     app.cli_effort_token = args.reasoning_effort.clone();
+    if xai_grok_shell::polycode::enabled() {
+        if let Some(models) = launch_effective_config
+            .as_ref()
+            .and_then(|root| root.get("models"))
+        {
+            app.provider.preferred_model = models
+                .get("default")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned);
+            app.provider.preferred_effort = models
+                .get("default_reasoning_effort")
+                .and_then(|value| value.as_str())
+                .and_then(|token| token.parse().ok());
+        }
+        if let Some(model) = app.cli_model_override.as_ref() {
+            app.provider.preferred_model = Some(model.0.to_string());
+        }
+        if let Some(token) = app.cli_effort_token.as_deref() {
+            app.provider.preferred_effort = token.parse().ok();
+        }
+    }
     app.auth_use_oauth = args.oauth;
     app.show_resolved_model = remote_settings
         .as_ref()
@@ -1292,8 +1317,8 @@ pub(crate) async fn run(
     // Seed auth state from ACP connection metadata.
     // --force-login overrides: show the login screen even when credentials exist.
     let force_login = args.force_login && !connection.auth_methods.is_empty();
-    let needs_interactive_login = (connection.needs_login || force_login)
-        && !xai_grok_shell::polycode::enabled();
+    let needs_interactive_login =
+        (connection.needs_login || force_login) && !xai_grok_shell::polycode::enabled();
     if needs_interactive_login {
         app.welcome_prompt_focused = false;
 
@@ -1347,7 +1372,10 @@ pub(crate) async fn run(
     // Effects stashed until after the initial render, so the user sees the welcome/auth UI right away
     super::external::apply(&mut app);
     let mut post_render_effects = if xai_grok_shell::polycode::enabled() {
-        dispatch::dispatch(Action::Provider(crate::app::provider::Command::Menu { login: force_login }), &mut app)
+        dispatch::dispatch(
+            Action::Provider(crate::app::provider::Command::Menu { login: force_login }),
+            &mut app,
+        )
     } else if needs_interactive_login {
         if connection.auth_methods.is_empty() {
             // preferred_method pin unavailable: no advertised method to start
@@ -1386,10 +1414,11 @@ pub(crate) async fn run(
     }
 
     // After auth so API-key and managed policy resolve correctly
-    let voice_mode_enabled = !external_acp && crate::app::resolve_voice_mode_live(
-        remote_settings.as_ref().and_then(|s| s.voice_mode_enabled),
-        app.is_api_key_auth,
-    );
+    let voice_mode_enabled = !external_acp
+        && crate::app::resolve_voice_mode_live(
+            remote_settings.as_ref().and_then(|s| s.voice_mode_enabled),
+            app.is_api_key_auth,
+        );
     if !voice_mode_enabled {
         app.voice_reset();
         app.voice_ui_active = false;
@@ -2292,7 +2321,8 @@ pub(crate) async fn run(
         // Lazy voice pipeline: only after `/voice` or Ctrl+Space while gates allow
         // Consume the queued cold-start, carrying its hold-ownership and bound target forward into the live recording it spawns
         if let VoiceState::ColdStart { hold, target } = app.voice_state {
-            if app.voice_cmd_tx.is_none() && app.voice_can_start_pipeline()
+            if app.voice_cmd_tx.is_none()
+                && app.voice_can_start_pipeline()
                 && let Some(auth_manager) = voice_auth_factory.as_ref()
             {
                 let voice_auth = crate::voice::build_voice_auth(auth_manager.clone());
@@ -4439,7 +4469,9 @@ fn process_effects(
     super::external::apply(app);
     let flags = session_flags_for_effects(app, &effs);
     for eff in effs {
-        if app.external_acp && !super::external::effect_allowed(&eff) { continue; }
+        if app.external_acp && !super::external::effect_allowed(&eff) {
+            continue;
+        }
         let (quit, meta) = effects::execute(eff, tasks, &app.acp_tx, &app.cwd, &flags, progress_tx);
         // Install auth abort handle if the current auth state still matches.
         if let Some((seq, abort_handle)) = meta.auth_abort_handle

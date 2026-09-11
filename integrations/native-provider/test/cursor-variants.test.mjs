@@ -72,6 +72,16 @@ test('effort and fast variants fold into one family with the unsuffixed entry as
   assert.deepEqual(folded[5], m('muse-spark-1.3-minimal', 'Muse Spark 1.3 Minimal'));
 });
 
+test('folded family inherits a shared sibling context window when the primary omits one', () => {
+  const [family] = foldCursorCatalog([
+    { id: 'composer-2.5', name: 'Composer 2.5', contextWindow: null },
+    { id: 'composer-2.5-fast', name: 'Composer 2.5 Fast', contextWindow: 200000 },
+  ]);
+  assert.equal(family.id, 'composer-2.5');
+  assert.equal(family.contextWindow, 200000);
+  assert.equal(family.supportsFast, true);
+});
+
 test('families without a medium variant default to the lowest advertised effort and strip only matching name suffixes', () => {
   const [grok] = foldCursorCatalog([m('cursor-grok-4.6-high', 'Cursor Grok 4.6 (High)'), m('cursor-grok-4.6-xhigh-fast', 'Cursor Grok 4.6 XHigh Fast')]);
   assert.equal(grok.id, 'cursor-grok-4.6');

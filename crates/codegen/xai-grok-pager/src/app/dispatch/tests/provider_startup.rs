@@ -16,6 +16,10 @@ fn local_picker() -> (AppView, AgentId) {
 }
 
 fn catalog_reply(logged_in: bool) -> Reply {
+    startup_catalog_reply(logged_in, Some(Choice::Subscription(ProviderId::Codex)))
+}
+
+fn startup_catalog_reply(logged_in: bool, provider: Option<Choice>) -> Reply {
     let model = acp::ModelId::new("codex/actual");
     let catalog: Catalog = serde_json::from_value(serde_json::json!({"providers":[{
         "id":"codex", "name":"ChatGPT", "loggedIn": logged_in,
@@ -28,13 +32,70 @@ fn catalog_reply(logged_in: bool) -> Reply {
             model.clone(),
             vec![acp::ModelInfo::new(model, "Actual")],
         ),
-        provider: Some(Choice::Subscription(ProviderId::Codex)),
+        provider,
     }
 }
 
 fn publish_catalog(app: &mut AppView, id: AgentId, logged_in: bool) {
     let generation = app.provider.generation;
     assert!(complete(app, generation, id, catalog_reply(logged_in)).is_empty());
+}
+
+fn startup_picker() -> (AppView, AgentId) {
+    let mut app = test_app();
+    let effects = dispatch_enabled(&mut app, Command::Menu { login: false });
+    assert!(effects.iter().all(|e| matches!(e, Effect::Provider { .. })));
+    let ActiveView::Agent(id) = app.active_view else {
+        panic!("missing local picker")
+    };
+    assert_eq!(app.provider.local_target, Some(id));
+    assert!(!app.provider.login_menu);
+    (app, id)
+}
+
+#[test]
+fn polycode_startup_reuses_last_signed_in_model_without_the_picker() {
+    let (mut app, id) = startup_picker();
+    app.provider.preferred_model = Some("codex/actual".into());
+    let generation = app.provider.generation;
+    let effects = complete(&mut app, generation, id, startup_catalog_reply(true, None));
+    assert!(
+        matches!(&effects[..], [Effect::CreateSession { agent_id, model_id: Some(mid), .. }]
+        if *agent_id == id && mid.0.as_ref() == "codex/actual"),
+        "expected restored session, got {effects:?}"
+    );
+    assert!(app.provider.creating);
+    assert!(app.provider.restore_attempted);
+    assert!(app.agents[&id].question_view.is_none());
+    assert!(app.agents[&id].active_modal.is_none());
+}
+
+#[test]
+fn polycode_startup_keeps_picker_when_last_model_is_signed_out() {
+    let (mut app, id) = startup_picker();
+    app.provider.preferred_model = Some("codex/actual".into());
+    let generation = app.provider.generation;
+    let effects = complete(&mut app, generation, id, startup_catalog_reply(false, None));
+    assert!(effects.is_empty());
+    assert!(!app.provider.creating);
+    assert!(app.provider.restore_attempted);
+    let q = app.agents[&id].question_view.as_ref().unwrap();
+    assert!(matches!(
+        q.local_kind,
+        Some(crate::views::question_view::LocalQuestionKind::Provider { .. })
+    ));
+}
+
+#[test]
+fn polycode_login_menu_does_not_auto_restore_last_model() {
+    let (mut app, id) = local_picker();
+    app.provider.preferred_model = Some("codex/actual".into());
+    let generation = app.provider.generation;
+    let effects = complete(&mut app, generation, id, startup_catalog_reply(true, None));
+    assert!(effects.is_empty());
+    assert!(!app.provider.creating);
+    assert!(!app.provider.restore_attempted);
+    assert!(app.agents[&id].question_view.is_some());
 }
 
 #[test]

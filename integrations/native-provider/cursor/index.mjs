@@ -62,9 +62,27 @@ function json(value, depth = 0) {
 const hash = value => createHash('sha256').update(value).digest('hex');
 function firstPositiveInt(...values) {
   for (const value of values) {
-    if (Number.isSafeInteger(value) && value > 0) return value;
+    const n = typeof value === 'string' && /^\d{1,15}$/.test(value) ? Number(value) : value;
+    if (Number.isSafeInteger(n) && n > 0) return n;
   }
   return null;
+}
+const CONTEXT_KEYS = [
+  'contextWindow', 'context_window', 'contextTokenLimit', 'context_token_limit',
+  'maxContextTokens', 'max_context_tokens', 'contextLength', 'context_length',
+  'inputTokenLimit', 'input_token_limit', 'tokenLimit', 'token_limit',
+  'contextWindowSize', 'context_window_size',
+];
+function contextFrom(value) {
+  return object(value) ? firstPositiveInt(...CONTEXT_KEYS.map(key => value[key])) : null;
+}
+/** Catalog window only: never invent 200k/1M. Proto3 JSON encodes int64 as a decimal string. */
+function modelContextWindow(item) {
+  return contextFrom(item)
+    ?? (Array.isArray(item.variants) ? item.variants.map(contextFrom).find(n => n != null) : null)
+    ?? contextFrom(item.parameters)
+    ?? contextFrom(item.modelDetails)
+    ?? null;
 }
 function token(value) {
   if (typeof value !== 'string' || !value.length || value.length > 65536 || /\s|[\x00-\x1f\x7f]/.test(value)) {
@@ -147,16 +165,26 @@ function remoteBody(body) {
   }
   return remote;
 }
-function configKey(body) {
-  const { messages, stream, stream_options, ...config } = body;
-  return hash(json(config));
+function configKey(body, { includeModel = true } = {}) {
+  const { messages, stream, stream_options, model, ...rest } = body;
+  return hash(json(includeModel ? { model, ...rest } : rest));
+}
+function cursorFamilyId(id) {
+  return typeof id === 'string' && id.includes('/') ? id.slice(id.indexOf('/') + 1) : id;
+}
+function cursorFamilyMatches(parked, selected) {
+  if (parked === selected) return true;
+  const a = cursorFamilyId(parked), b = cursorFamilyId(selected);
+  return typeof a === 'string' && typeof b === 'string' && (a === b || a.startsWith(`${b}-`) || b.startsWith(`${a}-`));
+}
+function annotatedModelMatches(actual, selected) {
+  if (!Object.hasOwn(actual, 'model_id')) return true;
+  return cursorFamilyMatches(actual.model_id, selected);
 }
 function assistantMatches(actual, expected, model) {
   // Native engines may omit content:null or use "". All actual tool fields must match.
   if (!actual || actual.role !== 'assistant' || (actual.content ?? '') !== (expected.content ?? '')) return false;
-  // Native transcript storage annotates assistant messages with their source
-  // model. Accept that exact identity only; it cannot select another session.
-  if (Object.hasOwn(actual, 'model_id') && actual.model_id !== model) return false;
+  if (!annotatedModelMatches(actual, model)) return false;
   if (Object.keys(actual).some(key => !['role', 'content', 'tool_calls', 'model_id'].includes(key))) return false;
   return json(actual.tool_calls ?? []) === json(expected.tool_calls ?? []);
 }
@@ -209,6 +237,13 @@ export function createCursorProvider({
     session.base = undefined;
     session.expected = undefined;
   }
+  // HTTP abort/SSE cancel must not own a parked exec: the native client closes the
+  // first response as soon as it sees tool_calls and immediately POSTs the result.
+  function detachHttp(session) {
+    session.off?.();
+    session.off = undefined;
+    session.busy = false;
+  }
   function touch(session, timeoutMs = sessionTtlMs) {
     clearTimeoutImpl(session.timer);
     session.timer = setTimeoutImpl(() => drop(session), timeoutMs);
@@ -250,7 +285,8 @@ export function createCursorProvider({
     // A still-valid access token needs no refresh, including poll responses
     // without a refresh token. Unknown expiry must not rotate: a new
     // accessToken hash cannot resume a parked tool call (409).
-    if (old.expiresAt === undefined || old.expiresAt > now() + 60000) return old;
+    const parked = [...sessions].some(s => s.pending || s.busy);
+    if (old.expiresAt === undefined || old.expiresAt > now() + (parked ? 0 : 60000)) return old;
     if (!old.refreshToken) throw fail('refresh_unavailable', 'No Cursor refresh token; sign in again.', 401);
     const op = operation(signal, requestTimeoutMs);
     try {
@@ -275,9 +311,7 @@ export function createCursorProvider({
       for (const item of result.models) {
         if (typeof item?.modelId !== 'string' || !item.modelId) throw fail('invalid_models', 'Cursor model catalog is missing a canonical model ID.');
         const name = item.displayName ?? item.modelId;
-        const contextWindow = firstPositiveInt(
-          item.contextWindow, item.context_window, item.contextTokenLimit, item.context_token_limit,
-        ); // Unknown means unknown: no guessed 200k/1M sizes.
+        const contextWindow = modelContextWindow(item); // Unknown means unknown: no guessed 200k/1M sizes.
         if (typeof name !== 'string' || !name || (contextWindow !== null && (!Number.isSafeInteger(contextWindow) || contextWindow <= 0))) throw fail('invalid_models', 'Cursor returned invalid model metadata.');
         const model = { id: item.modelId, name, contextWindow };
         if (catalog.has(model.id) && json(catalog.get(model.id)) !== json(model)) throw fail('invalid_models', 'Cursor returned conflicting model IDs.');
@@ -308,21 +342,23 @@ export function createCursorProvider({
   }
 
   async function prepare(body, c, signal) {
-    const account = hash(c.accessToken), config = configKey(body), base = json(body.messages);
+    const account = hash(c.refreshToken || c.accessToken), config = configKey(body), configSansModel = configKey(body, { includeModel: false }), base = json(body.messages);
     const last = body.messages.at(-1);
     let session;
     if (last.role === 'tool') {
       const prefix = json(body.messages.slice(0, -2));
-      // Establish unique ownership before configuration: a changed choice/model must not select
-      // another parked connection whose backend happened to reuse the exact assistant call.
-      const matches = [...sessions].filter(s => s.account === account && s.base === prefix && s.expected && assistantMatches(body.messages.at(-2), s.expected, body.model) && last.tool_call_id === s.pending.toolCallId);
-      if (matches.length !== 1 || matches[0].config !== config) {
-        // Diagnostic candidates never authorize submission or select a connection.
-        const pending = [...sessions].filter(s => s.account === account && s.pending?.toolCallId === last.tool_call_id);
-        const reason = matches.length > 1 || pending.length > 1 ? 'Multiple live Cursor calls match this result.'
+      const pending = [...sessions].filter(s => s.account === account && s.pending?.toolCallId === last.tool_call_id);
+      // `/fast` / effort rewrite the concrete Cursor ID; unique exec + transcript still bind.
+      // Ambiguous reuse of the same call ID across two parked configs stays a 409.
+      const matches = pending.filter(s => s.expected && s.base === prefix && s.configSansModel === configSansModel
+        && assistantMatches(body.messages.at(-2), s.expected, body.model)
+        && cursorFamilyMatches(s.model, body.model));
+      if (pending.length !== 1 || matches.length !== 1) {
+        const reason = pending.length > 1 ? 'Multiple live Cursor calls match this result.'
           : pending.length === 0 ? 'No live Cursor call owns this result; the turn may have expired or been closed.'
-          : pending[0].config !== config ? 'Cursor configuration changed while a native tool call was pending.'
           : pending[0].base !== prefix ? 'Cursor transcript changed while a native tool call was pending (for example, compaction or context injection).'
+          : pending[0].configSansModel !== configSansModel || !cursorFamilyMatches(pending[0].model, body.model)
+            ? 'Cursor configuration changed while a native tool call was pending.'
           : 'The native assistant message differs from the pending Cursor call.';
         throw fail('continuation_mismatch', `${reason} Do not replay; restart explicitly.`, 409);
       }
@@ -333,7 +369,7 @@ export function createCursorProvider({
       if (last.role !== 'user') throw invalid();
       if ([...sessions].some(s => s.account === account && s.config === config && s.base === base)) throw fail('session_busy', 'This Cursor transcript already has an active or pending turn.', 409);
       if (sessions.size >= maxSessions) throw fail('session_limit', 'Cursor session limit reached; finish or close existing sessions.', 429);
-      session = { account, config, base, busy: true, controller: new AbortController(),
+      session = { account, config, configSansModel, base, model: body.model, busy: true, controller: new AbortController(),
         seen: new Set(body.messages.flatMap(m => (m.tool_calls ?? []).map(c => c.id))) };
       sessions.add(session);
       session.maxTimer = setTimeoutImpl(() => drop(session), maxSessionMs);
@@ -411,9 +447,7 @@ export function createCursorProvider({
       const id = `chatcmpl-${uuid()}`, created = Math.floor(now() / 1000);
       const iterator = turn(session, body);
       function release() {
-        session.busy = false;
-        // A completed HTTP response no longer owns cancellation of a parked remote turn.
-        session.off?.(); session.off = undefined;
+        detachHttp(session);
         if (sessions.has(session)) {
           if (session.pending) touch(session, parkedToolTimeoutMs);
           else drop(session); // A remote text completion no longer needs its connection.
@@ -464,6 +498,11 @@ export function createCursorProvider({
         },
         cancel() {
           terminal = true;
+          if (session.pending) {
+            detachHttp(session);
+            touch(session, parkedToolTimeoutMs);
+            return;
+          }
           drop(session);
           void iterator.return().catch(() => {});
         },

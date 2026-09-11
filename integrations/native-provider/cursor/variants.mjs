@@ -52,7 +52,11 @@ function foldGroup(members) {
   }
   const primary = pickDefault(members);
   const primaryEffort = resolved.find(m => m.model.id === primary.model.id).effort;
-  const family = { id: primary.variant.family, name: stripSuffixWords(primary.model.name, primary.variant), contextWindow: primary.model.contextWindow };
+  const windows = members.map(m => m.model.contextWindow).filter(w => Number.isSafeInteger(w) && w > 0);
+  const contextWindow = !windows.length ? primary.model.contextWindow
+    : windows.every(w => w === windows[0]) ? windows[0]
+    : primary.model.contextWindow;
+  const family = { id: primary.variant.family, name: stripSuffixWords(primary.model.name, primary.variant), contextWindow };
   if (explicitEfforts) {
     const levels = new Map();
     for (const m of resolved) if (!levels.has(m.effort) || (levels.get(m.effort).implicit && !m.implicit)) levels.set(m.effort, m);
