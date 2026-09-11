@@ -40,7 +40,8 @@ test('spawn failures are staged and leave no signal listeners behind', async () 
 test('fresh Cursor access tokens can discover unknown-context models without refresh', async () => {
   const future = Date.now() + 3600000;
   const provider = createCursorProvider({ fetchImpl: async url => {
-    assert.ok(url.endsWith('/GetUsableModels'), 'Fresh token attempted refresh');
+    assert.ok(url.endsWith('/GetUsableModels') || url.endsWith('/AvailableModels'), 'Fresh token attempted refresh');
+    if (url.endsWith('/AvailableModels')) return Response.json({ models: [] });
     return Response.json({ models: [{ modelId: 'from-upstream', displayName: 'Actual upstream name' }] });
   }});
   let current = {accessToken:'SYNTHETIC_FRESH',expiresAt:future};

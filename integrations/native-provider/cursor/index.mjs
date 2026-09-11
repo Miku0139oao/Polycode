@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { CursorProviderError, fail, safeError, checkSignal, onAbort, delay, errorBody } from './errors.mjs';
 import { API, WEBSITE, Connection, headers, request, httpError, readJson } from './transport.mjs';
 import { validateMessages } from './content.mjs';
-import { foldCursorCatalog } from './variants.mjs';
+import { foldCursorCatalog, parseVariant } from './variants.mjs';
 
 function finitePercent(value) {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1000 ? value : undefined;
@@ -83,6 +83,43 @@ function modelContextWindow(item) {
     ?? contextFrom(item.parameters)
     ?? contextFrom(item.modelDetails)
     ?? null;
+}
+/** `GetUsableModels` (CLI identity) has no window. `AvailableModels` publishes int32 `context_token_limit`. */
+function availableWindowIndex(models) {
+  const index = new Map();
+  const remember = (key, window, maxWindow) => {
+    if (typeof key !== 'string' || !key) return;
+    const id = key.toLowerCase();
+    const current = index.get(id) ?? {};
+    index.set(id, { window: current.window ?? window, maxWindow: current.maxWindow ?? maxWindow });
+  };
+  if (!Array.isArray(models)) return index;
+  for (const item of models) {
+    if (!object(item)) continue;
+    const window = firstPositiveInt(item.contextTokenLimit, item.context_token_limit);
+    const maxWindow = firstPositiveInt(item.contextTokenLimitForMaxMode, item.context_token_limit_for_max_mode);
+    if (window == null && maxWindow == null) continue;
+    remember(item.name, window, maxWindow);
+    remember(item.serverModelName ?? item.server_model_name, window, maxWindow);
+  }
+  return index;
+}
+function windowFromAvailable(item, index) {
+  const maxMode = item.maxMode === true || item.max_mode === true;
+  const ids = [item.modelId, item.displayModelId, item.display_model_id, ...(Array.isArray(item.aliases) ? item.aliases : [])];
+  for (const raw of ids) {
+    if (typeof raw !== 'string' || !raw) continue;
+    const keys = [raw.toLowerCase()];
+    const family = parseVariant(raw)?.family;
+    if (typeof family === 'string' && family && family !== raw) keys.push(family.toLowerCase());
+    for (const key of keys) {
+      const hit = index.get(key);
+      if (!hit) continue;
+      if (maxMode && hit.maxWindow != null) return hit.maxWindow;
+      return hit.window ?? hit.maxWindow ?? null;
+    }
+  }
+  return null;
 }
 function token(value) {
   if (typeof value !== 'string' || !value.length || value.length > 65536 || /\s|[\x00-\x1f\x7f]/.test(value)) {
@@ -300,18 +337,29 @@ export function createCursorProvider({
     live(signal);
     const c = credential(input, now());
     const op = operation(signal, requestTimeoutMs);
-    try {
-      const response = await request(fetchImpl, `${API}/aiserver.v1.AiService/GetUsableModels`, {
-        method: 'POST', headers: { ...headers(c.accessToken, uuid(), now()), 'content-type': 'application/json', accept: 'application/json', 'connect-protocol-version': '1' }, body: '{}', signal: op.signal,
+    const rpc = async (path, body) => {
+      const response = await request(fetchImpl, `${API}${path}`, {
+        method: 'POST',
+        headers: { ...headers(c.accessToken, uuid(), now()), 'content-type': 'application/json', accept: 'application/json', 'connect-protocol-version': '1' },
+        body, signal: op.signal,
       });
       if (!response.ok) { void response.body?.cancel().catch(() => {}); throw httpError(response.status); }
-      const result = await readJson(response, op.signal);
+      return readJson(response, op.signal);
+    };
+    try {
+      const result = await rpc('/aiserver.v1.AiService/GetUsableModels', '{}');
       if (!Array.isArray(result?.models)) throw fail('invalid_models', 'Cursor returned an invalid model catalog.');
+      let available = new Map();
+      try {
+        // Identity stays GetUsableModels (CLI modelId). Windows live on AvailableModels.context_token_limit.
+        const extra = await rpc('/aiserver.v1.AiService/AvailableModels', JSON.stringify({ includeLongContextModels: true, useModelParameters: true }));
+        available = availableWindowIndex(extra?.models);
+      } catch { /* Keep the identity catalog; unknown windows stay null. */ }
       const catalog = new Map();
       for (const item of result.models) {
         if (typeof item?.modelId !== 'string' || !item.modelId) throw fail('invalid_models', 'Cursor model catalog is missing a canonical model ID.');
         const name = item.displayName ?? item.modelId;
-        const contextWindow = modelContextWindow(item); // Unknown means unknown: no guessed 200k/1M sizes.
+        const contextWindow = modelContextWindow(item) ?? windowFromAvailable(item, available);
         if (typeof name !== 'string' || !name || (contextWindow !== null && (!Number.isSafeInteger(contextWindow) || contextWindow <= 0))) throw fail('invalid_models', 'Cursor returned invalid model metadata.');
         const model = { id: item.modelId, name, contextWindow };
         if (catalog.has(model.id) && json(catalog.get(model.id)) !== json(model)) throw fail('invalid_models', 'Cursor returned conflicting model IDs.');

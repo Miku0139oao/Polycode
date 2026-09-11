@@ -1115,12 +1115,42 @@ test('usage failures do not leak upstream bodies or become a fake 0%', async t =
 });
 test('models are dynamic canonical IDs only, deduplicated; unknown context stays null', async t => {
   const instance = provider(t, { fetchImpl: async (url, options) => {
-    assert.equal(url, 'https://api2.cursor.sh/aiserver.v1.AiService/GetUsableModels');
+    assert.ok(url === 'https://api2.cursor.sh/aiserver.v1.AiService/GetUsableModels' || url === 'https://api2.cursor.sh/aiserver.v1.AiService/AvailableModels');
     assert.equal(options.headers.authorization, `Bearer ${A.accessToken}`);
     assert.equal(options.headers['connect-protocol-version'], '1');
+    if (url.endsWith('/AvailableModels')) return Response.json({ models: [] });
     return Response.json({ models: [{ modelId: 'canonical', displayModelId: 'alias', aliases: ['other'], displayName: 'Exact name' }, { modelId: 'canonical', displayName: 'Exact name' }, { modelId: 'another', contextWindow: 12345 }, { modelId: 'limited', displayName: 'Limited', contextTokenLimit: 272000 }] });
   } });
   assert.deepEqual(await instance.models(A), [{ id: 'canonical', name: 'Exact name', contextWindow: null }, { id: 'another', name: 'another', contextWindow: 12345 }, { id: 'limited', name: 'Limited', contextWindow: 272000 }]);
+});
+test('AvailableModels context_token_limit fills GetUsableModels rows that omit a window', async t => {
+  const instance = provider(t, { fetchImpl: async (url, options) => {
+    if (url.endsWith('/AvailableModels')) {
+      assert.deepEqual(JSON.parse(options.body), { includeLongContextModels: true, useModelParameters: true });
+      return Response.json({ models: [
+        { name: 'claude-fable-5-1-thinking', serverModelName: 'claude-fable-5-1-thinking', contextTokenLimit: 200000, contextTokenLimitForMaxMode: 1000000 },
+        { name: 'composer-2.5', context_token_limit: 200000 },
+      ] });
+    }
+    return Response.json({ models: [
+      { modelId: 'claude-fable-5-1-thinking', displayName: 'Claude Fable 5.1 1M Medium Thinking (NO ZDR)', maxMode: true },
+      { modelId: 'claude-fable-5-1-thinking-xhigh', displayName: 'Claude Fable 5.1 Thinking xhigh' },
+      { modelId: 'composer-2.5', displayName: 'Composer 2.5' },
+      { modelId: 'unknown', displayName: 'Unknown' },
+    ] });
+  } });
+  const models = await instance.models(A);
+  const byId = Object.fromEntries(models.map(m => [m.id, m]));
+  assert.equal(byId['claude-fable-5-1-thinking'].contextWindow, 1000000);
+  assert.equal(byId['composer-2.5'].contextWindow, 200000);
+  assert.equal(byId.unknown.contextWindow, null);
+});
+test('AvailableModels failure does not drop the GetUsableModels identity catalog', async t => {
+  const instance = provider(t, { fetchImpl: async url => {
+    if (url.endsWith('/AvailableModels')) return new Response('OFFLINE_SECRET', { status: 403 });
+    return Response.json({ models: [{ modelId: 'canonical', displayName: 'Exact name' }] });
+  } });
+  assert.deepEqual(await instance.models(A), [{ id: 'canonical', name: 'Exact name', contextWindow: null }]);
 });
 test('models read proto3 JSON string int64 and nested context fields; still no guessed window', async t => {
   const instance = provider(t, { fetchImpl: async () => Response.json({ models: [
