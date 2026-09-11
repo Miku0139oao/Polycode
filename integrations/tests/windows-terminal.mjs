@@ -31,9 +31,22 @@ export class WindowsTerminal {
   async close() {
     this.write('\x1b'); await delay(500);
     const quitRequestedAt = Date.now();
-    this.write('\x11'); await delay(250); this.write('\x11');
     const deadline = quitRequestedAt + 10000;
-    while (!this.exited && Date.now() < deadline) await delay(100);
+    this.quitPresses = 0;
+    const press = () => { if (!this.exited) { this.write('\x11'); this.quitPresses++; } };
+    press();
+    // The TUI confirms quitting on a second Ctrl+Q. Wait for that prompt rather
+    // than a fixed delay: a keypress that lands while the welcome panel is still
+    // redrawing has been dropped on CI, leaving "press again to quit" on screen.
+    const armed = this.output.length;
+    const promptDeadline = Date.now() + 2000;
+    while (!this.exited && Date.now() < promptDeadline && !plain(this.output.slice(armed)).includes('press again to quit')) await delay(50);
+    press();
+    let retryAt = Date.now() + 3000;
+    while (!this.exited && Date.now() < deadline) {
+      await delay(100);
+      if (!this.exited && Date.now() >= retryAt) { press(); await delay(250); press(); retryAt = Date.now() + 3000; }
+    }
     // Milliseconds from the first Ctrl+Q until the process exited (or until the
     // harness gave up), so a report can tell a slow teardown from a lost keypress.
     // A repeated close() on an already-exited terminal must not overwrite it.
