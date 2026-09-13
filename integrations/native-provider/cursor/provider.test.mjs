@@ -221,6 +221,68 @@ test('native family model_id and /fast suffix still resume the parked exec', asy
   assert.equal(mock.connections.size, 1);
 });
 
+for (const mode of ['abort', 'idle expiry']) {
+  test(`${mode} after tool_calls keeps the parked exec for continuation`, async t => {
+    const mock = mockProtocol(c => c.send(execFrame()), (c, record) => {
+      if (record.message[0].id === 5) c.send(textFrame('resumed after http close'), doneFrame());
+    });
+    const instance = provider(t, mock, { sessionTtlMs: mode === 'idle expiry' ? 100 : 10000 });
+    const abort = new AbortController();
+    const request = body({ stream: true });
+    const response = await instance.complete(request, A, { signal: abort.signal });
+    const reader = response.body.getReader();
+    let call;
+    while (!call) {
+      const event = await readSseEvent(reader);
+      if (event === undefined || event === '[DONE]') break;
+      call = event.choices?.[0]?.delta?.tool_calls?.[0];
+    }
+    assert.ok(call);
+    if (mode === 'abort') abort.abort('OFFLINE_SECRET_REASON');
+    else await sleep(150);
+    await reader.cancel();
+    assert.equal(
+      [...mock.connections.values()][0].cancelled,
+      false,
+      'closing the first HTTP/SSE response must not cancel the parked Cursor stream',
+    );
+    const { index, ...cleanCall } = call;
+    const resumed = await instance.complete({
+      ...continuation(request, { role: 'assistant', content: null, tool_calls: [cleanCall] }),
+      stream: false,
+    }, A);
+    assert.equal(resumed.status, 200, 'HTTP abort after tool_calls must not drop the parked Cursor exec');
+    assert.equal((await resumed.json()).choices[0].message.content, 'resumed after http close');
+  });
+}
+
+test('idle TTL does not drop a live Cursor generation waiting for the next token', async t => {
+  const mock = mockProtocol(async c => {
+    await sleep(150);
+    c.send(textFrame('slow first token'), doneFrame());
+  });
+  const instance = provider(t, mock, { sessionTtlMs: 50 });
+  const response = await instance.complete(body(), A);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).choices[0].message.content, 'slow first token');
+});
+
+test('idle TTL after a native tool result does not drop before the next Cursor token', async t => {
+  const mock = mockProtocol(c => c.send(execFrame()), async (c, record) => {
+    if (record.message[0].id === 5) {
+      await sleep(150);
+      c.send(textFrame('slow continuation'), doneFrame());
+    }
+  });
+  const instance = provider(t, mock, { sessionTtlMs: 50 });
+  const request = body();
+  const first = await (await instance.complete(request, A)).json();
+  const resumed = await instance.complete(continuation(request, first.choices[0].message), A);
+  assert.equal(resumed.status, 200);
+  assert.equal((await resumed.json()).choices[0].message.content, 'slow continuation');
+  assert.equal(mock.connections.size, 1);
+});
+
 test('SSE cancel after tool_calls keeps the parked exec for continuation', async t => {
   const mock = mockProtocol(c => c.send(execFrame()), (c, record) => {
     if (record.message[0].id === 5) c.send(textFrame('resumed after cancel'), doneFrame());
@@ -870,46 +932,6 @@ async function readSseEvent(reader) {
   const wire = new TextDecoder().decode(value).trim();
   assert.ok(wire.startsWith('data: '));
   return wire === 'data: [DONE]' ? '[DONE]' : JSON.parse(wire.slice(6));
-}
-
-for (const mode of ['abort', 'idle expiry']) {
-  for (const [queued, consumedCount] of [['text', 1], ['tool', 2], ['finish', 3]]) {
-    test(`${mode} after backpressured mandatory ${queued} suppresses all subsequent successful output`, async t => {
-      const mock = mockProtocol(c => c.send(textFrame('Buffered native text.'), execFrame()));
-      const instance = provider(t, mock, { sessionTtlMs: mode === 'idle expiry' ? 100 : 10000 });
-      const abort = new AbortController();
-      const request = body({ stream: true, tool_choice: 'required', stream_options: { include_usage: true } });
-      const response = await instance.complete(request, A, { signal: abort.signal });
-      const reader = response.body.getReader(), consumed = [];
-      for (let i = 0; i < consumedCount; i++) consumed.push(await readSseEvent(reader));
-      assert.equal(consumed[0].choices[0].delta.role, 'assistant');
-      // One queued chunk fills the stream: the generator is suspended at this yield.
-      await sleep(0);
-      const connection = [...mock.connections.values()][0];
-      assert.equal(connection.cancelled, false);
-      if (mode === 'abort') abort.abort('OFFLINE_SECRET_REASON');
-      else await sleep(150);
-      await sleep(0);
-      assert.equal(connection.cancelled, true);
-      const remaining = [];
-      for (let event; (event = await readSseEvent(reader)) !== undefined;) remaining.push(event);
-      // Already-enqueued output cannot be retracted; nothing successful may be newly emitted.
-      assert.equal(remaining.length, 3, 'Only the prior queued chunk, explicit cancellation error and DONE');
-      const prior = remaining[0].choices[0];
-      if (queued === 'text') assert.equal(prior.delta.content, 'Buffered native text.');
-      else if (queued === 'tool') assert.equal(prior.delta.tool_calls[0].id, 'call_Original-:/123');
-      else assert.equal(prior.finish_reason, 'tool_calls');
-      assert.equal(remaining[1].error.code, 'cancelled');
-      assert.equal(remaining[2], '[DONE]', 'DONE follows an error, not successful usage/finish');
-      assert.ok(!remaining.slice(1).some(e => e.choices), 'No newly emitted executable intent, finish or usage');
-      const message = { role: 'assistant', content: 'Buffered native text.', tool_calls: [
-        { id: 'call_Original-:/123', type: 'function', function: { name: toolName, arguments: JSON.stringify(args) } },
-      ] };
-      assert.equal((await instance.complete(continuation(request, message), A)).status, 409);
-      assert.equal(mock.appends.length, 1);
-      assert.equal(mock.connections.size, 1);
-    });
-  }
 }
 
 test('auto/none remote completion remains cancellable until successful SSE terminal release', async t => {

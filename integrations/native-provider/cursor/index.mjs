@@ -281,10 +281,21 @@ export function createCursorProvider({
     session.off = undefined;
     session.busy = false;
   }
+  // Native closes the first HTTP/SSE response as soon as it sees tool_calls.
+  // That abort must not drop the parked remote exec; only TTL/close/unparked cancel may.
+  function parkExec(session) {
+    detachHttp(session);
+    touch(session, parkedToolTimeoutMs);
+  }
   function touch(session, timeoutMs = sessionTtlMs) {
     clearTimeoutImpl(session.timer);
     session.timer = setTimeoutImpl(() => drop(session), timeoutMs);
     session.timer.unref?.();
+  }
+  // sessionTtlMs is HTTP backpressure only. Waiting on Cursor must not use it.
+  function clearIdle(session) {
+    clearTimeoutImpl(session.timer);
+    session.timer = undefined;
   }
   async function authResult(response, signal, oldRefresh) {
     if (response.status !== 200) { void response.body?.cancel().catch(() => {}); throw httpError(response.status); }
@@ -423,8 +434,10 @@ export function createCursorProvider({
       session.maxTimer = setTimeoutImpl(() => drop(session), maxSessionMs);
       session.maxTimer.unref?.();
     }
-    session.off = onAbort(signal, () => drop(session));
-    touch(session);
+    session.off = onAbort(signal, () => {
+      if (session.pending) parkExec(session);
+      else drop(session);
+    });
     try {
       if (last.role === 'tool') {
         if (last.name !== undefined && last.name !== session.pending.toolName) throw fail('continuation_mismatch', 'Native tool result name does not match the pending Cursor call.', 409);
@@ -432,6 +445,7 @@ export function createCursorProvider({
         session.base = base;
         session.pending = undefined;
         session.expected = undefined;
+        clearIdle(session);
       } else {
         // Apply the same permitted subset at registration and at the incoming exec boundary.
         session.connection = new Connection({ fetchImpl, token: c.accessToken, body: remoteBody(body), uuid, now, controller: session.controller });
@@ -452,12 +466,15 @@ export function createCursorProvider({
         checkSignal(session.controller.signal);
         if (result.done) throw fail('unexpected_eof', 'Cursor stream ended unexpectedly.');
         const event = result.value;
-        touch(session);
         if (event.type === 'text') {
           content += event.text;
           if (Buffer.byteLength(content) > 4 * 1024 * 1024) throw fail('size_limit', 'Cursor completion is too large.');
           // Mandatory choices cannot leak text-only success before a permitted intent is observed.
-          if (!mustCall) yield { delta: { content: event.text } };
+          if (!mustCall) {
+            touch(session);
+            yield { delta: { content: event.text } };
+            clearIdle(session);
+          }
         } else if (event.type === 'tool') {
           const exec = event.exec;
           if (!names.has(exec.toolName)) throw fail('unregistered_tool', 'Cursor requested a tool not permitted by the native engine tool definitions/choice; denied.', 502);
@@ -467,8 +484,8 @@ export function createCursorProvider({
           const call = { id: exec.toolCallId, type: 'function', function: { name: exec.toolName, arguments: JSON.stringify(exec.args) } };
           session.pending = exec;
           session.expected = { role: 'assistant', content: content || null, tool_calls: [call] };
+          parkExec(session);
           if (mustCall && content) yield { delta: { content } };
-          // Each yield can suspend behind HTTP backpressure while cancellation/TTL drops the session.
           checkSignal(session.controller.signal);
           yield { delta: { tool_calls: [{ index: 0, ...call }] } };
           checkSignal(session.controller.signal);
@@ -478,12 +495,17 @@ export function createCursorProvider({
         } else if (event.type === 'done') {
           if (mustCall) throw fail('tool_choice_unfulfilled', 'Cursor completed without the required native tool intent; denied.');
           // Normal cleanup waits for response release, so abort remains distinguishable from success.
+          touch(session);
           yield { finish_reason: 'stop', usage: event.usage };
           checkSignal(session.controller.signal);
           return;
         }
       }
-    } catch (e) { drop(session); throw safeError(e); }
+    } catch (e) {
+      if (session.pending) parkExec(session);
+      else drop(session);
+      throw safeError(e);
+    }
   }
   async function complete(input, inputCredential, { signal } = {}) {
     let session;
@@ -495,9 +517,8 @@ export function createCursorProvider({
       const id = `chatcmpl-${uuid()}`, created = Math.floor(now() / 1000);
       const iterator = turn(session, body);
       function release() {
-        detachHttp(session);
         if (sessions.has(session)) {
-          if (session.pending) touch(session, parkedToolTimeoutMs);
+          if (session.pending) parkExec(session);
           else drop(session); // A remote text completion no longer needs its connection.
         }
       }
@@ -540,15 +561,15 @@ export function createCursorProvider({
             }
           } catch (e) {
             terminal = true;
-            drop(session);
+            if (session.pending) parkExec(session);
+            else drop(session);
             try { emit(errorBody(e)); emit('[DONE]'); controller.close(); } catch { /* Response was cancelled. */ }
           }
         },
         cancel() {
           terminal = true;
           if (session.pending) {
-            detachHttp(session);
-            touch(session, parkedToolTimeoutMs);
+            parkExec(session);
             return;
           }
           drop(session);
@@ -557,7 +578,8 @@ export function createCursorProvider({
       });
       return new Response(stream, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' } });
     } catch (e) {
-      if (session) drop(session);
+      if (session?.pending) parkExec(session);
+      else if (session) drop(session);
       const error = safeError(e);
       return responseJSON(errorBody(error), error.status);
     }
