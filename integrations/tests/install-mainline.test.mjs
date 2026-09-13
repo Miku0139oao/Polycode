@@ -73,11 +73,11 @@ const stableHashes = [
 ];
 const candidateHashes = [
   installerHash,
-  '85f59f5c2a55a988d7916148f00b28c24179ba068f8889e504b0ab5ef7e29448',
-  'ce9321d5994cc71d3d5e2ee0042122a04779792f3f908fbad3cb6f7614c3004b',
-  '90799abc5782e21200b4c1b6488cece9b4c65a1e56b9e179a03596e67c6a4ce2',
+  '26ff9fe34094b34a4783982cd4e2d098b9703e99895019bc19e9540250dabc0f',
+  'c5af2a4d931d7bfd7c6ef358650e2440c47b842ad239218232aca0a8dabc302a',
+  '3528ec300d450eb43fd2db818b2f6f17658035bc67a6c5a3f27c81bef339689c',
   bunHash,
-  '72570e03334298e4984275c2115d6b6d69fb1f2271b465ab3e4e5609f5e64bda',
+  'cf7448ab15d90d411e40b27b3d3e98de1af41bf8a024a93f6082128da1e30f7b',
 ];
 
 test('Channel bootstrap pins Preview, Stable and Candidate hashes and does not enable official stable installation', () => {
@@ -89,8 +89,8 @@ test('Channel bootstrap pins Preview, Stable and Candidate hashes and does not e
   assert.match(text, /https:\/\/github\.com\/Miku0139oao\/Polycode\/releases\/download\/v0\.2\.1/);
   assert.match(text, /831e7375f88be4a346481c4b18d40cab8887f1d3/);
   assert.match(text, /34380813272/);
-  assert.match(text, /34641299942/);
-  assert.match(text, /afddba215c457445e0bdf04ecc4eb3c70864d54a/);
+  assert.match(text, /34776739503/);
+  assert.match(text, /533ce04a065c7c8e7e9a38c1b6949bca799879d8/);
   assert.match(text, /polycode-windows-candidate/);
   assert.match(text, /param\(\s*\[string\]\$InstallRoot,\s*\[string\]\$Action,\s*\[string\]\$Channel,\s*\[switch\]\$NoPath,\s*\[switch\]\$Force\s*\)/);
   assert.match(text, /\$IncludePath = -not \$NoPath/);
