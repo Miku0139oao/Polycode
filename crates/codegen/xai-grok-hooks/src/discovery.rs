@@ -59,6 +59,21 @@ impl HookRegistry {
 
     pub fn append_specs(&mut self, specs: Vec<HookSpec>) {
         for spec in specs {
+            if crate::paseo::should_skip_paseo_hook(&spec) {
+                tracing::info!(
+                    hook_name = %spec.name,
+                    "hooks: skipping Paseo product hook outside a Paseo-hosted session"
+                );
+                continue;
+            }
+            self.hooks.entry(spec.event).or_default().push(spec);
+        }
+    }
+
+    /// Test helper: insert specs without the Paseo-host filter so dispatch skip can be exercised.
+    #[cfg(test)]
+    pub(crate) fn append_specs_unfiltered(&mut self, specs: Vec<HookSpec>) {
+        for spec in specs {
             self.hooks.entry(spec.event).or_default().push(spec);
         }
     }
@@ -225,6 +240,13 @@ pub fn registry_from_specs_deduped(specs: Vec<HookSpec>) -> HookRegistry {
     let mut seen_content: HashMap<(HookEventName, String, String, String), (HookEventName, usize)> =
         HashMap::new();
     for spec in specs {
+        if crate::paseo::should_skip_paseo_hook(&spec) {
+            tracing::info!(
+                hook_name = %spec.name,
+                "hooks: skipping Paseo product hook outside a Paseo-hosted session"
+            );
+            continue;
+        }
         let key = (
             spec.event.canonical(),
             spec.command_raw.clone().unwrap_or_default(),
@@ -708,6 +730,85 @@ mod tests {
         assert_eq!(hooks.len(), 2);
         assert!(hooks[0].name.starts_with("global/"));
         assert!(hooks[1].name.starts_with("project/"));
+    }
+
+    #[test]
+    fn native_session_drops_paseo_product_hooks_from_claude_settings() {
+        if crate::paseo::paseo_host_session() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            r#"{
+                "hooks": {
+                    "UserPromptSubmit": [{
+                        "hooks": [{
+                            "type": "command",
+                            "command": "if [ -n \"$PASEO_TERMINAL_ID\" ]; then \"${PASEO_HOOK_CLI:-paseo}\" hooks claude UserPromptSubmit; fi"
+                        }]
+                    }],
+                    "Stop": [{
+                        "hooks": [{
+                            "type": "command",
+                            "command": "if [ -n \"$PASEO_TERMINAL_ID\" ]; then \"${PASEO_HOOK_CLI:-paseo}\" hooks claude Stop; fi"
+                        }]
+                    }],
+                    "SessionStart": [{
+                        "hooks": [{
+                            "type": "command",
+                            "command": "echo native"
+                        }]
+                    }]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let (registry, errors) =
+            load_hooks_from_sources(&[HookSource::SettingsFile(&settings)], &[]);
+        assert!(errors.is_empty(), "errors: {errors:?}");
+        assert!(
+            registry
+                .hooks_for(HookEventName::UserPromptSubmit)
+                .is_empty(),
+            "Paseo UserPromptSubmit hook must not load outside a Paseo host"
+        );
+        assert!(
+            registry.hooks_for(HookEventName::Stop).is_empty(),
+            "Paseo Stop hook must not load outside a Paseo host"
+        );
+        assert_eq!(registry.hooks_for(HookEventName::SessionStart).len(), 1);
+    }
+
+    #[test]
+    fn append_specs_drops_paseo_product_hooks_outside_a_paseo_host() {
+        if crate::paseo::paseo_host_session() {
+            return;
+        }
+        let mut registry = HookRegistry::default();
+        registry.append_specs(vec![crate::config::HookSpec {
+            name: "paseo-prompt".into(),
+            event: HookEventName::UserPromptSubmit,
+            handler_type: crate::config::HandlerType::Command,
+            configured_matcher: None,
+            matcher: None,
+            enabled: true,
+            command: Some(r#"if [ -n "$PASEO_TERMINAL_ID" ]; then echo x; fi"#.into()),
+            command_raw: Some(r#"if [ -n "$PASEO_TERMINAL_ID" ]; then echo x; fi"#.into()),
+            url: None,
+            url_raw: None,
+            timeout_ms: 5000,
+            source_dir: "/tmp".into(),
+            extra_env: std::collections::HashMap::new(),
+            layer: crate::config::HookProvenance::File,
+        }]);
+        assert!(
+            registry
+                .hooks_for(HookEventName::UserPromptSubmit)
+                .is_empty()
+        );
     }
 
     /// A byte-identical duplicate must not shadow a managed hook's provenance.

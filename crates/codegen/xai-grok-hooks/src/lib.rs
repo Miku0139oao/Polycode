@@ -43,6 +43,7 @@ mod env_expand;
 pub mod error;
 pub mod event;
 pub mod matcher;
+mod paseo;
 pub mod result;
 pub mod runner;
 #[cfg(test)]

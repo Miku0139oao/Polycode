@@ -81,6 +81,8 @@ fn paseo_host_session() -> bool {
         "PASEO_HOST",
         "PASEO_WORKSPACE",
         "PASEO_SESSION",
+        "PASEO_TERMINAL_ID",
+        "PASEO_HOOK_CLI",
     ];
     VARS.iter()
         .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
@@ -1502,7 +1504,11 @@ model: test-model
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
-        let paseo = tmp.path().join(".agents").join("skills").join("paseo-subagent");
+        let paseo = tmp
+            .path()
+            .join(".agents")
+            .join("skills")
+            .join("paseo-subagent");
         std::fs::create_dir_all(&paseo).unwrap();
         std::fs::write(
             paseo.join("SKILL.md"),

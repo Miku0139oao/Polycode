@@ -474,6 +474,63 @@ fn rewrite_hook_command_for_windows_shell<'a>(
     }
 }
 
+/// True when this `$VAR` / `${VAR}` is only a POSIX `[ -n … ]` / `[ -z … ]`
+/// (or `[[ … ]]`) presence test. Unset is a valid false, so the runner must
+/// not refuse to spawn. A later required use of the same name still fails.
+fn is_posix_presence_test(command: &str, r: &crate::env_expand::EnvVarRef<'_>) -> bool {
+    let bytes = command.as_bytes();
+    let quoted =
+        r.start > 0 && bytes[r.start - 1] == b'"' && r.end < bytes.len() && bytes[r.end] == b'"';
+    let token_start = if quoted { r.start - 1 } else { r.start };
+    let token_end = if quoted { r.end + 1 } else { r.end };
+
+    let mut i = token_start;
+    while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    if i < 2 {
+        return false;
+    }
+    let flag = &command[i - 2..i];
+    if flag != "-n" && flag != "-z" {
+        return false;
+    }
+    let flag_start = i - 2;
+    if flag_start > 0 {
+        let prev = bytes[flag_start - 1];
+        if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'-' {
+            return false;
+        }
+    }
+
+    let mut j = flag_start;
+    while j > 0 && bytes[j - 1].is_ascii_whitespace() {
+        j -= 1;
+    }
+    if j > 0 && bytes[j - 1] == b'!' {
+        j -= 1;
+        while j > 0 && bytes[j - 1].is_ascii_whitespace() {
+            j -= 1;
+        }
+    }
+
+    let double_open = j >= 2 && &command[j - 2..j] == "[[";
+    let single_open = j >= 1 && bytes[j - 1] == b'[';
+    if !double_open && !single_open {
+        return false;
+    }
+
+    let mut k = token_end;
+    while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+        k += 1;
+    }
+    if double_open {
+        command[k..].starts_with("]]")
+    } else {
+        k < bytes.len() && bytes[k] == b']'
+    }
+}
+
 fn find_unresolved_env_vars(
     command_str: &str,
     extra_env: &std::collections::HashMap<String, String>,
@@ -494,6 +551,9 @@ fn find_unresolved_env_vars(
             continue;
         }
         if locally_assigned.contains(r.name) {
+            continue;
+        }
+        if is_posix_presence_test(command_str, &r) {
             continue;
         }
         out.push(r.name.to_string());
@@ -2161,6 +2221,59 @@ mod tests {
         ] {
             let v = find_unresolved_env_vars(cmd, &env);
             assert!(v.is_empty(), "`{cmd}` should not flag any var, got {v:?}");
+        }
+    }
+
+    #[test]
+    fn find_unresolved_skips_posix_presence_tests() {
+        let env = std::collections::HashMap::new();
+        let cases = [
+            r#"if [ -n "$SOME_GB1183_OPTIONAL" ]; then echo hi; fi"#,
+            r#"if [ -z "${SOME_GB1183_OPTIONAL}" ]; then echo hi; fi"#,
+            r#"if [ ! -n "$SOME_GB1183_OPTIONAL" ]; then echo hi; fi"#,
+            r#"if [[ -n $SOME_GB1183_OPTIONAL ]]; then echo hi; fi"#,
+            r#"if [ -n "$PASEO_TERMINAL_ID" ]; then "${PASEO_HOOK_CLI:-paseo}" hooks claude UserPromptSubmit; fi"#,
+        ];
+        for case in cases {
+            let v = find_unresolved_env_vars(case, &env);
+            assert!(
+                v.is_empty(),
+                "presence-test `{case}` should not be flagged, got {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn find_unresolved_still_flags_required_use_alongside_presence_test() {
+        let env = std::collections::HashMap::new();
+        let v = find_unresolved_env_vars(
+            r#"if [ -n "$SOME_GB1183_BOTH" ]; then "$SOME_GB1183_BOTH/hook.sh"; fi"#,
+            &env,
+        );
+        assert_eq!(v, vec!["SOME_GB1183_BOTH".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn posix_presence_test_does_not_refuse_to_spawn() {
+        let spec = make_shell_spec(r#"if [ -n "$SOME_GB1183_OPTIONAL_SPAWN" ]; then echo hi; fi"#);
+        let envelope = make_envelope();
+        let ctx = make_ctx();
+        let (result, _, _) = run_command_hook(&spec, &envelope, &ctx, GateKind::Observe).await;
+        match result {
+            HookRunnerResult::Failed(reason) => {
+                assert!(
+                    !reason.contains("required env var"),
+                    "presence test must not be treated as a required env var, got: {reason}"
+                );
+            }
+            HookRunnerResult::Success
+            | HookRunnerResult::Allow { .. }
+            | HookRunnerResult::Ask { .. }
+            | HookRunnerResult::Defer
+            | HookRunnerResult::Deny { .. }
+            | HookRunnerResult::Block { .. }
+            | HookRunnerResult::Stop(_)
+            | HookRunnerResult::PostToolUse { .. } => {}
         }
     }
 

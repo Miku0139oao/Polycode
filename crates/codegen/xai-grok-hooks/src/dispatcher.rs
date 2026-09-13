@@ -38,6 +38,16 @@ fn eligible_or_record_skip(
             return false;
         }
     }
+    if crate::paseo::should_skip_paseo_hook(spec) {
+        tracing::info!(
+            hook_name = %spec.name,
+            "hook skipped (Paseo product hook outside a Paseo-hosted session)"
+        );
+        results.push(HookRunResult::Skipped {
+            hook_name: spec.name.clone(),
+        });
+        return false;
+    }
     crate::matcher::matcher_allows(spec.matcher.as_ref(), match_value)
 }
 
@@ -978,6 +988,7 @@ pub fn hub_hook_kind(event: HookEventName) -> Option<String> {
 mod tests {
     use super::*;
     use crate::config::HookSpec;
+    use crate::discovery::HookRegistry;
     use crate::event::{HookEventEnvelope, HookEventName, HookPayload};
     use crate::matcher::HookMatcher;
     use std::collections::HashMap;
@@ -1513,6 +1524,26 @@ mod tests {
         let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
         assert_eq!(result.decision, PromptDecision::Allow);
         assert!(matches!(result.results[0], HookRunResult::Failed { .. }));
+    }
+
+    #[tokio::test]
+    async fn prompt_gate_skips_paseo_hook_outside_a_paseo_host() {
+        if crate::paseo::paseo_host_session() {
+            return;
+        }
+        let spec = make_prompt_spec(
+            "paseo-prompt",
+            r#"if [ -n "$PASEO_TERMINAL_ID" ]; then echo x; fi"#,
+        );
+        let mut registry = HookRegistry::default();
+        registry.append_specs_unfiltered(vec![spec]);
+        let result = dispatch_prompt_gate(&registry, &prompt_submit_envelope(), &run_ctx()).await;
+        assert_eq!(result.decision, PromptDecision::Allow);
+        assert!(
+            matches!(result.results[0], HookRunResult::Skipped { .. }),
+            "Paseo UserPromptSubmit must skip, not fail, outside a Paseo host; got {:?}",
+            result.results[0]
+        );
     }
 
     #[tokio::test]
